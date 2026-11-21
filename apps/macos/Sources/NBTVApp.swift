@@ -2,12 +2,33 @@
 import AppKit
 import SwiftUI
 
+/// 這個 app 叫什麼。同一台電腦要同時開兩個（兩部電台互相收發）時，第二個 app 是另一個 bundle：
+/// 名稱與識別碼不同，設定與系統的權限也就各存各的（見 CMakeLists.txt 的 NBTV_MACOS_SECOND_APP）。
+/// 視窗上的名稱取自 bundle，才看得出眼前這個視窗是哪一個 app 的。
+enum AppIdentity {
+    /// 顯示在主視窗頂列的名稱：「短波 NBTV」或「短波 NBTV 2」
+    static let name = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "短波 NBTV"
+    /// 第二個 app 才有的編號（「2」）；一般的 app 沒有
+    static let instance = Bundle.main.object(forInfoDictionaryKey: "NBTVInstance") as? String
+    /// 設定視窗的標題：第二個 app 要標明是誰的設定
+    static let settingsTitle = instance == nil ? "設定" : "設定 — \(name)"
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 結束前要放開 PTT，所以需要找得到目前的狀態物件
     static weak var model: AppModel?
     private var signalSources: [DispatchSourceSignal] = []
+    /// 整個執行期間都握著，系統才不會把 app 當成閒置
+    private var activity: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // 視窗被蓋住、隱藏或縮進 Dock 時，系統會讓沒在出聲的 app 打盹（App Nap），計時器跟著被拖慢；
+        // 收音是靠計時器把緩衝裡的取樣取走的，拖太久緩衝會滿出來，收到一半的幀就斷了。
+        // 同時開兩個 app 對傳時一定有一個不在最前面，所以整個執行期間都宣告正在做即時的工作。
+        // 系統閒置時要不要睡眠不受影響。
+        activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
+                                                         reason: "即時收發音訊")
+
         // 被要求結束（kill、終端機的 Ctrl-C）時也走正常的結束流程，才會放開 PTT；預設的處理是當場結束行程
         for number in [SIGTERM, SIGINT] {
             signal(number, SIG_IGN)
@@ -39,7 +60,7 @@ struct NBTVApp: App {
     }
 
     var body: some Scene {
-        Window("短波 NBTV", id: "main") {
+        Window(AppIdentity.name, id: "main") {
             // 內容會延伸到標題列底下（標題列高 titleBar），所以排版區的高度要扣掉它，
             // 整個視窗才是版面稿的 1280×840；最小可以縮到 1100×820。
             MainWindowView()
@@ -59,7 +80,7 @@ struct NBTVApp: App {
             CommandGroup(replacing: .appSettings) { OpenSettingsCommand() }
         }
 
-        Window("設定", id: "settings") {
+        Window(AppIdentity.settingsTitle, id: "settings") {
             SettingsView(height: 700 - NBTVApp.titleBar)
                 .environmentObject(model)
                 .ignoresSafeArea()

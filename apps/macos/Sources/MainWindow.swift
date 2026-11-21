@@ -45,7 +45,7 @@ struct HeaderBar: View {
                 } else {
                     Color.clear.frame(width: TitlebarMetrics.buttonsWidth, height: 12).accessibilityHidden(true)
                 }
-                Text("短波 NBTV").font(Theme.ui(13, .semibold))
+                Text(AppIdentity.name).font(Theme.ui(13, .semibold))
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 

@@ -40,6 +40,7 @@ macOS 外殼另外開一個建置目錄，細節見 [apps/macos/README.md](apps/
 ```sh
 cmake -S . -B build-app -G Ninja -DNBTV_BUILD_MACOS_APP=ON
 cmake --build build-app
+# 同一台電腦要同時開兩個（兩部電台互相收發）：設定時再加 -DNBTV_MACOS_SECOND_APP=ON，會多做出 NBTV 2.app
 ```
 
 ## 命令列工具

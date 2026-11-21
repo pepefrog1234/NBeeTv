@@ -43,7 +43,7 @@ struct SettingsView: View {
             }
             .frame(width: side, alignment: .leading)
             .accessibilityHidden(true)
-            Text("設定").font(Theme.ui(13, .semibold)).frame(maxWidth: .infinity)
+            Text(AppIdentity.settingsTitle).font(Theme.ui(13, .semibold)).frame(maxWidth: .infinity)
             Color.clear.frame(width: side, height: 1)
         }
         .padding(.horizontal, 16)

@@ -84,3 +84,23 @@ add_custom_command(TARGET nbtv_mac POST_BUILD
   COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:nbtv_mac>"
   COMMENT "複製資源並做 ad-hoc 簽章：NBTV.app"
   VERBATIM)
+
+# 第二個 app（-DNBTV_MACOS_SECOND_APP=ON）：同一台電腦要同時開兩個、兩部電台互相收發時用。
+# 內容是 NBTV.app 的複本，程式完全相同，只改 Info.plist 的名稱與識別碼再重新簽章；
+# 識別碼不同，設定（UserDefaults）與系統的麥克風、相機權限就各自獨立。
+# NBTVInstance 是自己加的鍵：程式看到它，就在設定視窗的標題標明是哪一個 app。
+if(NBTV_MACOS_SECOND_APP)
+  set(NBTV_APP2_DIR "${CMAKE_CURRENT_BINARY_DIR}/NBTV 2.app")
+  set(NBTV_APP2_PLIST "${NBTV_APP2_DIR}/Contents/Info.plist")
+  add_custom_target(nbtv_mac2 ALL
+    COMMAND ${CMAKE_COMMAND} -E rm -rf "${NBTV_APP2_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "$<TARGET_BUNDLE_DIR:nbtv_mac>" "${NBTV_APP2_DIR}"
+    COMMAND plutil -replace CFBundleIdentifier -string "tw.hf-nbtv.mac2" "${NBTV_APP2_PLIST}"
+    COMMAND plutil -replace CFBundleName -string "NBTV 2" "${NBTV_APP2_PLIST}"
+    COMMAND plutil -replace CFBundleDisplayName -string "短波 NBTV 2" "${NBTV_APP2_PLIST}"
+    COMMAND plutil -replace NBTVInstance -string "2" "${NBTV_APP2_PLIST}"
+    COMMAND codesign --force --sign - "${NBTV_APP2_DIR}"
+    COMMENT "複製成第二個 app 並重新簽章：NBTV 2.app"
+    VERBATIM)
+  add_dependencies(nbtv_mac2 nbtv_mac)
+endif()
