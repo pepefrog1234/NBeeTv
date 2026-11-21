@@ -1,0 +1,176 @@
+// 核對 OFDM 參數、導頻位置與模式表：期望值都抄自規格草案 v0.1。
+#include <cstring>
+
+#include "check.hpp"
+#include "modes.hpp"
+#include "nbtv/nbtv.h"
+
+using namespace nbtv;
+
+namespace {
+
+// 規格草案「數位模式：模式表」。
+struct DigitalRow {
+    int id, bits_per_cell, rate_num, rate_den;
+    int payload_symbols, frame_symbols;
+    double seconds;
+    int ldpc_info_bits, payload_bytes, image_bytes, padding_cells;
+    double net_kbps;
+};
+const DigitalRow kDigitalSpec[] = {
+    {0, 2, 1, 4, 200, 202, 5.387, 3240, 401, 393, 33, 0.60},    // QPSK 1/4
+    {1, 2, 1, 2, 200, 202, 5.387, 7200, 896, 888, 33, 1.33},    // QPSK 1/2
+    {2, 2, 3, 4, 200, 202, 5.387, 11880, 1481, 1473, 33, 2.20}, // QPSK 3/4
+    {3, 4, 1, 2, 100, 102, 2.720, 7200, 896, 888, 17, 2.64},    // 16QAM 1/2
+    {4, 4, 3, 4, 100, 102, 2.720, 11880, 1481, 1473, 17, 4.36}, // 16QAM 3/4
+    {5, 6, 2, 3, 67, 69, 1.840, 10800, 1346, 1338, 25, 5.85},   // 64QAM 2/3
+};
+
+// 規格草案「類比模式：相干類比」。
+struct AnalogRow {
+    int id, payload_symbols, frame_symbols;
+    double seconds;
+    int coefficient_cells;  // 資料格數扣掉標頭的 176 格
+};
+const AnalogRow kAnalogSpec[] = {
+    {8, 37, 39, 1.040, 1329},
+    {9, 100, 102, 2.720, 3891},
+    {10, 200, 202, 5.387, 7957},
+};
+
+void test_ofdm_parameters() {
+    CHECK_EQ(kSymbolSamples, 320);
+    CHECK_EQ(kCarriers, 49);
+    CHECK_NEAR(kCarrierSpacingHz, 46.875, 1e-12);
+    CHECK_NEAR(1000.0 * kFftSize / kSampleRate, 21.333, 0.001);        // 有效符號長 (ms)
+    CHECK_NEAR(1000.0 * kCyclicPrefix / kSampleRate, 5.333, 0.001);    // 循環字首 (ms)
+    CHECK_NEAR(1000.0 * kSymbolSamples / kSampleRate, 26.667, 0.001);  // 符號長 (ms)，每秒 37.5 個符號
+    CHECK_NEAR(bin_frequency_hz(kFirstBin), 375.0, 1e-9);
+    CHECK_NEAR(bin_frequency_hz(kLastBin), 2625.0, 1e-9);
+    // 佔用頻寬 352–2648 Hz：兩端各多半個載波間隔
+    CHECK_NEAR(bin_frequency_hz(kFirstBin) - kCarrierSpacingHz / 2, 352.0, 0.5);
+    CHECK_NEAR(bin_frequency_hz(kLastBin) + kCarrierSpacingHz / 2, 2648.0, 0.5);
+}
+
+void test_pilots() {
+    CHECK_EQ(pilots_in_symbol(0), 8);
+    CHECK_EQ(pilots_in_symbol(1), 9);
+    CHECK_EQ(pilots_in_symbol(2), 8);
+    CHECK_EQ(data_cells_in_symbol(0), 41);
+    CHECK_EQ(data_cells_in_symbol(1), 40);
+    CHECK_EQ(data_cells_in_symbol(2), 41);
+    CHECK_EQ(data_cells(3), 122);
+    // data_cells() 的算式和逐個符號相加的結果一致
+    int sum = 0;
+    for (int n = 0; n <= 210; ++n) {
+        CHECK_EQ(data_cells(n), sum);
+        sum += data_cells_in_symbol(n);
+    }
+    for (int j = 3; j < 12; ++j) CHECK_EQ(pilots_in_symbol(j), pilots_in_symbol(j % 3));
+    // 連續三個符號裡，偶數載波各當一次導頻，奇數載波從不當導頻
+    for (int k = kFirstBin; k <= kLastBin; ++k) {
+        const int times = (is_pilot(0, k) ? 1 : 0) + (is_pilot(1, k) ? 1 : 0) + (is_pilot(2, k) ? 1 : 0);
+        CHECK_EQ(times, k % 2 == 0 ? 1 : 0);
+    }
+    // 導頻佔 17%
+    CHECK_NEAR((8 + 9 + 8) / (3.0 * kCarriers), 0.17, 0.005);
+}
+
+void test_digital_modes() {
+    for (const DigitalRow& row : kDigitalSpec) {
+        const Mode* m = find_mode(row.id);
+        CHECK(m != nullptr);
+        if (m == nullptr) continue;
+        CHECK(m->kind == ModeKind::Digital);
+        CHECK_EQ(m->bits_per_cell, row.bits_per_cell);
+        CHECK_EQ(m->rate_num, row.rate_num);
+        CHECK_EQ(m->rate_den, row.rate_den);
+        CHECK_EQ(m->payload_symbols, row.payload_symbols);
+        CHECK_EQ(m->frame_symbols(), row.frame_symbols);
+        CHECK_NEAR(m->frame_seconds(), row.seconds, 0.0005);
+        CHECK_EQ(m->ldpc_info_bits, row.ldpc_info_bits);
+        CHECK_EQ(m->payload_bytes(), row.payload_bytes);
+        CHECK_EQ(m->image_bytes(), row.image_bytes);
+        CHECK_EQ(m->padding_cells(), row.padding_cells);
+        CHECK_EQ(m->coded_cells() * m->bits_per_cell, kLdpcCodewordBits);
+        CHECK_EQ(m->coded_cells() + m->padding_cells(), m->data_cells());
+        // 淨位元率 = CRC 保護的位元數 ÷ 每幀時間
+        CHECK_NEAR(m->payload_bytes() * 8 / m->frame_seconds() / 1000.0, row.net_kbps, 0.005);
+        CHECK_EQ(m->header_cells(), 0);
+        CHECK_EQ(m->analog_values(), 0);
+    }
+}
+
+void test_analog_modes() {
+    for (const AnalogRow& row : kAnalogSpec) {
+        const Mode* m = find_mode(row.id);
+        CHECK(m != nullptr);
+        if (m == nullptr) continue;
+        CHECK(m->kind == ModeKind::Analog);
+        CHECK_EQ(m->payload_symbols, row.payload_symbols);
+        CHECK_EQ(m->frame_symbols(), row.frame_symbols);
+        CHECK_NEAR(m->frame_seconds(), row.seconds, 0.0005);
+        CHECK_EQ(m->header_cells(), 176);
+        CHECK_EQ(m->analog_cells(), row.coefficient_cells);
+        CHECK_EQ(m->analog_values(), 2 * row.coefficient_cells);
+        CHECK_EQ(m->payload_bytes(), 0);
+        CHECK_EQ(m->image_bytes(), 0);
+        CHECK_EQ(m->padding_cells(), 0);
+    }
+}
+
+void test_undefined_ids() {
+    for (int id : {-1, 6, 7, 11, 15, 16}) CHECK(find_mode(id) == nullptr);
+}
+
+void test_c_api() {
+    CHECK(std::strcmp(nbtv_version_string(), "0.1.0") == 0);
+    CHECK_EQ(nbtv_mode_count(), 9);
+    for (int i = 0; i < nbtv_mode_count(); ++i) {
+        nbtv_mode_info a{};
+        nbtv_mode_info b{};
+        CHECK_EQ(nbtv_mode_at(i, &a), 0);
+        CHECK_EQ(nbtv_mode_by_id(a.id, &b), 0);
+        const Mode* m = find_mode(a.id);
+        CHECK(m != nullptr);
+        if (m == nullptr) continue;
+        CHECK_EQ(b.id, a.id);
+        CHECK(a.kind == (m->is_digital() ? NBTV_MODE_DIGITAL : NBTV_MODE_ANALOG));
+        CHECK_EQ(a.payload_symbols, m->payload_symbols);
+        CHECK_EQ(a.frame_symbols, m->frame_symbols());
+        CHECK_EQ(a.frame_samples, m->frame_samples());
+        CHECK_NEAR(a.frame_seconds, m->frame_seconds(), 1e-12);
+        CHECK_EQ(a.data_cells, m->data_cells());
+        CHECK_EQ(a.bits_per_cell, m->bits_per_cell);
+        CHECK_EQ(a.code_rate_num, m->rate_num);
+        CHECK_EQ(a.code_rate_den, m->rate_den);
+        CHECK_EQ(a.ldpc_info_bits, m->ldpc_info_bits);
+        CHECK_EQ(a.payload_bytes, m->payload_bytes());
+        CHECK_EQ(a.image_bytes, m->image_bytes());
+        CHECK_EQ(a.padding_cells, m->padding_cells());
+        CHECK_EQ(a.header_cells, m->header_cells());
+        CHECK_EQ(a.analog_values, m->analog_values());
+        CHECK((a.analog_coefficients > 0) == !m->is_digital());
+        CHECK(a.analog_coefficients <= a.analog_values);
+        CHECK_EQ(b.frame_samples, a.frame_samples);
+        CHECK_EQ(b.image_bytes, a.image_bytes);
+    }
+    nbtv_mode_info x{};
+    CHECK_EQ(nbtv_mode_at(-1, &x), -1);
+    CHECK_EQ(nbtv_mode_at(nbtv_mode_count(), &x), -1);
+    CHECK_EQ(nbtv_mode_at(0, nullptr), -1);
+    CHECK_EQ(nbtv_mode_by_id(6, &x), -1);
+    CHECK_EQ(nbtv_mode_by_id(1, nullptr), -1);
+}
+
+}  // namespace
+
+int main() {
+    test_ofdm_parameters();
+    test_pilots();
+    test_digital_modes();
+    test_analog_modes();
+    test_undefined_ids();
+    test_c_api();
+    return check::finish("modes");
+}

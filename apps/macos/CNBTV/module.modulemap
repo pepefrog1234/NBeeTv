@@ -1,0 +1,5 @@
+// Swift 匯入核心 C API 用的模組。
+module CNBTV {
+    header "nbtv_shim.h"
+    export *
+}

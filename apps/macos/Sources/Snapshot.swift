@@ -1,0 +1,250 @@
+// 開發用：--snapshot <目錄>。不開音訊裝置、不要求權限，把五張版面各算成一張 PNG，用來對照版面稿。
+// 畫面、縮圖、狀態與瀑布圖都是把內附的測試圖真的經過核心收發算出來的。
+import AppKit
+import SwiftUI
+
+enum SnapshotRunner {
+    private static var failures = 0
+
+    static func run(outputDirectory: String) -> Int32 {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.prohibited)
+        let directory = URL(fileURLWithPath: outputDirectory, isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        guard let coffee = Demo.testImage("coffee"), let rocket = Demo.testImage("rocket"), let cat = Demo.testImage("cat") else {
+            print("[snapshot] 找不到內附的測試圖")
+            return 1
+        }
+        guard NBTV.hasImageCodec else {
+            print("[snapshot] 這個建置沒有影像編解碼器，無法產生數位模式的示範資料")
+            return 1
+        }
+
+        // 1. 接收中
+        let receiving = makeReceivingModel(coffee: coffee, rocket: rocket, cat: cat)
+        render(MainWindowView(placeholderControls: true).environmentObject(receiving), width: 1280, height: 840,
+               to: directory.appendingPathComponent("1-receiving.png"))
+
+        // 開發用：設了 NBTV_SNAPSHOT_EXTRA_SIZE=寬x高 時，多算一張其他視窗大小的「接收中」，用來檢查版面縮放
+        if let extra = ProcessInfo.processInfo.environment["NBTV_SNAPSHOT_EXTRA_SIZE"] {
+            let parts = extra.split(separator: "x").compactMap { Double($0) }
+            if parts.count == 2 {
+                render(MainWindowView(placeholderControls: true).environmentObject(receiving), width: parts[0], height: parts[1],
+                       to: directory.appendingPathComponent("extra-\(Int(parts[0]))x\(Int(parts[1])).png"))
+            }
+        }
+
+        // 2. 發射中
+        let transmitting = makeTransmittingModel(coffee: coffee, rocket: rocket, cat: cat, history: receiving.history)
+        render(MainWindowView(placeholderControls: true).environmentObject(transmitting), width: 1280, height: 840,
+               to: directory.appendingPathComponent("2-transmitting.png"))
+
+        // 3. 待機接收＋影片檔來源
+        let idle = makeIdleModel(rocket: rocket, workDirectory: directory)
+        render(MainWindowView(placeholderControls: true).environmentObject(idle), width: 1280, height: 840,
+               to: directory.appendingPathComponent("3-idle-video.png"))
+
+        // 4. 設定
+        render(SettingsView(placeholderControls: true).environmentObject(receiving), width: 560, height: 700,
+               to: directory.appendingPathComponent("4-settings.png"))
+
+        // 5. 發射模式選單
+        let menu = ModeMenuView(selectedID: 1, standalone: true) { _ in }
+            .padding(16)
+            .frame(width: 400, height: 470, alignment: .top)
+            .background(Theme.background)
+        render(menu, width: 400, height: 470, to: directory.appendingPathComponent("5-mode-menu.png"))
+
+        print(failures == 0 ? "[snapshot] 完成：\(directory.path)" : "[snapshot] 有 \(failures) 張沒有算出來")
+        return failures == 0 ? 0 : 1
+    }
+
+    // MARK: 示範資料
+
+    private static func demoSettings(source: SourceKind) -> AppSettings {
+        let settings = AppSettings(store: nil)
+        settings.callsign = "BX4ACP"
+        settings.outputLevelDb = -6
+        settings.pttMode = .serial
+        settings.serialPort = "/dev/cu.usbserial-1420"
+        settings.serialLine = .rts
+        settings.txModeID = 1
+        settings.sourceKind = source
+        return settings
+    }
+
+    private static func time(_ hour: Int, _ minute: Int, _ second: Int) -> Date {
+        Calendar.current.date(bySettingHour: hour, minute: minute, second: second, of: Date()) ?? Date()
+    }
+
+    /// 對方（N0CALL）先後用類比 8、類比 9、數位 3 傳了幾張；我們從數位那一段的第 10 張開始收，目前第 13 張收到一半。
+    private static func makeReceivingModel(coffee: Data, rocket: Data, cat: Data) -> AppModel {
+        let model = AppModel(settings: demoSettings(source: .camera), live: false)
+        model.refreshDevices()
+
+        var audio = Demo.silence(seconds: 0.6)
+        var signal: [Float] = []
+        func session(mode: Int, images: [Data], keepFrom: Int = 0, partial: Int? = nil) -> [Float] {
+            let tx = CoreTransmitter()
+            tx.setMode(mode)
+            tx.setCallsign("N0CALL")
+            var out: [Float] = []
+            for (index, image) in images.enumerated() {
+                guard let frame = tx.encode(rgb: image) else { continue }
+                if index < keepFrom { continue }
+                if index == images.count - 1, let partial {
+                    out += frame.samples[0..<min(partial, frame.samples.count)]
+                } else {
+                    out += frame.samples
+                }
+            }
+            if partial == nil { out += tx.finish() }
+            return out
+        }
+        let analogFast = session(mode: 8, images: [coffee])
+        let analogMedium = session(mode: 9, images: [rocket, cat])
+        // 數位 3：共 13 張，只收第 10–12 張，以及第 13 張的前 61 個符號
+        let cycle = [coffee, rocket, cat]
+        let symbolSamples = Modes.find(3).map { Int(($0.frameSeconds * Double(NBTV.sampleRate) / Double($0.frameSymbols)).rounded()) } ?? 1280
+        let digital = session(mode: 3, images: (0..<13).map { cycle[$0 % 3] }, keepFrom: 9, partial: 61 * symbolSamples)
+        signal = analogFast + analogMedium + digital
+        // 兩次發射之間的空檔。開發用：NBTV_SNAPSHOT_GAP=秒數 可以換成別的長度——不論多長，接收機都應該解出 6 張
+        // （核心曾經在 0.75–0.81 秒這幾個長度漏掉下一張或多交出一張，回歸測試在 core/tests/test_link.cpp）
+        let gap = ProcessInfo.processInfo.environment["NBTV_SNAPSHOT_GAP"].flatMap(Double.init) ?? 0.8
+        audio += analogFast + Demo.silence(seconds: gap) + analogMedium + Demo.silence(seconds: 6.5) + digital
+
+        // 訊雜比 14 dB、電台偏了 +12 Hz、輸入音量約 −18 dB
+        let received = Demo.radioChannel(audio, signalPower: Demo.power(signal), snrDb: 14, shiftHz: 12, outputLevelDb: -18)
+        // 照實際接收的順序把每一塊的更新交給介面的狀態物件；時間用示範的鐘點
+        let times = [time(14, 19, 58), time(14, 20, 12), time(14, 20, 15), time(14, 32, 1), time(14, 32, 4), time(14, 32, 7)]
+        var decoded = 0
+        var last = RxUpdate()
+        var log: [String] = []
+        for update in Demo.receive(received) {
+            var status = update
+            status.frames = []
+            model.apply(status)
+            for frame in update.frames {
+                model.add(frame, time: times[min(decoded, times.count - 1)])
+                if frame.decoded { decoded += 1 }
+                log.append("\(Modes.find(frame.modeID)?.name ?? "模式 \(frame.modeID)")\(frame.decoded ? "" : "（解碼失敗）")"
+                    + (frame.headerOK ? " \(frame.callsign) 第 \(frame.sequence + 1) 張" : " 標頭錯誤"))
+            }
+            last = update
+        }
+        if decoded != times.count {
+            print("[snapshot] 注意：預期解出 \(times.count) 張，實際 \(decoded) 張。接收機依序交出：" + log.joined(separator: "、"))
+        }
+        print(String(format: "[snapshot] 接收：解出 %d 張，同步 %@，訊雜比 %.1f dB，頻偏 %+.1f Hz，進度 %d/%d，輸入 %.1f dB", decoded,
+                     last.synced ? "是" : "否", last.snrDb, last.offsetHz, last.symbolsDone, last.symbolsTotal, last.inputLevelDb))
+        if let source = NBTV.image(fromRGB: coffee), let scaled = FrameScaler.scale(source, mode: .fill) {
+            model.sourcePreview = NBTV.image(fromRGB: scaled)
+            model.sourceSize = CGSize(width: source.width, height: source.height)
+        }
+        return model
+    }
+
+    /// 我們（BX4ACP）用數位 1 發射：已送出 8 張，第 9 張送到 3.2 秒。
+    private static func makeTransmittingModel(coffee: Data, rocket: Data, cat: Data, history: [AppModel.ReceivedFrame]) -> AppModel {
+        let model = AppModel(settings: demoSettings(source: .camera), live: false)
+        model.refreshDevices()
+        model.history = history
+        let tx = CoreTransmitter()
+        tx.setMode(1)
+        tx.setCallsign("BX4ACP")
+        let cycle = [rocket, cat, coffee]
+        let frames = (0..<9).compactMap { tx.encode(rgb: cycle[$0 % 3]) }
+        guard let current = frames.last, let mode = Modes.find(1) else { return model }
+        let progress = 3.2
+        model.txPhase = .transmitting
+        model.txModeID = 1
+        model.txFrameNumber = frames.count
+        model.txFramesSent = frames.count - 1
+        model.txFrameProgress = progress
+        model.txElapsed = Double(frames.count - 1) * mode.frameSeconds + progress
+        model.txPreview = NBTV.image(fromRGB: current.preview)
+        model.txBytes = current.imageBytes
+        // 瀑布圖：送出去的訊號（前面幾張加上目前這張的前 3.2 秒）
+        var sent: [Float] = []
+        for frame in frames.dropLast().suffix(3) { sent += frame.samples }
+        sent += current.samples[0..<Int(progress * Double(NBTV.sampleRate))]
+        let gain = Float(pow(10.0, model.settings.outputLevelDb / 20.0))
+        let rows = Demo.monitorRows(sent.map { $0 * gain })
+        model.appendSpectrum(rows, reference: .transmit)
+        print("[snapshot] 發射：第 \(frames.count) 張，壓縮後 \(current.imageBytes) 位元組，瀑布圖 \(rows.count) 列")
+        if let source = NBTV.image(fromRGB: coffee), let scaled = FrameScaler.scale(source, mode: .fill) {
+            model.sourcePreview = NBTV.image(fromRGB: scaled)
+            model.sourceSize = CGSize(width: source.width, height: source.height)
+        }
+        return model
+    }
+
+    /// 沒有訊號，只有電台通帶內的雜訊；發射來源選影片檔。
+    private static func makeIdleModel(rocket: Data, workDirectory: URL) -> AppModel {
+        let model = AppModel(settings: demoSettings(source: .video), live: false)
+        model.refreshDevices()
+        let noise = Demo.radioChannel(Demo.silence(seconds: 22), signalPower: 0, snrDb: nil, shiftHz: 0, noiseOnlyLevelDb: -32, seed: 7)
+        var falseFrames = 0
+        var last = RxUpdate()
+        for update in Demo.receive(noise) {
+            falseFrames += update.frames.count
+            model.apply(update)
+            last = update
+        }
+        print(String(format: "[snapshot] 待機：同步 %@，誤解出 %d 張，輸入 %.1f dB", last.synced ? "是" : "否", falseFrames, last.inputLevelDb))
+
+        // 影片檔來源：用測試圖做一段 38 秒的影片，照正常流程開啟、跳到 12 秒、取那一格
+        let url = workDirectory.appendingPathComponent("rocket_launch.mp4")
+        if let image = NBTV.image(fromRGB: rocket), Demo.makeVideo(at: url, from: image) {
+            var opened: Bool?
+            model.openVideo(url, autoplay: false) { opened = $0 }
+            _ = Demo.wait(timeout: 10) { opened != nil }
+            if opened == true {
+                model.scrubVideo(to: 12, editing: false)
+                let got = Demo.wait(timeout: 10) { model.demoGrabVideoFrame() }
+                print("[snapshot] 影片檔：\(url.lastPathComponent)，長度 \(AppModel.clock(model.videoDuration))，取到畫面：\(got ? "是" : "否")")
+            } else {
+                print("[snapshot] 注意：示範影片無法開啟")
+            }
+        } else {
+            print("[snapshot] 注意：示範影片做不出來")
+        }
+        return model
+    }
+
+    // MARK: 算圖
+
+    private static func render<V: View>(_ view: V, width: CGFloat, height: CGFloat, to url: URL) {
+        let size = CGSize(width: width, height: height)
+        let host = NSHostingView(rootView: view.frame(width: width, height: height))
+        host.frame = CGRect(origin: .zero, size: size)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        Demo.spin(0.3)
+        host.layoutSubtreeIfNeeded()
+        let scale: CGFloat = 2
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(width * scale), pixelsHigh: Int(height * scale),
+                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                         colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else {
+            failures += 1
+            return
+        }
+        rep.size = size
+        host.cacheDisplay(in: host.bounds, to: rep)
+        guard let png = rep.representation(using: .png, properties: [:]) else {
+            failures += 1
+            return
+        }
+        do {
+            try png.write(to: url)
+            print("[snapshot] \(url.lastPathComponent)（\(Int(width))×\(Int(height))）")
+        } catch {
+            print("[snapshot] 無法寫入 \(url.path)：\(error.localizedDescription)")
+            failures += 1
+        }
+        window.contentView = nil
+    }
+}

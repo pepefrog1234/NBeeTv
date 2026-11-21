@@ -1,0 +1,25 @@
+# 建置輸出
+/build/
+/build-*/
+/cmake-build-*/
+.build/
+DerivedData/
+*.o
+*.a
+*.dSYM/
+
+# Xcode / SwiftPM
+xcuserdata/
+*.xcuserstate
+.swiftpm/
+
+# 編輯器與系統
+.DS_Store
+.vscode/
+.idea/
+
+# clangd 用的編譯指令（指向 build/）
+/compile_commands.json
+
+# clangd 的索引
+/.cache/
