@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "args.hpp"
+#include "model_file.hpp"
 #include "nbtv/nbtv.h"
 #include "ppm.hpp"
 #include "wav.hpp"
@@ -15,7 +16,8 @@ int main(int argc, char** argv) {
         std::printf(
             "用法：nbtv-tx [選項] 影像.ppm [影像2.ppm …]\n"
             "  --out 檔名      輸出的 WAV（預設 nbtv.wav）\n"
-            "  --mode N        模式編號：數位 0–5、類比 8–10（預設 1）\n"
+            "  --mode N        模式編號：數位 0–5、類比 8–10、學習式 11（預設 1）\n"
+            "  --model 檔名    學習式模式的權重檔（預設用專案 models/ 裡的）\n"
             "  --call 呼號     最多 9 個字元\n"
             "  --frames N      總共送幾幀，影像輪流使用（預設：每張影像一幀）\n"
             "  --rate N        取樣率 12000 或 48000（預設 48000）\n"
@@ -37,6 +39,17 @@ int main(int argc, char** argv) {
     if (nbtv_tx_set_mode(tx, mode_id) != 0 || nbtv_mode_by_id(mode_id, &mode) != 0) {
         std::fprintf(stderr, "沒有模式 %d\n", mode_id);
         return 2;
+    }
+    if (mode.kind == NBTV_MODE_LEARNED) {
+        const std::string model_path = args.str("model", default_model_path());
+        std::vector<std::uint8_t> bytes;
+        nbtv_model* model = read_file(model_path, bytes) ? nbtv_model_load(bytes.data(), bytes.size()) : nullptr;
+        if (model == nullptr || nbtv_model_values(model) != mode.learned_values) {
+            std::fprintf(stderr, "學習式模式需要權重檔：%s 讀不到、不是權重檔，或不是給這個模式用的\n", model_path.c_str());
+            return 1;
+        }
+        nbtv_tx_set_model(tx, model);
+        nbtv_model_destroy(model);  // 發射機自己留著一份
     }
     nbtv_tx_set_callsign(tx, args.str("call", "").c_str());
     nbtv_tx_set_encoder_speed(tx, args.integer("speed", -1));
@@ -65,6 +78,7 @@ int main(int argc, char** argv) {
         }
         audio.insert(audio.end(), frame.begin(), frame.begin() + n);
         if (mode.kind == NBTV_MODE_DIGITAL) std::printf("第 %d 幀：序號 %d，影像 %d／%d 位元組\n", i, info.sequence, info.image_bytes, mode.image_bytes);
+        else if (mode.kind == NBTV_MODE_LEARNED) std::printf("第 %d 幀：序號 %d，%d 個實數\n", i, info.sequence, mode.learned_values);
         else std::printf("第 %d 幀：序號 %d，%d 個係數\n", i, info.sequence, info.coefficients);
     }
     std::vector<float> tail(256);

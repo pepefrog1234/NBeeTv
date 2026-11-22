@@ -55,7 +55,7 @@ final class LatestFrameBox {
 }
 
 final class AppModel: ObservableObject {
-    enum LastResult { case none, ok, failed }
+    enum LastResult { case none, ok, failed, modelMissing }
     enum TxPhase { case idle, starting, transmitting, stopping }
 
     /// 收到的一張畫面。
@@ -364,7 +364,8 @@ final class AppModel: ObservableObject {
 
     func add(_ frame: DecodedFrame, time: Date) {
         guard frame.decoded, let rgb = frame.rgb, let image = NBTV.image(fromRGB: rgb) else {
-            lastResult = .failed
+            // 學習式模式：幀收到了，但對方用的是另一份權重（或 app 裡沒有權重檔）
+            lastResult = frame.modelMissing ? .modelMissing : .failed
             return
         }
         lastResult = .ok

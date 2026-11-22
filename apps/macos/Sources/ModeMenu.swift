@@ -1,4 +1,4 @@
-// 發射模式選單：數位 0–5 與類比 8–10。每一列的資料都取自核心的模式表。
+// 發射模式選單：數位 0–5、類比 8–10，以及（app 裡有權重檔時）學習式 11。每一列的資料都取自核心的模式表。
 import SwiftUI
 
 struct ModeMenuView: View {
@@ -29,6 +29,13 @@ struct ModeMenuView: View {
 
             group("相干類比", "訊號愈弱畫面愈糊，但不會整張收不到")
             ForEach(Modes.analog) { row($0) }
+
+            if !Modes.learned.isEmpty {
+                Rectangle().fill(Theme.buttonRing).frame(height: 1).padding(.horizontal, 8).padding(.vertical, 6)
+
+                group("學習式 · 類神經網路（實驗中）", "弱訊號時比相干類比清楚；收發兩邊要用同一份權重")
+                ForEach(Modes.learned) { row($0) }
+            }
         }
         .padding(6)
         .frame(width: 368)
@@ -61,7 +68,7 @@ struct ModeMenuView: View {
                     if selected { Icon(kind: .check, width: 14, height: 14, lineWidth: 2, color: Theme.rx) }
                 }
                 .frame(width: 16)
-                Text(mode.name).font(Theme.ui(13, selected ? .semibold : .regular)).frame(width: 56, alignment: .leading)
+                Text(mode.name).font(Theme.ui(13, selected ? .semibold : .regular)).frame(width: 64, alignment: .leading)
                 Text(mode.detail).foregroundColor(Theme.secondary).frame(maxWidth: .infinity, alignment: .leading)
                 Text(mode.secondsText).font(Theme.mono(13)).frame(width: 64, alignment: .trailing)
                 Text(mode.contentText).foregroundColor(Theme.secondary).frame(width: 84, alignment: .trailing)

@@ -42,8 +42,45 @@ std::array<std::uint8_t, kHeaderBytes> pack_header(const AnalogHeader& h) {
 
 double analog_gain_from_code(int code) { return std::pow(10.0, (code - kGainCodeZero) / kGainStepsPerDecade); }
 
+void analog_header_encode(const AnalogHeader& header, std::span<cf> cells) {
+    assert(static_cast<int>(cells.size()) == kAnalogHeaderCells);
+    const auto bytes = pack_header(header);
+    std::array<std::uint8_t, kHeaderBits> info{};
+    std::array<std::uint8_t, kHeaderCodedBits> coded{};
+    bytes_to_bits(bytes, info);
+    conv_encode_tailbiting(info, coded);
+    for (int r = 0; r < kHeaderRepeats; ++r) qam_map(coded, 2, cells.subspan(static_cast<std::size_t>(r * (kHeaderCodedBits / 2)), kHeaderCodedBits / 2));
+}
+
+bool analog_header_decode(std::span<const cf> cells, std::span<const float> noise_var, AnalogHeader& header) {
+    assert(static_cast<int>(cells.size()) == kAnalogHeaderCells && noise_var.size() == cells.size());
+    std::array<float, kHeaderCodedBits> llr{};
+    std::array<float, kHeaderCodedBits> part{};
+    for (int r = 0; r < kHeaderRepeats; ++r) {
+        const std::size_t first = static_cast<std::size_t>(r * (kHeaderCodedBits / 2));
+        qam_demap(cells.subspan(first, kHeaderCodedBits / 2), noise_var.subspan(first, kHeaderCodedBits / 2), 2, part);
+        for (int b = 0; b < kHeaderCodedBits; ++b) llr[static_cast<std::size_t>(b)] += part[static_cast<std::size_t>(b)];
+    }
+    std::array<std::uint8_t, kHeaderBits> info{};
+    conv_decode_tailbiting(llr, info);
+    std::array<std::uint8_t, kHeaderBytes> bytes{};
+    bits_to_bytes(info, bytes);
+    const std::uint16_t crc = static_cast<std::uint16_t>((bytes[9] << 8) | bytes[10]);
+    if (crc != crc16(std::span<const std::uint8_t>(bytes.data(), 9))) return false;
+    header.version = bytes[0] >> 4;
+    header.format = bytes[0] & 0xF;
+    header.sequence = bytes[1];
+    std::array<std::uint8_t, kCallsignBytes> call{};
+    std::copy_n(bytes.begin() + 2, kCallsignBytes, call.begin());
+    const auto decoded = decode_callsign(call);
+    header.callsign_valid = decoded.has_value();
+    header.callsign = decoded.value_or(std::string());
+    header.gain_code = bytes[8];
+    return true;
+}
+
 AnalogEncoded analog_encode(const Mode& mode, const AnalogHeader& header, std::span<const std::uint8_t> rgb) {
-    assert(!mode.is_digital());
+    assert(mode.is_analog());
     const AnalogPlan& plan = analog_plan(mode);
     const std::size_t n = static_cast<std::size_t>(plan.coefficients);
 
@@ -76,15 +113,8 @@ AnalogEncoded analog_encode(const Mode& mode, const AnalogHeader& header, std::s
     // 標頭：迴旋碼後重複兩次，QPSK
     AnalogHeader h = header;
     h.gain_code = code;
-    const auto bytes = pack_header(h);
-    std::array<std::uint8_t, kHeaderBits> info{};
-    std::array<std::uint8_t, kHeaderCodedBits> coded{};
-    bytes_to_bits(bytes, info);
-    conv_encode_tailbiting(info, coded);
     std::vector<cf> plain(static_cast<std::size_t>(mode.data_cells()));
-    for (int r = 0; r < kHeaderRepeats; ++r) {
-        qam_map(coded, 2, std::span<cf>(plain.data() + r * (kHeaderCodedBits / 2), kHeaderCodedBits / 2));
-    }
+    analog_header_encode(h, std::span<cf>(plain.data(), static_cast<std::size_t>(kAnalogHeaderCells)));
 
     // 5、7. 重複的各份除以 sqrt(份數)，兩個數值組成一個格點的 I 與 Q
     const std::size_t slots = static_cast<std::size_t>(plan.slots);
@@ -111,7 +141,7 @@ AnalogEncoded analog_encode(const Mode& mode, const AnalogHeader& header, std::s
 
 AnalogDecoded analog_decode(const Mode& mode, std::span<const cf> cells, std::span<const float> noise_var,
                             int fallback_gain_code) {
-    assert(!mode.is_digital());
+    assert(mode.is_analog());
     assert(static_cast<int>(cells.size()) == mode.data_cells() && noise_var.size() == cells.size());
     const AnalogPlan& plan = analog_plan(mode);
     const std::size_t n = static_cast<std::size_t>(plan.coefficients);
@@ -128,33 +158,8 @@ AnalogDecoded analog_decode(const Mode& mode, std::span<const cf> cells, std::sp
     AnalogDecoded out;
 
     // 標頭：兩份的軟值相加後做 Viterbi 解碼，再檢查 CRC-16
-    {
-        std::array<float, kHeaderCodedBits> llr{};
-        std::array<float, kHeaderCodedBits> part{};
-        for (int r = 0; r < kHeaderRepeats; ++r) {
-            const std::size_t first = static_cast<std::size_t>(r * (kHeaderCodedBits / 2));
-            qam_demap(std::span<const cf>(plain.data() + first, kHeaderCodedBits / 2),
-                      std::span<const float>(var.data() + first, kHeaderCodedBits / 2), 2, part);
-            for (int b = 0; b < kHeaderCodedBits; ++b) llr[static_cast<std::size_t>(b)] += part[static_cast<std::size_t>(b)];
-        }
-        std::array<std::uint8_t, kHeaderBits> info{};
-        conv_decode_tailbiting(llr, info);
-        std::array<std::uint8_t, kHeaderBytes> bytes{};
-        bits_to_bytes(info, bytes);
-        const std::uint16_t crc = static_cast<std::uint16_t>((bytes[9] << 8) | bytes[10]);
-        out.header_ok = crc == crc16(std::span<const std::uint8_t>(bytes.data(), 9));
-        if (out.header_ok) {
-            out.header.version = bytes[0] >> 4;
-            out.header.format = bytes[0] & 0xF;
-            out.header.sequence = bytes[1];
-            std::array<std::uint8_t, kCallsignBytes> call{};
-            std::copy_n(bytes.begin() + 2, kCallsignBytes, call.begin());
-            const auto decoded = decode_callsign(call);
-            out.header.callsign_valid = decoded.has_value();
-            out.header.callsign = decoded.value_or(std::string());
-            out.header.gain_code = bytes[8];
-        }
-    }
+    out.header_ok = analog_header_decode(std::span<const cf>(plain.data(), static_cast<std::size_t>(kAnalogHeaderCells)),
+                                         std::span<const float>(var.data(), static_cast<std::size_t>(kAnalogHeaderCells)), out.header);
 
     const int gain_code = out.header_ok ? out.header.gain_code : (fallback_gain_code >= 0 ? fallback_gain_code : kGainCodeZero);
     const double relative_gain = analog_gain_from_code(gain_code);

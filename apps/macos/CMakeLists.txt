@@ -29,10 +29,12 @@ set(NBTV_APP_SOURCES
 )
 
 # 內附的測試圖（96×72 的 PPM）：--snapshot 與 --selftest 用它們當畫面來源。
+# 學習式模式（模式 11）的權重檔也放進去；app 啟動後第一次用到時載入。
 set(NBTV_APP_RESOURCES
   ${PROJECT_SOURCE_DIR}/core/tests/data/coffee.ppm
   ${PROJECT_SOURCE_DIR}/core/tests/data/rocket.ppm
   ${PROJECT_SOURCE_DIR}/core/tests/data/cat.ppm
+  ${PROJECT_SOURCE_DIR}/models/learned_7776_v2.bin
 )
 # （CMake 的 Swift＋Ninja 不會照 MACOSX_PACKAGE_LOCATION 複製資源，所以在下面建置完成後自己複製。）
 
@@ -80,6 +82,8 @@ target_link_libraries(nbtv_mac PRIVATE nbtvcore)
 # swiftc 會把相依檔（NBTV.d）寫在執行檔旁邊，也就是 bundle 的 Contents/MacOS 裡；簽章前要先拿掉。
 add_custom_command(TARGET nbtv_mac POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E rm -f "$<TARGET_FILE:nbtv_mac>.d"
+  # Resources 每次重新建立：換了權重檔的版本時，舊的那一份才不會留在 bundle 裡
+  COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_BUNDLE_CONTENT_DIR:nbtv_mac>/Resources"
   COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_CONTENT_DIR:nbtv_mac>/Resources"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different ${NBTV_APP_RESOURCES} "$<TARGET_BUNDLE_CONTENT_DIR:nbtv_mac>/Resources"
   COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:nbtv_mac>"

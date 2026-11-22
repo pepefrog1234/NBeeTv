@@ -49,7 +49,7 @@ const std::vector<Entry>& ordered_coefficients() {
 std::uint64_t amplitude(std::uint32_t key) { return isqrt((std::uint64_t{1} << 52) / key); }
 
 AnalogPlan build_plan(const Mode& mode) {
-    assert(!mode.is_digital());
+    assert(mode.is_analog());
     const std::vector<Entry>& table = ordered_coefficients();
     const std::uint64_t slots = static_cast<std::uint64_t>(mode.analog_values());
 
@@ -114,18 +114,29 @@ AnalogPlan build_plan(const Mode& mode) {
 
 }  // namespace
 
+namespace {
+
+// 模式表裡有幾個相干類比模式（學習式模式不算，它不用係數表）
+constexpr std::size_t analog_mode_count() {
+    std::size_t n = 0;
+    for (const Mode& m : kModes) n += m.is_analog() ? 1 : 0;
+    return n;
+}
+
+}  // namespace
+
 const AnalogPlan& analog_plan(const Mode& mode) {
-    static const std::array<AnalogPlan, 3> plans = [] {
-        std::array<AnalogPlan, 3> p;
+    static const std::array<AnalogPlan, analog_mode_count()> plans = [] {
+        std::array<AnalogPlan, analog_mode_count()> p;
         std::size_t i = 0;
         for (const Mode& m : kModes) {
-            if (!m.is_digital()) p[i++] = build_plan(m);
+            if (m.is_analog()) p[i++] = build_plan(m);
         }
         return p;
     }();
     std::size_t i = 0;
     for (const Mode& m : kModes) {
-        if (m.is_digital()) continue;
+        if (!m.is_analog()) continue;
         if (m.id == mode.id) return plans[i];
         ++i;
     }

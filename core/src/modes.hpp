@@ -1,5 +1,5 @@
 // 模式表與幀結構算術。
-// 對應規格草案的「數位模式：模式表」與「類比模式：相干類比」兩節。
+// 對應規格草案的「數位模式：模式表」與「類比模式：相干類比」兩節；學習式模式是草案之外的實驗。
 #pragma once
 
 #include <array>
@@ -9,12 +9,12 @@
 
 namespace nbtv {
 
-enum class ModeKind { Digital, Analog };
+enum class ModeKind { Digital, Analog, Learned };
 
 inline constexpr int kLdpcCodewordBits = 16200;  // DVB-S2/T2 短碼，每幀一個碼字
 inline constexpr int kCrcBits = 32;              // 以 CRC-32 取代 BCH
 inline constexpr int kDigitalHeaderBytes = 8;    // 版本與格式 1、幀序號 1、呼號 6
-inline constexpr int kAnalogHeaderCells = 176;   // 標頭 11 位元組，摺積碼 r=1/2 後重複兩次，QPSK
+inline constexpr int kAnalogHeaderCells = 176;   // 標頭 11 位元組，摺積碼 r=1/2 後重複兩次，QPSK（類比與學習式共用）
 
 struct Mode {
     int id;                  // 空中的模式編號，由 S1 參考符號採用的序列表示
@@ -27,7 +27,12 @@ struct Mode {
     int rate_num, rate_den;  // LDPC 的名目碼率
     int ldpc_info_bits;      // LDPC 資訊位元數 K
 
+    // 只有學習式模式使用，其餘為 0
+    int learned_values = 0;  // 一張畫面變成幾個實數；模型的輸出要一樣多
+
     constexpr bool is_digital() const { return kind == ModeKind::Digital; }
+    constexpr bool is_analog() const { return kind == ModeKind::Analog; }
+    constexpr bool is_learned() const { return kind == ModeKind::Learned; }
 
     constexpr int frame_symbols() const { return payload_symbols + kPreambleSymbols; }
     constexpr int frame_samples() const { return frame_symbols() * kSymbolSamples; }
@@ -42,12 +47,12 @@ struct Mode {
     constexpr int payload_bytes() const { return is_digital() ? (ldpc_info_bits - kCrcBits) / 8 : 0; }
     constexpr int image_bytes() const { return is_digital() ? payload_bytes() - kDigitalHeaderBytes : 0; }
 
-    // 類比：標頭之外的格數；每格放兩個實數
+    // 類比與學習式：標頭之外的格數；每格放兩個實數
     constexpr int header_cells() const { return is_digital() ? 0 : kAnalogHeaderCells; }
     constexpr int analog_cells() const { return is_digital() ? 0 : data_cells() - kAnalogHeaderCells; }
     constexpr int analog_values() const { return 2 * analog_cells(); }
 
-    // 格點交錯涵蓋的格數 N：數位是碼字佔用的格數（補足格排在最後，不交錯），類比是全部資料格。
+    // 格點交錯涵蓋的格數 N：數位是碼字佔用的格數（補足格排在最後，不交錯），類比與學習式是全部資料格。
     constexpr int interleaver_cells() const { return is_digital() ? coded_cells() : data_cells(); }
     // 交錯前的第 i 個格點在酬載資料格裡的位置。
     constexpr int interleaved_position(int i) const {
@@ -55,7 +60,7 @@ struct Mode {
     }
 };
 
-inline constexpr std::array<Mode, 9> kModes{{
+inline constexpr std::array<Mode, 10> kModes{{
     // id  種類                酬載符號  乘數  位元/格  碼率    K
     {0, ModeKind::Digital, 200, 2503, 2, 1, 4, 3240},
     {1, ModeKind::Digital, 200, 2503, 2, 1, 2, 7200},
@@ -67,6 +72,8 @@ inline constexpr std::array<Mode, 9> kModes{{
     {8, ModeKind::Analog, 37, 464, 0, 0, 0, 0},
     {9, ModeKind::Analog, 100, 1255, 0, 0, 0, 0},
     {10, ModeKind::Analog, 200, 2509, 0, 0, 0, 0},
+    // 學習式（實驗中）：幀的安排和模式 9 相同，只是實數由類神經網路產生（見 learned_frame.hpp）。
+    {11, ModeKind::Learned, 100, 1255, 0, 0, 0, 0, 7776},
 }};
 
 constexpr const Mode* find_mode(int id) {
@@ -76,7 +83,7 @@ constexpr const Mode* find_mode(int id) {
     return nullptr;
 }
 
-// 編譯期檢查：碼字放得進酬載、位元組數是整數、類比模式扣掉標頭後還有空間、交錯乘數與格數互質。
+// 編譯期檢查：碼字放得進酬載、位元組數是整數、類比模式扣掉標頭後還有空間、學習式的實數放得下、交錯乘數與格數互質。
 constexpr bool mode_table_is_consistent() {
     for (const Mode& m : kModes) {
         if (std::gcd(m.cell_multiplier, m.interleaver_cells()) != 1) return false;
@@ -86,6 +93,8 @@ constexpr bool mode_table_is_consistent() {
             if ((m.ldpc_info_bits - kCrcBits) % 8 != 0) return false;
             if (m.image_bytes() <= 0) return false;
         } else if (m.analog_cells() <= 0) {
+            return false;
+        } else if (m.is_learned() && (m.learned_values <= 0 || m.learned_values % 2 != 0 || m.learned_values > m.analog_values())) {
             return false;
         }
     }

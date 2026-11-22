@@ -7,6 +7,8 @@
 #include "av1_payload.hpp"
 #include "dsp.hpp"
 #include "image_codec.hpp"
+#include "learned_codec.hpp"
+#include "model_file.hpp"
 #include "ppm.hpp"
 #include "receiver.hpp"
 #include "wav.hpp"
@@ -20,6 +22,7 @@ int main(int argc, char** argv) {
         std::printf(
             "用法：nbtv-rx [選項] 錄音.wav\n"
             "  --out-dir 目錄   收到的畫面存到這裡（預設不存檔，只列出結果）\n"
+            "  --model 檔名     學習式模式（模式 11）的權重檔；預設用專案 models/ 裡的，找不到就不解那個模式的畫面\n"
             "  --trace          印出同步與解碼的過程\n"
             "WAV 的取樣率必須是 12000 或 48000。\n");
         return args.has("help") ? 0 : 2;
@@ -41,6 +44,19 @@ int main(int argc, char** argv) {
     const std::string dir = args.str("out-dir", "");
     Receiver rx;
     rx.set_trace(args.has("trace"));
+    {
+        std::vector<std::uint8_t> bytes;
+        std::string error;
+        const std::string model_path = args.str("model", default_model_path());
+        if (read_file(model_path, bytes)) {
+            std::shared_ptr<const LearnedCodec> model = LearnedCodec::load(bytes, &error);
+            if (model == nullptr) std::fprintf(stderr, "%s：%s\n", model_path.c_str(), error.c_str());
+            rx.set_model(std::move(model));
+        } else if (args.has("model")) {
+            std::fprintf(stderr, "讀不到權重檔 %s\n", model_path.c_str());
+            return 1;
+        }
+    }
     int index = 0, good = 0;
     auto drain = [&] {
         RxFrame f;
@@ -65,6 +81,7 @@ int main(int argc, char** argv) {
             } else if (f.decoded) {
                 rgb = f.rgb;
             }
+            if (f.model_missing) std::printf("  沒有模型，或權重和對方的不同");
             if (!dir.empty() && !rgb.empty()) write_ppm(dir + "/frame_" + std::to_string(index) + ".ppm", rgb, kImageWidth, kImageHeight);
             std::printf("\n");
             good += f.decoded ? 1 : 0;

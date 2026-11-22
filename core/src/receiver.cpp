@@ -12,6 +12,7 @@
 #include "digital_frame.hpp"
 #include "fft.hpp"
 #include "frame_map.hpp"
+#include "learned_frame.hpp"
 
 namespace nbtv {
 
@@ -755,6 +756,7 @@ void Receiver::process_frame() {
     RxFrame frame;
     frame.mode_id = mode.id;
     frame.is_digital = mode.is_digital();
+    frame.is_learned = mode.is_learned();
     frame.snr_db = est.snr_db;
     frame.freq_offset_hz = static_cast<float>(cfo_ * kSampleRate);
     frame.start_sample = t0_;
@@ -790,6 +792,30 @@ void Receiver::process_frame() {
         // 沒解出來的幀：前導符號確認過、從頭到尾都有導頻、中途也沒有出現別的前導符號，才回報「有一幀沒解出來」。
         // 只有開頭一段有導頻的，是對方送到一半就停了，或是誤認的前導符號剛好落在別人的酬載裡。
         emit = ok || (confirmed_ && intact);
+    } else if (mode.is_learned()) {
+        const LearnedUnpacked l = learned_unpack(mode, cells, noise);
+        ok = l.header_ok;
+        frame.header_ok = l.header_ok;
+        if (l.header_ok) {
+            frame.callsign = l.header.callsign_valid ? l.header.callsign : std::string();
+            frame.sequence = l.header.sequence;
+        }
+        // 和類比一樣，畫面本身不靠標頭；但只有確定這是一整幀才當成畫面（見下面類比的說明）。
+        const bool whole = l.header_ok || (confirmed_ && (previous_ok || !tentative()) && intact);
+        // 沒有模型，或標頭說對方用的是另一份權重：解出來只會是雜訊，不交出畫面，只回報收到了一幀
+        const bool usable = model_ != nullptr && learned_model_fits(mode, *model_) && learned_model_matches(l, *model_);
+        frame.model_missing = whole && !usable;
+        frame.decoded = whole && usable;
+        if (frame.decoded) {
+            frame.rgb.resize(static_cast<std::size_t>(kImageRgbBytes));
+            LearnedRxOptions options;
+            options.median_snr = tuning_.learned_median_snr;
+            options.attenuate = tuning_.learned_attenuate;
+            options.floor = tuning_.learned_floor;
+            const float told = learned_picture(*model_, l, options, frame.rgb);
+            if (trace_) std::fprintf(stderr, "[rx]   學習式：告訴解碼器的訊雜比 %.1f dB\n", told);
+        }
+        emit = whole || (confirmed_ && intact);
     } else {
         AnalogDecoded a = analog_decode(mode, cells, noise, analog_gain_code_);
         ok = a.header_ok;

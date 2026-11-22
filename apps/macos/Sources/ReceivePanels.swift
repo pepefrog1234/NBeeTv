@@ -181,6 +181,7 @@ struct StatusPanel: View {
             switch model.lastResult {
             case .ok: Text("解碼成功")
             case .failed: Text("解碼失敗").foregroundColor(Theme.tx)
+            case .modelMissing: Text("模型不符").foregroundColor(Theme.tx)
             case .none: dash
             }
         }

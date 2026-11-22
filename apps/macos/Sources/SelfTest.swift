@@ -137,6 +137,8 @@ enum SelfTest {
         let devices = !arguments.contains("--no-devices")
         let useCamera = devices && !arguments.contains("--no-camera")
         let useAudio = devices && !arguments.contains("--no-audio")
+        report("學習式模式的模型", LearnedModel.isAvailable ? true : nil,
+               LearnedModel.isAvailable ? "識別碼 \(LearnedModel.idText)，一張畫面 \(LearnedModel.values) 個實數" : "app 裡沒有權重檔，模式 11 不能用")
         testCoreLoopback(coffee)
         testFlatPictures()
         testExport(coffee)
@@ -167,7 +169,7 @@ enum SelfTest {
     // MARK: 1. 核心
 
     private static func testCoreLoopback(_ image: Data) {
-        for modeID in [5, 9] {
+        for modeID in [5, 9, 11] {  // 模式 11 要 app 裡有權重檔才會列在 Modes 裡
             guard let mode = Modes.find(modeID), mode.isDigital ? NBTV.hasImageCodec : true else { continue }
             let tx = CoreTransmitter()
             tx.setMode(modeID)
@@ -185,7 +187,7 @@ enum SelfTest {
             audio += tx.finish() + Demo.silence(seconds: 0.5)
             let frames = Demo.receive(audio).flatMap(\.frames)
             let good = frames.filter { $0.decoded && $0.headerOK && $0.callsign == "BX4ACP" && $0.rgb != nil }
-            // 數位：收到的畫面與發射端的預覽逐位元相同；類比：只差削波失真，檢查有畫面即可
+            // 數位：收到的畫面與發射端的預覽逐位元相同；類比與學習式：只差削波失真，檢查有畫面即可
             let same = !mode.isDigital || zip(good, previews).allSatisfy { $0.rgb == $1 }
             report("核心收發（\(mode.label)）", good.count == 2 && same,
                    "解出 \(good.count)/2 張\(mode.isDigital ? "，畫面\(same ? "與預覽相同" : "與預覽不同")" : "")")
@@ -254,11 +256,11 @@ enum SelfTest {
 
     // MARK: 存檔
 
-    /// 「儲存圖片」寫出去的檔案內容：數位模式是標準的 .avif（系統的影像解碼器要讀得出同一張畫面），類比模式是 PNG。
+    /// 「儲存圖片」寫出去的檔案內容：數位模式是標準的 .avif（系統的影像解碼器要讀得出同一張畫面），類比與學習式模式是 PNG。
     private static func testExport(_ image: Data) {
         var details: [String] = []
         var ok = true
-        for modeID in [1, 9] {
+        for modeID in [1, 9, 11] {
             guard let mode = Modes.find(modeID), mode.isDigital ? NBTV.hasImageCodec : true else { continue }
             let tx = CoreTransmitter()
             tx.setMode(modeID)

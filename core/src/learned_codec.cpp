@@ -19,7 +19,8 @@ namespace {
 
 constexpr char kMagic[8] = {'N', 'B', 'T', 'V', 'L', 'R', 'N', '1'};
 constexpr std::uint32_t kFormatVersion = 1;
-constexpr std::uint32_t kArchitecture = 1;
+// 結構編號：1 的解碼器只吃訊雜比；2 的另外吃各個值的可靠程度（輸入的通道數加倍），訓練時涵蓋的訊雜比也比較低
+constexpr std::uint32_t kMaxArchitecture = 2;
 
 // 以下和 model.py 相同
 constexpr int kWidths[4] = {32, 64, 128, 192};  // 解析度每減半一次的通道數
@@ -103,7 +104,7 @@ struct Reader {
 };
 
 bool parse_file(std::span<const std::uint8_t> file, std::map<std::string, RawTensor>& tensors, std::uint32_t& latent,
-                std::uint32_t& id, std::string& error) {
+                std::uint32_t& architecture, std::uint32_t& id, std::string& error) {
     if (file.size() < 36 || std::memcmp(file.data(), kMagic, sizeof kMagic) != 0) {
         error = "不是學習式編碼的權重檔";
         return false;
@@ -116,12 +117,12 @@ bool parse_file(std::span<const std::uint8_t> file, std::map<std::string, RawTen
     }
     Reader r{file.first(body), sizeof kMagic};
     const std::uint32_t version = r.u32();
-    const std::uint32_t architecture = r.u32();
+    architecture = r.u32();
     latent = r.u32();
     const std::uint32_t count = r.u32();
     const std::uint32_t dtype = r.u32();
     r.u32();  // 保留
-    if (version != kFormatVersion || architecture != kArchitecture) {
+    if (version != kFormatVersion || architecture == 0 || architecture > kMaxArchitecture) {
         error = "權重檔的格式版本或模型結構不是這個版本認得的";
         return false;
     }
@@ -398,6 +399,7 @@ void pixel_shuffle2(const Map& in, Map& out) {
 struct LearnedCodec::Impl {
     std::uint32_t id = 0;
     int latent = 0;
+    int architecture = 1;
 
     // 編碼器：96×72×3 →（每一級解析度減半）→ 12×9×latent
     Conv enc_stem;
@@ -477,9 +479,10 @@ struct Builder {
 
 bool build(std::span<const std::uint8_t> file, LearnedCodec::Impl& m, std::string& error) {
     std::map<std::string, RawTensor> tensors;
-    std::uint32_t latent = 0;
-    if (!parse_file(file, tensors, latent, m.id, error)) return false;
+    std::uint32_t latent = 0, architecture = 0;
+    if (!parse_file(file, tensors, latent, architecture, m.id, error)) return false;
     m.latent = static_cast<int>(latent);
+    m.architecture = static_cast<int>(architecture);
 
     Builder b{tensors, error};
     bool ok = b.conv("enc.stem", kWidths[0], 3, 5, 1, 2, m.enc_stem);
@@ -493,7 +496,8 @@ bool build(std::span<const std::uint8_t> file, LearnedCodec::Impl& m, std::strin
     ok = ok && b.conv("enc.head", m.latent, kWidths[3], 1, 1, 0, m.enc_head);
 
     ok = ok && b.linear("dec.snr_embed.0", kSnrFeatures, 1, m.snr1) && b.linear("dec.snr_embed.2", kSnrFeatures, kSnrFeatures, m.snr2);
-    ok = ok && b.conv("dec.inp", kWidths[3], m.latent, 1, 1, 0, m.dec_inp);
+    // 結構 2：輸入是「收到的值」接上「可靠程度」，通道數加倍
+    ok = ok && b.conv("dec.inp", kWidths[3], m.latent * (m.architecture >= 2 ? 2 : 1), 1, 1, 0, m.dec_inp);
     for (int s = 0; s < kStages; ++s) {
         const int channels = kWidths[3 - s], next = kWidths[2 - s];
         const std::string stage = std::to_string(s);
@@ -533,6 +537,10 @@ std::uint32_t LearnedCodec::model_id() const { return impl_->id; }
 
 int LearnedCodec::value_count() const { return impl_->latent * kGridH * kGridW; }
 
+int LearnedCodec::architecture() const { return impl_->architecture; }
+
+float LearnedCodec::min_snr_db() const { return impl_->architecture >= 2 ? -6.0f : -2.0f; }
+
 bool LearnedCodec::encode(std::span<const std::uint8_t> rgb, std::span<float> values) const {
     const Impl& m = *impl_;
     if (rgb.size() != static_cast<std::size_t>(kImageRgbBytes) || values.size() != static_cast<std::size_t>(value_count())) return false;
@@ -565,26 +573,34 @@ bool LearnedCodec::encode(std::span<const std::uint8_t> rgb, std::span<float> va
     return true;
 }
 
-bool LearnedCodec::decode(std::span<const float> values, float snr_db, std::span<std::uint8_t> rgb) const {
+bool LearnedCodec::decode(std::span<const float> values, std::span<const float> reliability, float snr_db,
+                          std::span<std::uint8_t> rgb) const {
     const Impl& m = *impl_;
     if (values.size() != static_cast<std::size_t>(value_count()) || rgb.size() != static_cast<std::size_t>(kImageRgbBytes)) return false;
+    if (!reliability.empty() && reliability.size() != values.size()) return false;
 
     // 訊雜比 → 一組特徵，用來調整每個殘差塊
-    const float snr = std::isnan(snr_db) ? 10.0f : std::clamp(snr_db, kLearnedMinSnrDb, kLearnedMaxSnrDb);
+    const float snr = std::isnan(snr_db) ? 10.0f : std::clamp(snr_db, min_snr_db(), kLearnedMaxSnrDb);
     const float scaled = (snr - 12.0f) / 12.0f;
     std::vector<float> e = apply(m.snr1, &scaled);
     gelu_inplace(e);
     e = apply(m.snr2, e.data());
     gelu_inplace(e);
 
+    // 輸入：收到的值；結構 2 後面再接上各個值的可靠程度（順序和 PyTorch 的 cat([值, 可靠程度]) 相同）
+    const bool with_reliability = m.architecture >= 2;
     Map z, a, t1, t2;
-    z.shape(kGridH, kGridW, m.latent);
+    z.shape(kGridH, kGridW, m.latent * (with_reliability ? 2 : 1));
     std::size_t n = 0;
     for (int c = 0; c < m.latent; ++c)
         for (int y = 0; y < kGridH; ++y)
-            for (int col = 0; col < kGridW; ++col) {
-                const float v = values[n++];
+            for (int col = 0; col < kGridW; ++col, ++n) {
+                const float v = values[n];
                 z.at(y, col)[c] = std::isfinite(v) ? v : 0.0f;
+                if (with_reliability) {
+                    const float w = reliability.empty() ? 1.0f : reliability[n];
+                    z.at(y, col)[m.latent + c] = w >= 0.0f && w <= 1.0f ? w : (w > 1.0f ? 1.0f : 0.0f);  // 非數值當成 0
+                }
             }
 
     conv2d(m.dec_inp, z, a);

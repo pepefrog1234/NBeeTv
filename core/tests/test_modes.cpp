@@ -119,13 +119,38 @@ void test_analog_modes() {
     }
 }
 
+// 學習式模式（實驗中）：幀的安排和類比模式 9 一樣，只是放的是類神經網路產生的實數
+void test_learned_mode() {
+    const Mode* m = find_mode(11);
+    const Mode* analog = find_mode(9);
+    CHECK(m != nullptr);
+    if (m == nullptr) return;
+    CHECK(m->kind == ModeKind::Learned);
+    CHECK(m->is_learned() && !m->is_digital() && !m->is_analog());
+    CHECK(analog->is_analog() && !analog->is_learned());
+    CHECK_EQ(m->payload_symbols, analog->payload_symbols);
+    CHECK_EQ(m->frame_symbols(), 102);
+    CHECK_NEAR(m->frame_seconds(), 2.72, 0.0005);
+    CHECK_EQ(m->data_cells(), analog->data_cells());
+    CHECK_EQ(m->header_cells(), 176);
+    CHECK_EQ(m->analog_values(), 7782);
+    CHECK_EQ(m->learned_values, 7776);       // 72 × 9 × 12，放得進去
+    CHECK(m->learned_values <= m->analog_values());
+    CHECK_EQ(m->interleaver_cells(), m->data_cells());
+    CHECK_EQ(m->payload_bytes(), 0);
+    CHECK_EQ(m->image_bytes(), 0);
+    CHECK_EQ(m->padding_cells(), 0);
+    // 其他模式都沒有這個欄位
+    for (const Mode& other : kModes) CHECK_EQ(other.learned_values > 0, other.is_learned());
+}
+
 void test_undefined_ids() {
-    for (int id : {-1, 6, 7, 11, 15, 16}) CHECK(find_mode(id) == nullptr);
+    for (int id : {-1, 6, 7, 12, 15, 16}) CHECK(find_mode(id) == nullptr);
 }
 
 void test_c_api() {
     CHECK(std::strcmp(nbtv_version_string(), "0.1.0") == 0);
-    CHECK_EQ(nbtv_mode_count(), 9);
+    CHECK_EQ(nbtv_mode_count(), 10);
     for (int i = 0; i < nbtv_mode_count(); ++i) {
         nbtv_mode_info a{};
         nbtv_mode_info b{};
@@ -135,7 +160,7 @@ void test_c_api() {
         CHECK(m != nullptr);
         if (m == nullptr) continue;
         CHECK_EQ(b.id, a.id);
-        CHECK(a.kind == (m->is_digital() ? NBTV_MODE_DIGITAL : NBTV_MODE_ANALOG));
+        CHECK(a.kind == (m->is_digital() ? NBTV_MODE_DIGITAL : m->is_learned() ? NBTV_MODE_LEARNED : NBTV_MODE_ANALOG));
         CHECK_EQ(a.payload_symbols, m->payload_symbols);
         CHECK_EQ(a.frame_symbols, m->frame_symbols());
         CHECK_EQ(a.frame_samples, m->frame_samples());
@@ -150,7 +175,8 @@ void test_c_api() {
         CHECK_EQ(a.padding_cells, m->padding_cells());
         CHECK_EQ(a.header_cells, m->header_cells());
         CHECK_EQ(a.analog_values, m->analog_values());
-        CHECK((a.analog_coefficients > 0) == !m->is_digital());
+        CHECK((a.analog_coefficients > 0) == m->is_analog());
+        CHECK_EQ(a.learned_values, m->learned_values);
         CHECK(a.analog_coefficients <= a.analog_values);
         CHECK_EQ(b.frame_samples, a.frame_samples);
         CHECK_EQ(b.image_bytes, a.image_bytes);
@@ -170,6 +196,7 @@ int main() {
     test_pilots();
     test_digital_modes();
     test_analog_modes();
+    test_learned_mode();
     test_undefined_ids();
     test_c_api();
     return check::finish("modes");

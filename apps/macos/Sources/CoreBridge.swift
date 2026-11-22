@@ -46,10 +46,31 @@ enum NBTV {
     }
 }
 
+/// 學習式模式（模式 11，實驗中）用的模型。權重檔放在 app 的 Resources 裡，第一次用到時載入（約 0.1 秒），
+/// 之後所有的發射機、接收機共用同一份；核心載入之後不會再改動它，所以可以同時在不同的佇列上使用。
+enum LearnedModel {
+    static let resourceName = "learned_7776_v2"
+
+    /// 找不到權重檔或檔案損壞時是 nil：模式選單不會列出學習式模式，收到那種幀也不會有畫面。
+    static let handle: OpaquePointer? = {
+        guard let url = Bundle.main.url(forResource: resourceName, withExtension: "bin"),
+              let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return nil }
+        return data.withUnsafeBytes { nbtv_model_load($0.bindMemory(to: UInt8.self).baseAddress, $0.count) }
+    }()
+
+    static var isAvailable: Bool { handle != nil }
+    /// 一張畫面變成幾個實數
+    static var values: Int { Int(nbtv_model_values(handle)) }
+    /// 權重檔的識別碼；收發兩邊要相同才解得出畫面
+    static var idText: String { String(format: "%08X", nbtv_model_id(handle)) }
+}
+
 /// 一個傳輸模式，資料取自 nbtv_mode_at()。
 struct ModeInfo: Identifiable, Hashable {
+    enum Kind { case digital, analog, learned }
+
     let id: Int
-    let isDigital: Bool
+    let kind: Kind
     let frameSeconds: Double
     let frameSymbols: Int
     let payloadSymbols: Int
@@ -58,16 +79,30 @@ struct ModeInfo: Identifiable, Hashable {
     let rateDen: Int
     let imageBytes: Int
     let analogCoefficients: Int
+    let learnedValues: Int
     var analogQuality = ""  // 粗略／中等／細緻，依酬載長短排出來
 
-    /// 「數位 1」「類比 9」
-    var name: String { (isDigital ? "數位 " : "類比 ") + String(id) }
+    var isDigital: Bool { kind == .digital }
+    var isLearned: Bool { kind == .learned }
 
-    /// 「QPSK 1/2」或「中等」
+    /// 「數位 1」「類比 9」「學習式 11」
+    var name: String {
+        switch kind {
+        case .digital: return "數位 \(id)"
+        case .analog: return "類比 \(id)"
+        case .learned: return "學習式 \(id)"
+        }
+    }
+
+    /// 「QPSK 1/2」、「中等」或「實驗中」
     var detail: String {
-        guard isDigital else { return analogQuality }
-        let modulation = bitsPerCell == 2 ? "QPSK" : "\(1 << bitsPerCell)QAM"
-        return "\(modulation) \(rateNum)/\(rateDen)"
+        switch kind {
+        case .digital:
+            let modulation = bitsPerCell == 2 ? "QPSK" : "\(1 << bitsPerCell)QAM"
+            return "\(modulation) \(rateNum)/\(rateDen)"
+        case .analog: return analogQuality
+        case .learned: return "實驗中"
+        }
     }
 
     /// 「數位 1 · QPSK 1/2」
@@ -76,16 +111,24 @@ struct ModeInfo: Identifiable, Hashable {
     /// 「5.39 秒」
     var secondsText: String { String(format: "%.2f 秒", frameSeconds) }
 
-    /// 「888 位元組」或「35% 係數」
+    /// 「888 位元組」、「35% 係數」或「類神經網路」
     var contentText: String {
-        if isDigital { return "\(imageBytes) 位元組" }
-        let percent = Int((Double(analogCoefficients) / Double(NBTV.totalCoefficients) * 100).rounded())
-        return "\(percent)% 係數"
+        switch kind {
+        case .digital: return "\(imageBytes) 位元組"
+        case .analog:
+            let percent = Int((Double(analogCoefficients) / Double(NBTV.totalCoefficients) * 100).rounded())
+            return "\(percent)% 係數"
+        case .learned: return "類神經網路"
+        }
     }
 
     /// 右側欄模式鈕下面的說明
     var summary: String {
-        isDigital ? "每張 \(secondsText) · 影像上限 \(imageBytes) 位元組" : "每張 \(secondsText) · 傳 \(contentText)"
+        switch kind {
+        case .digital: return "每張 \(secondsText) · 影像上限 \(imageBytes) 位元組"
+        case .analog: return "每張 \(secondsText) · 傳 \(contentText)"
+        case .learned: return "每張 \(secondsText) · 類神經網路編碼，實驗中"
+        }
     }
 }
 
@@ -94,14 +137,27 @@ enum Modes {
         var list: [ModeInfo] = []
         var info = nbtv_mode_info()
         for index in 0..<nbtv_mode_count() where nbtv_mode_at(index, &info) == 0 {
-            list.append(ModeInfo(id: Int(info.id), isDigital: info.kind == NBTV_MODE_DIGITAL, frameSeconds: info.frame_seconds,
+            let kind: ModeInfo.Kind
+            if info.kind == NBTV_MODE_DIGITAL {
+                kind = .digital
+            } else if info.kind == NBTV_MODE_ANALOG {
+                kind = .analog
+            } else if info.kind == NBTV_MODE_LEARNED {
+                // 學習式模式要有對得上的模型才能用；app 裡沒有權重檔的話就不列出來
+                guard LearnedModel.isAvailable, LearnedModel.values == Int(info.learned_values) else { continue }
+                kind = .learned
+            } else {
+                continue  // 這一版不認得的種類
+            }
+            list.append(ModeInfo(id: Int(info.id), kind: kind, frameSeconds: info.frame_seconds,
                                  frameSymbols: Int(info.frame_symbols), payloadSymbols: Int(info.payload_symbols),
                                  bitsPerCell: Int(info.bits_per_cell), rateNum: Int(info.code_rate_num), rateDen: Int(info.code_rate_den),
-                                 imageBytes: Int(info.image_bytes), analogCoefficients: Int(info.analog_coefficients)))
+                                 imageBytes: Int(info.image_bytes), analogCoefficients: Int(info.analog_coefficients),
+                                 learnedValues: Int(info.learned_values)))
         }
         // 類比模式依每幀的長短命名
         let names = ["粗略", "中等", "細緻"]
-        let analogOrder = list.filter { !$0.isDigital }.sorted { $0.payloadSymbols < $1.payloadSymbols }.map(\.id)
+        let analogOrder = list.filter { $0.kind == .analog }.sorted { $0.payloadSymbols < $1.payloadSymbols }.map(\.id)
         for i in list.indices {
             if let rank = analogOrder.firstIndex(of: list[i].id), analogOrder.count == names.count { list[i].analogQuality = names[rank] }
         }
@@ -109,7 +165,8 @@ enum Modes {
     }()
 
     static var digital: [ModeInfo] { all.filter(\.isDigital) }
-    static var analog: [ModeInfo] { all.filter { !$0.isDigital } }
+    static var analog: [ModeInfo] { all.filter { $0.kind == .analog } }
+    static var learned: [ModeInfo] { all.filter(\.isLearned) }
     static func find(_ id: Int) -> ModeInfo? { all.first { $0.id == id } }
     static let defaultID = 1
 }
@@ -118,7 +175,9 @@ enum Modes {
 struct DecodedFrame {
     let modeID: Int
     let isDigital: Bool
+    let isLearned: Bool
     let decoded: Bool
+    let modelMissing: Bool  // 學習式：收到了一幀，但權重和對方的不同（或 app 裡沒有權重檔），所以沒有畫面
     let headerOK: Bool
     let callsign: String
     let sequence: Int
@@ -136,6 +195,7 @@ final class CoreReceiver {
         guard let h = nbtv_rx_create(Int32(sampleRate)), let f = nbtv_shim_frame_alloc() else { fatalError("無法建立接收機") }
         handle = h
         frame = f
+        nbtv_rx_set_model(handle, LearnedModel.handle)
     }
 
     deinit {
@@ -162,7 +222,9 @@ final class CoreReceiver {
         return DecodedFrame(
             modeID: Int(frame.pointee.mode_id),
             isDigital: frame.pointee.kind == NBTV_MODE_DIGITAL,
+            isLearned: frame.pointee.kind == NBTV_MODE_LEARNED,
             decoded: frame.pointee.decoded != 0,
+            modelMissing: frame.pointee.model_missing != 0,
             headerOK: frame.pointee.header_ok != 0,
             callsign: String(cString: nbtv_shim_frame_callsign(frame)),
             sequence: Int(frame.pointee.sequence),
@@ -189,6 +251,7 @@ final class CoreTransmitter {
     init(sampleRate: Int = NBTV.sampleRate) {
         guard let h = nbtv_tx_create(Int32(sampleRate)) else { fatalError("無法建立發射機") }
         handle = h
+        nbtv_tx_set_model(handle, LearnedModel.handle)
     }
 
     deinit { nbtv_tx_destroy(handle) }
@@ -200,7 +263,7 @@ final class CoreTransmitter {
     /// 影像編碼器的速度檔 0（最慢、畫質最好）到 10；負值是核心的預設值。
     func setEncoderSpeed(_ speed: Int) { nbtv_tx_set_encoder_speed(handle, Int32(speed)) }
 
-    /// 把一張 96×72 的畫面做成一幀音訊。失敗（例如畫面壓不進去）回傳 nil。
+    /// 把一張 96×72 的畫面做成一幀音訊。失敗（例如畫面壓不進去、學習式模式沒有模型）回傳 nil。
     func encode(rgb: Data) -> EncodedFrame? {
         guard rgb.count == NBTV.rgbBytes else { return nil }
         let count = frameSamples

@@ -1,6 +1,9 @@
 // 只透過 C API 做完整的收發：外殼會用到的每個函式都走一遍。
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include "check.hpp"
@@ -281,6 +284,147 @@ void test_discard_last() {
     }
 }
 
+// 學習式模式（模式 11）：載入模型、設定給發射機與接收機、走一趟迴路
+void test_learned_mode() {
+    // 沒有模型、不是模型
+    CHECK(nbtv_model_load(nullptr, 0) == nullptr);
+    const std::uint8_t junk[64] = {};
+    CHECK(nbtv_model_load(junk, sizeof junk) == nullptr);
+    nbtv_model_destroy(nullptr);
+    CHECK_EQ(nbtv_model_id(nullptr), 0);
+    CHECK_EQ(nbtv_model_values(nullptr), 0);
+    nbtv_tx_set_model(nullptr, nullptr);
+    nbtv_rx_set_model(nullptr, nullptr);
+
+    nbtv_mode_info mode{};
+    CHECK_EQ(nbtv_mode_by_id(11, &mode), 0);
+    CHECK(mode.kind == NBTV_MODE_LEARNED);
+    CHECK_EQ(mode.learned_values, 7776);
+    CHECK_EQ(mode.analog_coefficients, 0);
+    CHECK_EQ(mode.image_bytes, 0);
+
+    std::vector<std::uint8_t> file;
+    const std::string path = std::string(NBTV_MODEL_DIR) + "/learned_7776_v2.bin";
+    if (std::FILE* f = std::fopen(path.c_str(), "rb")) {
+        std::uint8_t chunk[65536];
+        for (std::size_t n = 0; (n = std::fread(chunk, 1, sizeof chunk, f)) > 0;) file.insert(file.end(), chunk, chunk + n);
+        std::fclose(f);
+    }
+    if (file.empty()) {
+        std::printf("  找不到權重檔 %s，略過學習式模式的迴路\n", path.c_str());
+        return;
+    }
+    nbtv_model* model = nbtv_model_load(file.data(), file.size());
+    CHECK(model != nullptr);
+    if (model == nullptr) return;
+    CHECK_EQ(nbtv_model_values(model), mode.learned_values);
+    CHECK(nbtv_model_id(model) != 0);
+
+    const std::vector<std::uint8_t> rgb = test_images::load("cat");
+    const int rate = 48000;
+    nbtv_tx* tx = nbtv_tx_create(rate);
+    nbtv_tx_set_callsign(tx, "n0call");
+    CHECK_EQ(nbtv_tx_set_mode(tx, 11), 0);
+    const int frame_samples = nbtv_tx_frame_samples(tx);
+    CHECK_EQ(frame_samples, mode.frame_samples * 4);
+    std::vector<float> frame(static_cast<std::size_t>(frame_samples));
+    std::vector<std::uint8_t> preview(NBTV_IMAGE_RGB_BYTES);
+    nbtv_tx_frame_info info{};
+
+    // 還沒設定模型：編不出幀，也沒有可以取消的幀
+    CHECK_EQ(nbtv_tx_encode_image(tx, rgb.data(), frame.data(), frame_samples, preview.data(), &info), -1);
+    CHECK_EQ(nbtv_tx_discard_last(tx), -1);
+
+    nbtv_rx* rx = nbtv_rx_create(rate);
+    nbtv_rx* bare = nbtv_rx_create(rate);  // 這一個不設定模型
+    nbtv_tx_set_model(tx, model);
+    nbtv_rx_set_model(rx, model);
+    nbtv_model_destroy(model);  // 發射機與接收機各自留著，之後照樣能用
+
+    std::vector<float> audio(static_cast<std::size_t>(rate / 4), 0.0f);
+    for (int i = 0; i < 2; ++i) {
+        CHECK_EQ(nbtv_tx_encode_image(tx, rgb.data(), frame.data(), frame_samples, preview.data(), &info), frame_samples);
+        CHECK_EQ(info.mode_id, 11);
+        CHECK_EQ(info.sequence, i);
+        CHECK_EQ(info.image_bytes, 0);
+        CHECK_EQ(info.coefficients, 0);
+        audio.insert(audio.end(), frame.begin(), frame.end());
+    }
+    CHECK(test_images::psnr(preview, rgb) > 27.5);  // 預覽是編碼後直接解回來的畫面
+    // 多編一幀再取消：幀序號回到 2
+    CHECK_EQ(nbtv_tx_encode_image(tx, rgb.data(), frame.data(), frame_samples, nullptr, &info), frame_samples);
+    CHECK_EQ(nbtv_tx_discard_last(tx), 0);
+    CHECK_EQ(nbtv_tx_encode_image(tx, rgb.data(), frame.data(), frame_samples, nullptr, &info), frame_samples);
+    CHECK_EQ(info.sequence, 2);
+    CHECK_EQ(nbtv_tx_discard_last(tx), 0);
+    std::vector<float> tail(256);
+    const int tail_n = nbtv_tx_finish(tx, tail.data(), 256);
+    audio.insert(audio.end(), tail.begin(), tail.begin() + tail_n);
+    audio.insert(audio.end(), static_cast<std::size_t>(rate / 2), 0.0f);
+
+    for (nbtv_rx* r : {rx, bare}) {
+        for (std::size_t pos = 0; pos < audio.size(); pos += 4096) {
+            nbtv_rx_push(r, audio.data() + pos, static_cast<int>(std::min<std::size_t>(4096, audio.size() - pos)));
+        }
+    }
+    nbtv_rx_frame f;
+    int n = 0;
+    double quality = 0.0;
+    while (nbtv_rx_poll_frame(rx, &f)) {
+        CHECK(f.kind == NBTV_MODE_LEARNED);
+        CHECK_EQ(f.mode_id, 11);
+        CHECK_EQ(f.decoded, 1);
+        CHECK_EQ(f.has_image, 1);
+        CHECK_EQ(f.model_missing, 0);
+        CHECK_EQ(f.header_ok, 1);
+        CHECK(std::strcmp(f.callsign, "N0CALL") == 0);
+        CHECK_EQ(f.sequence, n);
+        CHECK_EQ(f.image_bytes, 0);
+        quality = test_images::psnr(std::vector<std::uint8_t>(f.rgb, f.rgb + NBTV_IMAGE_RGB_BYTES), rgb);
+        CHECK(quality > 27.5);
+        ++n;
+    }
+    CHECK_EQ(n, 2);
+    std::printf("  C API 迴路：%d Hz、模式 11，%d 幀，收到的畫面對原圖 PSNR %.1f dB\n", rate, n, quality);
+    // 沒有模型的接收機：收得到幀與呼號，但沒有畫面
+    n = 0;
+    while (nbtv_rx_poll_frame(bare, &f)) {
+        CHECK(f.kind == NBTV_MODE_LEARNED);
+        CHECK_EQ(f.decoded, 0);
+        CHECK_EQ(f.has_image, 0);
+        CHECK_EQ(f.model_missing, 1);
+        CHECK_EQ(f.header_ok, 1);
+        CHECK(std::strcmp(f.callsign, "N0CALL") == 0);
+        ++n;
+    }
+    CHECK_EQ(n, 2);
+    nbtv_rx_status st{};
+    nbtv_rx_get_status(rx, &st);
+    CHECK_EQ(st.frames_decoded, 2);
+    nbtv_rx_get_status(bare, &st);
+    CHECK_EQ(st.frames_decoded, 0);
+    CHECK_EQ(st.frames_failed, 2);
+
+    // 重設之後模型還在；拿掉模型之後就又編不出來、解不出畫面
+    nbtv_rx_reset(rx);
+    nbtv_rx_push(rx, audio.data(), static_cast<int>(audio.size()));
+    n = 0;
+    while (nbtv_rx_poll_frame(rx, &f)) n += f.decoded;
+    CHECK_EQ(n, 2);
+    nbtv_tx_set_model(tx, nullptr);
+    CHECK_EQ(nbtv_tx_encode_image(tx, rgb.data(), frame.data(), frame_samples, nullptr, nullptr), -1);
+    nbtv_rx_set_model(rx, nullptr);
+    nbtv_rx_reset(rx);
+    nbtv_rx_push(rx, audio.data(), static_cast<int>(audio.size()));
+    n = 0;
+    while (nbtv_rx_poll_frame(rx, &f)) n += f.model_missing;
+    CHECK_EQ(n, 2);
+
+    nbtv_rx_destroy(bare);
+    nbtv_rx_destroy(rx);
+    nbtv_tx_destroy(tx);
+}
+
 }  // namespace
 
 int main() {
@@ -291,6 +435,7 @@ int main() {
     loopback(48000, 9, "rocket");
     loopback(12000, 8, "coffee");
     test_payload_path();
+    test_learned_mode();
     test_spectrum();
     return check::finish("c_api");
 }

@@ -6,7 +6,7 @@
 // 以 model_id() 辨認。網路在兩端各自以浮點數計算，不同機器的結果會有末位的差異；那遠小於通道的雜訊，
 // 不影響互通。
 //
-// 目前只有推論本身，還沒有接進數據機的模式。和核心其他部分一樣不開執行緒。
+// 這裡只有推論本身；數據機用到它的地方是模式 11，見 learned_frame.hpp。和核心其他部分一樣不開執行緒。
 #pragma once
 
 #include <cstdint>
@@ -16,8 +16,7 @@
 
 namespace nbtv {
 
-// 解碼器認得的訊雜比範圍（dB）；超出的值會被夾到範圍內。訓練時涵蓋 −2 到 28 dB。
-inline constexpr float kLearnedMinSnrDb = -2.0f;
+// 解碼器認得的最高訊雜比（dB）；更高的值會被夾到這裡。最低的值依模型而定，見 min_snr_db()。
 inline constexpr float kLearnedMaxSnrDb = 30.0f;
 
 class LearnedCodec {
@@ -36,13 +35,26 @@ public:
     // 一張畫面變成幾個實數：潛在通道數 × 9 × 12（目前的模型是 7776）。
     int value_count() const;
 
+    // 權重檔的結構編號（tools/learned/model.py）：1 的解碼器只吃訊雜比，2 的另外吃各個值的可靠程度。
+    int architecture() const;
+
+    // 解碼器認得的最低訊雜比（dB），訓練時涵蓋到這裡：結構 1 是 −2，結構 2 是 −6。更低的值會被夾到這裡。
+    float min_snr_db() const;
+
     // rgb 是 96×72×3 的畫面；values 收 value_count() 個實數，均方值是 1/2
     // （兩個一組當 I、Q 時，格點的平均功率是 1）。長度不對時回傳 false。
     bool encode(std::span<const std::uint8_t> rgb, std::span<float> values) const;
 
     // values 是等化後收到的值（順序和 encode 的輸出相同），snr_db 是格點訊雜比；rgb 收 96×72×3 的畫面。
+    // reliability 是各個值的可靠程度，0 到 1：1 是照常，愈小表示那個值愈不可信（接收端已經把它按比例壓小），
+    // 0 等於沒收到。長度和 values 相同；給空的表示全部是 1。結構 1 的模型不看它。
     // 長度不對時回傳 false。
-    bool decode(std::span<const float> values, float snr_db, std::span<std::uint8_t> rgb) const;
+    bool decode(std::span<const float> values, std::span<const float> reliability, float snr_db,
+                std::span<std::uint8_t> rgb) const;
+    // 每個值都一樣可靠時的簡便寫法。
+    bool decode(std::span<const float> values, float snr_db, std::span<std::uint8_t> rgb) const {
+        return decode(values, {}, snr_db, rgb);
+    }
 
     // encode、decode 不改變物件的狀態，可以同時從不同的執行緒呼叫同一個物件。
 

@@ -42,12 +42,13 @@ const char *nbtv_version_string(void);
 
 typedef enum nbtv_mode_kind {
     NBTV_MODE_DIGITAL = 0, /* OFDM + LDPC，每幀一張 AV1 影像 */
-    NBTV_MODE_ANALOG = 1   /* 相干類比：直接傳 DCT 係數 */
+    NBTV_MODE_ANALOG = 1,  /* 相干類比：直接傳 DCT 係數 */
+    NBTV_MODE_LEARNED = 2  /* 學習式（實驗中）：類神經網路把畫面變成通道上的值；收發兩端都要先設定模型 */
 } nbtv_mode_kind;
 
 /* 一個傳輸模式的幀結構。時間與取樣數以數據機取樣率 12 kHz 計。 */
 typedef struct nbtv_mode_info {
-    int id;                /* 空中的模式編號：數位 0–5，類比 8–10 */
+    int id;                /* 空中的模式編號：數位 0–5，類比 8–10，學習式 11 */
     nbtv_mode_kind kind;
     int payload_symbols;   /* 每幀的酬載符號數 */
     int frame_symbols;     /* 含開頭的 S0、S1 */
@@ -64,10 +65,11 @@ typedef struct nbtv_mode_info {
     int image_bytes;       /* 一張影像最多能用的位元組數 */
     int padding_cells;     /* 碼字之外補滿幀用的格數 */
 
-    /* 只有類比模式使用，數位為 0 */
+    /* 類比與學習式模式使用，數位為 0 */
     int header_cells;      /* 標頭佔用的格數 */
-    int analog_values;     /* 可以放係數的實數個數（每格兩個） */
-    int analog_coefficients; /* 實際傳送的係數個數（全部是 20736 個） */
+    int analog_values;     /* 標頭之外可以放的實數個數（每格兩個） */
+    int analog_coefficients; /* 類比：實際傳送的係數個數（全部是 20736 個）；其餘為 0 */
+    int learned_values;    /* 學習式：一張畫面變成幾個實數（模型的輸出要一樣多）；其餘為 0 */
 } nbtv_mode_info;
 
 /* 已定義的模式個數。 */
@@ -78,6 +80,26 @@ int nbtv_mode_at(int index, nbtv_mode_info *out);
 
 /* 以空中的模式編號查詢。成功回傳 0；編號沒有定義時回傳 -1。 */
 int nbtv_mode_by_id(int id, nbtv_mode_info *out);
+
+/* ------------------------------------------------------------------ 學習式模式的模型 */
+
+/*
+ * 學習式模式（NBTV_MODE_LEARNED）的編解碼是一個類神經網路，權重放在獨立的檔案裡（models/ 底下的 .bin）。
+ * 收發兩端必須用同一份權重。外殼把檔案內容讀進記憶體後交給 nbtv_model_load，再設定給發射機與接收機；
+ * 同一個模型可以給多個物件用，設定之後就可以 nbtv_model_destroy（物件自己會留著）。
+ * 模型載入後不會再改變，可以同時被不同執行緒上的物件使用。
+ */
+typedef struct nbtv_model nbtv_model;
+
+/* data 是權重檔的內容，呼叫之後可以釋放。不是權重檔、檔案損壞或版本不認得時回傳 NULL。 */
+nbtv_model *nbtv_model_load(const uint8_t *data, size_t size);
+void nbtv_model_destroy(nbtv_model *model);
+
+/* 權重檔的識別碼（檔案內容的 CRC-32）。收發兩端的識別碼相同才解得出畫面。 */
+uint32_t nbtv_model_id(const nbtv_model *model);
+
+/* 一張畫面變成幾個實數；要和模式的 learned_values 相同才能用在那個模式。 */
+int nbtv_model_values(const nbtv_model *model);
 
 /* ------------------------------------------------------------------ 呼號 */
 
@@ -134,9 +156,12 @@ void nbtv_tx_set_callsign(nbtv_tx *tx, const char *callsign);
 /* 影像編碼器的速度檔，見 nbtv_image_encode。 */
 void nbtv_tx_set_encoder_speed(nbtv_tx *tx, int speed);
 
+/* 學習式模式用的模型；model 是 NULL 表示拿掉。沒有設定模型時，學習式模式編不出幀。 */
+void nbtv_tx_set_model(nbtv_tx *tx, const nbtv_model *model);
+
 /*
  * 包絡峰均比的目標（dB）：削波門檻比平均包絡功率高這麼多。0 表示用各模式的預設值
- * （QPSK 5、16QAM 6、64QAM 與類比 7），負值表示不削波。
+ * （QPSK 5、16QAM 6、64QAM、類比與學習式 7），負值表示不削波。
  */
 void nbtv_tx_set_papr_db(nbtv_tx *tx, float papr_db);
 
@@ -148,14 +173,15 @@ typedef struct nbtv_tx_frame_info {
     int sequence;      /* 這一幀的幀序號 0..255 */
     int image_bytes;   /* 數位：壓縮後的位元組數；類比：0 */
     int quantizer;     /* 數位：編碼器選到的量化參數 0（最好）..63 */
-    int coefficients;  /* 類比：傳送的係數個數；數位：0 */
+    int coefficients;  /* 類比：傳送的係數個數；其餘：0 */
 } nbtv_tx_frame_info;
 
 /*
  * 把一張畫面做成一幀音訊。samples 的容量至少要 nbtv_tx_frame_samples()；回傳寫入的取樣數，失敗回傳 -1
- * （數位模式沒有編解碼器、畫面壓不進去、容量不足）。幀與幀可以直接相接連續播放。
+ * （數位模式沒有編解碼器、畫面壓不進去、學習式模式沒有設定模型或模型不合、容量不足）。幀與幀可以直接相接連續播放。
  * 輸出的峰值不超過 ±1.0；音量由外殼自己調整。
- * preview_rgb 不是 NULL 時，填入「沒有雜訊時對方看到的畫面」：數位是壓縮再解開的結果，類比是只留傳送係數的結果。
+ * preview_rgb 不是 NULL 時，填入「沒有雜訊時對方看到的畫面」：數位是壓縮再解開的結果，類比是只留傳送係數的結果，
+ * 學習式是編碼後直接解回來的結果（要多花一次解碼的時間）。
  * info 可以是 NULL。
  */
 int nbtv_tx_encode_image(nbtv_tx *tx, const uint8_t *rgb, float *samples, int capacity, uint8_t *preview_rgb,
@@ -192,8 +218,14 @@ typedef struct nbtv_rx nbtv_rx;
 nbtv_rx *nbtv_rx_create(int sample_rate);
 void nbtv_rx_destroy(nbtv_rx *rx);
 
-/* 清掉所有狀態，回到搜尋同步訊號（例如發射結束、重新開始接收時）。 */
+/* 清掉所有狀態，回到搜尋同步訊號（例如發射結束、重新開始接收時）。設定過的模型會留著。 */
 void nbtv_rx_reset(nbtv_rx *rx);
+
+/*
+ * 學習式模式用的模型；model 是 NULL 表示拿掉。沒有設定模型、或對方用的是另一份權重時，
+ * 學習式的幀照樣會回報（呼號、訊雜比都有），但沒有畫面：decoded = 0、model_missing = 1。
+ */
+void nbtv_rx_set_model(nbtv_rx *rx, const nbtv_model *model);
 
 /* 推入收到的音訊。同步、解調與解碼都在這個呼叫裡完成，一幀結束時可能花幾十毫秒。 */
 void nbtv_rx_push(nbtv_rx *rx, const float *samples, int count);
@@ -216,16 +248,17 @@ void nbtv_rx_get_status(const nbtv_rx *rx, nbtv_rx_status *out);
 typedef struct nbtv_rx_frame {
     int mode_id;
     nbtv_mode_kind kind;
-    int decoded;         /* 數位：CRC 正確；類比：有畫面。0 表示這一幀解碼失敗 */
-    int header_ok;       /* 呼號與幀序號可信（類比模式的標頭可能壞掉而畫面仍在） */
+    int decoded;         /* 數位：CRC 正確；類比、學習式：有畫面。0 表示這一幀解碼失敗 */
+    int header_ok;       /* 呼號與幀序號可信（類比與學習式的標頭可能壞掉而畫面仍在） */
     char callsign[NBTV_CALLSIGN_MAX + 1];
     int sequence;        /* 幀序號 0..255；header_ok 為 0 時是 -1 */
     float snr_db;
     float freq_offset_hz;
     int has_image;       /* rgb 是否有效。數位模式需要內含編解碼器，否則請自行解 image_data */
     uint8_t rgb[NBTV_IMAGE_RGB_BYTES];
-    int image_bytes;     /* 數位：影像酬載的位元組數（已去掉補零）；類比：0 */
+    int image_bytes;     /* 數位：影像酬載的位元組數（已去掉補零）；其餘：0 */
     uint8_t image_data[NBTV_MAX_IMAGE_BYTES];
+    int model_missing;   /* 學習式：收到了一幀，但沒有設定模型或權重和對方不同，所以沒有畫面 */
 } nbtv_rx_frame;
 
 /*

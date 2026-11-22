@@ -1,8 +1,9 @@
-// nbtv-sim：發射 → 通道模擬 → 接收，統計掉幀率（數位）或畫質（類比）。
+// nbtv-sim：發射 → 通道模擬 → 接收，統計掉幀率（數位）或畫質（類比、學習式）。
 // 每一輪是一次連續發射（幾幀），前面先放一段只有雜訊的時間；每一輪用不同的通道亂數。
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <thread>
@@ -10,6 +11,8 @@
 
 #include "args.hpp"
 #include "channel.hpp"
+#include "learned_codec.hpp"
+#include "model_file.hpp"
 #include "modes.hpp"
 #include "ppm.hpp"
 #include "receiver.hpp"
@@ -38,6 +41,8 @@ double psnr(const std::vector<std::uint8_t>& a, const std::vector<std::uint8_t>&
 }
 
 bool g_noise_map = true;
+std::shared_ptr<const LearnedCodec> g_model;  // 學習式模式用；載入後不再改變，各執行緒共用
+bool g_learned_median = true, g_learned_attenuate = true, g_learned_floor = true;
 
 Totals run_round(const Mode& mode, sim::ChannelParams params, int burst, const std::vector<std::uint8_t>& image, std::uint64_t seed,
                  float papr_db) {
@@ -45,6 +50,7 @@ Totals run_round(const Mode& mode, sim::ChannelParams params, int burst, const s
     Transmitter tx;
     tx.set_callsign("BX4ACP");
     tx.set_papr_db(papr_db);
+    tx.set_model(g_model);
     std::vector<std::vector<std::uint8_t>> payloads;
     std::vector<float> signal;
     for (int i = 0; i < burst; ++i) {
@@ -54,6 +60,8 @@ Totals run_round(const Mode& mode, sim::ChannelParams params, int burst, const s
             for (auto& b : payload) b = static_cast<std::uint8_t>(rng.below(256));
             frame = tx.digital_frame(mode, payload);
             payloads.push_back(std::move(payload));
+        } else if (mode.is_learned()) {
+            frame = tx.learned_frame(mode, image);
         } else {
             frame = tx.analog_frame(mode, image);
         }
@@ -74,6 +82,10 @@ Totals run_round(const Mode& mode, sim::ChannelParams params, int burst, const s
 
     Receiver rx;
     rx.tuning().noise_map = g_noise_map;
+    rx.tuning().learned_median_snr = g_learned_median;
+    rx.tuning().learned_attenuate = g_learned_attenuate;
+    rx.tuning().learned_floor = g_learned_floor;
+    rx.set_model(g_model);
     Totals t;
     t.sent = burst;
     for (std::size_t pos = 0; pos < received.size(); pos += 1024) {
@@ -100,8 +112,11 @@ Totals run_round(const Mode& mode, sim::ChannelParams params, int burst, const s
 }  // namespace
 
 int main(int argc, char** argv) {
-    const Args args(argc, argv, {"help", "flat-noise"});
+    const Args args(argc, argv, {"help", "flat-noise", "learned-mean", "learned-plain", "learned-nofloor"});
     g_noise_map = !args.has("flat-noise");
+    g_learned_median = !args.has("learned-mean");
+    g_learned_attenuate = !args.has("learned-plain");
+    g_learned_floor = !args.has("learned-nofloor");
     if (args.has("help")) {
         std::printf(
             "用法：nbtv-sim [選項]\n"
@@ -113,7 +128,11 @@ int main(int argc, char** argv) {
             "  --offset Hz       頻率偏移；--ppm N 取樣時脈誤差\n"
             "  --tone Hz         單頻載波干擾的頻率；--tone-db dB 它相對於訊號的功率（預設 0）\n"
             "  --impulse N       每秒 N 次脈衝雜訊；--impulse-db dB 脈衝期間的雜訊功率（預設 20）；--impulse-ms 持續時間（預設 20）\n"
-            "  --image 檔.ppm    類比模式用的畫面（96×72）\n"
+            "  --image 檔.ppm    類比與學習式模式用的畫面（96×72）\n"
+            "  --model 檔名      學習式模式（模式 11）的權重檔（預設用專案 models/ 裡的）\n"
+            "  --learned-mean    學習式：告訴解碼器的訊雜比用各格點雜訊的平均值，不用中位數（比較用）\n"
+            "  --learned-plain   學習式：雜訊特別大的格點不壓小（比較用）\n"
+            "  --learned-nofloor 學習式：訊雜比低於解碼器認得的下限時不另外處理（比較用）\n"
             "  --papr dB         包絡峰均比目標（0 用預設值，負值不削波）\n"
             "  --flat-noise      接收機不用逐符號、逐載波的雜訊估計（比較用）\n"
             "  --threads N       執行緒數（預設用全部核心）\n"
@@ -153,7 +172,17 @@ int main(int argc, char** argv) {
     if (!mode->is_digital()) {
         int w = 0, h = 0;
         if (!args.has("image") || !read_ppm(args.str("image", ""), image, &w, &h) || w != kImageWidth || h != kImageHeight) {
-            std::fprintf(stderr, "類比模式需要 --image 指定 96×72 的 PPM\n");
+            std::fprintf(stderr, "類比與學習式模式需要 --image 指定 96×72 的 PPM\n");
+            return 2;
+        }
+    }
+    if (mode->is_learned()) {
+        const std::string model_path = args.str("model", default_model_path());
+        std::vector<std::uint8_t> bytes;
+        std::string error = "讀不到檔案";
+        if (read_file(model_path, bytes)) g_model = LearnedCodec::load(bytes, &error);
+        if (g_model == nullptr || g_model->value_count() != mode->learned_values) {
+            std::fprintf(stderr, "學習式模式需要權重檔 %s：%s\n", model_path.c_str(), g_model == nullptr ? error.c_str() : "不是給這個模式用的");
             return 2;
         }
     }

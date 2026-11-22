@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <memory>
 #include <span>
 #include <string>
 #include <vector>
@@ -13,6 +14,7 @@
 #include "digital_frame.hpp"
 #include "dsp.hpp"
 #include "image_codec.hpp"
+#include "learned_frame.hpp"
 #include "modes.hpp"
 #include "receiver.hpp"
 #include "spectrum.hpp"
@@ -33,7 +35,7 @@ using nbtv::Mode;
 void fill(const Mode& m, nbtv_mode_info* out) {
     *out = nbtv_mode_info{};
     out->id = m.id;
-    out->kind = m.is_digital() ? NBTV_MODE_DIGITAL : NBTV_MODE_ANALOG;
+    out->kind = m.is_digital() ? NBTV_MODE_DIGITAL : m.is_learned() ? NBTV_MODE_LEARNED : NBTV_MODE_ANALOG;
     out->payload_symbols = m.payload_symbols;
     out->frame_symbols = m.frame_symbols();
     out->frame_samples = m.frame_samples();
@@ -48,7 +50,8 @@ void fill(const Mode& m, nbtv_mode_info* out) {
     out->padding_cells = m.padding_cells();
     out->header_cells = m.header_cells();
     out->analog_values = m.analog_values();
-    out->analog_coefficients = m.is_digital() ? 0 : nbtv::analog_plan(m).coefficients;
+    out->analog_coefficients = m.is_analog() ? nbtv::analog_plan(m).coefficients : 0;
+    out->learned_values = m.learned_values;
 }
 
 constexpr bool valid_rate(int sample_rate) { return sample_rate == 12000 || sample_rate == 48000; }
@@ -63,6 +66,10 @@ static_assert(NBTV_MAX_IMAGE_BYTES == max_image_bytes());
 std::span<const std::uint8_t> rgb_span(const std::uint8_t* rgb) { return {rgb, static_cast<std::size_t>(nbtv::kImageRgbBytes)}; }
 
 }  // namespace
+
+struct nbtv_model {
+    std::shared_ptr<const nbtv::LearnedCodec> codec;
+};
 
 struct nbtv_tx {
     int rate = nbtv::kSampleRate;
@@ -143,6 +150,23 @@ int nbtv_mode_by_id(int id, nbtv_mode_info* out) {
     return 0;
 }
 
+/* ---- 學習式模式的模型 ---- */
+
+nbtv_model* nbtv_model_load(const uint8_t* data, size_t size) {
+    if (data == nullptr || size == 0) return nullptr;
+    std::unique_ptr<nbtv::LearnedCodec> codec = nbtv::LearnedCodec::load({data, size});
+    if (codec == nullptr) return nullptr;
+    nbtv_model* model = new nbtv_model;
+    model->codec = std::move(codec);
+    return model;
+}
+
+void nbtv_model_destroy(nbtv_model* model) { delete model; }
+
+uint32_t nbtv_model_id(const nbtv_model* model) { return model != nullptr ? model->codec->model_id() : 0; }
+
+int nbtv_model_values(const nbtv_model* model) { return model != nullptr ? model->codec->value_count() : 0; }
+
 /* ---- 呼號 ---- */
 
 int nbtv_callsign_normalize(const char* text, char* out) {
@@ -207,6 +231,10 @@ void nbtv_tx_set_encoder_speed(nbtv_tx* tx, int speed) {
     if (tx != nullptr) tx->speed = speed < 0 ? nbtv::kDefaultEncoderSpeed : std::min(speed, 10);
 }
 
+void nbtv_tx_set_model(nbtv_tx* tx, const nbtv_model* model) {
+    if (tx != nullptr) tx->tx.set_model(model != nullptr ? model->codec : nullptr);
+}
+
 void nbtv_tx_set_papr_db(nbtv_tx* tx, float papr_db) {
     if (tx != nullptr) tx->tx.set_papr_db(papr_db);
 }
@@ -234,6 +262,17 @@ int nbtv_tx_encode_image(nbtv_tx* tx, const uint8_t* rgb, float* samples, int ca
             std::memcpy(preview_rgb, rgb, static_cast<std::size_t>(nbtv::kImageRgbBytes));
         }
         frame = tx->tx.digital_frame(mode, enc.payload, static_cast<int>(nbtv::ImageFormat::Av1));
+    } else if (mode.is_learned()) {
+        const auto& model = tx->tx.model();
+        if (model == nullptr || !nbtv::learned_model_fits(mode, *model)) return -1;
+        std::vector<std::uint8_t> preview;
+        tx->remember();
+        frame = tx->tx.learned_frame(mode, rgb_span(rgb), preview_rgb != nullptr ? &preview : nullptr);
+        if (frame.empty()) {
+            tx->undo.valid = false;
+            return -1;
+        }
+        if (preview_rgb != nullptr) std::copy(preview.begin(), preview.end(), preview_rgb);
     } else {
         std::vector<std::uint8_t> preview;
         tx->remember();
@@ -302,6 +341,10 @@ void nbtv_rx_reset(nbtv_rx* rx) {
     rx->down.reset();
 }
 
+void nbtv_rx_set_model(nbtv_rx* rx, const nbtv_model* model) {
+    if (rx != nullptr) rx->rx.set_model(model != nullptr ? model->codec : nullptr);
+}
+
 void nbtv_rx_push(nbtv_rx* rx, const float* samples, int count) {
     if (rx == nullptr || samples == nullptr || count <= 0) return;
     const std::span<const float> in(samples, static_cast<std::size_t>(count));
@@ -336,7 +379,8 @@ int nbtv_rx_poll_frame(nbtv_rx* rx, nbtv_rx_frame* out) {
     if (!rx->rx.poll(f)) return 0;
     std::memset(out, 0, sizeof *out);
     out->mode_id = f.mode_id;
-    out->kind = f.is_digital ? NBTV_MODE_DIGITAL : NBTV_MODE_ANALOG;
+    out->kind = f.is_digital ? NBTV_MODE_DIGITAL : f.is_learned ? NBTV_MODE_LEARNED : NBTV_MODE_ANALOG;
+    out->model_missing = f.model_missing ? 1 : 0;
     out->decoded = f.decoded ? 1 : 0;
     out->header_ok = f.header_ok ? 1 : 0;
     std::strncpy(out->callsign, f.callsign.c_str(), NBTV_CALLSIGN_MAX);

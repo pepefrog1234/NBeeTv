@@ -22,6 +22,12 @@ struct AnalogHeader {
     int gain_code = 0;     // 幀增益的量化值，見 analog_gain_from_code()
 };
 
+// 標頭的編解碼（相干類比與學習式共用）：11 位元組 → 迴旋碼 → QPSK，重複兩次，共 kAnalogHeaderCells 格。
+void analog_header_encode(const AnalogHeader& header, std::span<cf> cells);
+// cells、noise_var 是那 kAnalogHeaderCells 格等化後的值與複數雜訊變異數。兩份的軟值相加後解碼、檢查 CRC-16；
+// 成功時填入 header 並回傳 true，失敗時 header 不動。
+bool analog_header_decode(std::span<const cf> cells, std::span<const float> noise_var, AnalogHeader& header);
+
 // 幀增益碼 → 相對於名目增益的倍數：每一級 0.25 dB，128 是 0 dB。
 double analog_gain_from_code(int code);
 

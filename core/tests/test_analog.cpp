@@ -99,7 +99,7 @@ void test_dct_and_color() {
 
 void test_plan() {
     for (const Mode& m : kModes) {
-        if (m.is_digital()) continue;
+        if (!m.is_analog()) continue;
         const AnalogPlan& p = analog_plan(m);
         CHECK_EQ(p.slots, m.analog_values());
         CHECK(p.coefficients > 0 && p.coefficients <= p.slots);
@@ -160,7 +160,7 @@ void test_plan() {
 void test_codec() {
     Rng rng(21);
     for (const Mode& m : kModes) {
-        if (m.is_digital()) continue;
+        if (!m.is_analog()) continue;
         for (const char* name : test_images::kNames) {
             const auto rgb = test_images::load(name);
             AnalogHeader hdr;

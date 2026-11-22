@@ -50,11 +50,13 @@ enum SnapshotRunner {
                to: directory.appendingPathComponent("4-settings.png"))
 
         // 5. 發射模式選單
+        // app 裡有學習式模式的權重檔時，選單多一組（分隔線、標題與一列）
+        let menuHeight: CGFloat = Modes.learned.isEmpty ? 470 : 550
         let menu = ModeMenuView(selectedID: 1, standalone: true) { _ in }
             .padding(16)
-            .frame(width: 400, height: 470, alignment: .top)
+            .frame(width: 400, height: menuHeight, alignment: .top)
             .background(Theme.background)
-        render(menu, width: 400, height: 470, to: directory.appendingPathComponent("5-mode-menu.png"))
+        render(menu, width: 400, height: menuHeight, to: directory.appendingPathComponent("5-mode-menu.png"))
 
         print(failures == 0 ? "[snapshot] 完成：\(directory.path)" : "[snapshot] 有 \(failures) 張沒有算出來")
         return failures == 0 ? 0 : 1

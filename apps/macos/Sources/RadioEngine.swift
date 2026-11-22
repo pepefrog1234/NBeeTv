@@ -118,7 +118,7 @@ final class RadioEngine {
         spectrum.push(samples)
         pending.take(receiver.status())
         while let frame = receiver.pollFrame() {
-            DebugTap.log("接收：收到一幀，模式 \(frame.modeID)，\(frame.decoded ? "解碼成功" : "沒解出來")，標頭\(frame.headerOK ? "正確" : "錯誤")，序號 \(frame.sequence)")
+            DebugTap.log("接收：收到一幀，模式 \(frame.modeID)，\(frame.decoded ? "解碼成功" : (frame.modelMissing ? "模型不符，沒有畫面" : "沒解出來"))，標頭\(frame.headerOK ? "正確" : "錯誤")，序號 \(frame.sequence)")
             pending.frames.append(frame)
         }
         if pending.synced != tapSynced {

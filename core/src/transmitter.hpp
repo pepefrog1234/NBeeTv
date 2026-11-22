@@ -1,11 +1,13 @@
-// 發射端：把影像酬載（數位）或畫面（類比）做成一幀 12 kHz 的音訊取樣，並管理幀序號。
+// 發射端：把影像酬載（數位）或畫面（類比、學習式）做成一幀 12 kHz 的音訊取樣，並管理幀序號。
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <string>
 #include <vector>
 
+#include "learned_codec.hpp"
 #include "modes.hpp"
 
 namespace nbtv {
@@ -28,12 +30,21 @@ public:
     // 類比：rgb 是 96×72×3 的畫面。preview 不是空指標時，填入沒有雜訊時對方看到的畫面。
     std::vector<float> analog_frame(const Mode& mode, std::span<const std::uint8_t> rgb, std::vector<std::uint8_t>* preview = nullptr);
 
+    // 學習式模式用的模型。可以和接收機共用同一份；傳空指標表示拿掉。
+    void set_model(std::shared_ptr<const LearnedCodec> model) { model_ = std::move(model); }
+    const std::shared_ptr<const LearnedCodec>& model() const { return model_; }
+
+    // 學習式：rgb 是 96×72×3 的畫面。preview 不是空指標時，填入沒有雜訊時對方看到的畫面（要多跑一次解碼器）。
+    // 沒有模型、或模型和模式不合時回傳空的，幀序號不變。
+    std::vector<float> learned_frame(const Mode& mode, std::span<const std::uint8_t> rgb, std::vector<std::uint8_t>* preview = nullptr);
+
 private:
     float papr_for(const Mode& mode) const;
 
     std::string callsign_;
     float papr_db_ = 0.0f;
     int sequence_ = 0;
+    std::shared_ptr<const LearnedCodec> model_;
 };
 
 }  // namespace nbtv

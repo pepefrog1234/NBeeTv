@@ -7,12 +7,14 @@
 
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <span>
 #include <string>
 #include <vector>
 
 #include "chanest.hpp"
 #include "dsp.hpp"
+#include "learned_codec.hpp"
 #include "modes.hpp"
 #include "types.hpp"
 
@@ -21,7 +23,9 @@ namespace nbtv {
 struct RxFrame {
     int mode_id = -1;
     bool is_digital = true;
-    bool decoded = false;      // 數位：CRC 正確；類比：有畫面
+    bool is_learned = false;   // 學習式模式（is_digital 為 false）
+    bool decoded = false;      // 數位：CRC 正確；類比、學習式：有畫面
+    bool model_missing = false;  // 學習式：沒有設定模型，或對方用的是另一份權重，所以沒有畫面
     bool header_ok = false;    // 標頭（呼號、幀序號）可信
     std::string callsign;
     int sequence = -1;
@@ -30,7 +34,7 @@ struct RxFrame {
     int ldpc_iterations = 0;
     int image_format = 0;
     std::vector<std::uint8_t> image_data;  // 數位：影像酬載（含尾端補零），decoded 時有效
-    std::vector<std::uint8_t> rgb;         // 類比：96×72×3 的畫面
+    std::vector<std::uint8_t> rgb;         // 類比、學習式：96×72×3 的畫面
     std::int64_t start_sample = 0;         // 幀開頭在輸入串流裡的位置（12 kHz 的取樣編號）
 };
 
@@ -69,6 +73,10 @@ struct RxTuning {
     double verify_pilots = 0.40;
     // 是否使用逐符號、逐載波的雜訊估計（見 ChannelEstimate::noise_at）。關掉時每個格點都用同一個雜訊變異數。
     bool noise_map = true;
+    // 學習式模式：各格點雜訊不一樣大時的處理方式，見 LearnedRxOptions（learned_frame.hpp）。
+    bool learned_median_snr = true;
+    bool learned_attenuate = true;
+    bool learned_floor = true;
 };
 
 class Receiver {
@@ -76,6 +84,9 @@ public:
     Receiver();
 
     RxTuning& tuning() { return tuning_; }
+
+    // 學習式模式用的模型。沒有設定時，學習式的幀只回報「收到一幀，但沒有畫面」。reset() 不會清掉它。
+    void set_model(std::shared_ptr<const LearnedCodec> model) { model_ = std::move(model); }
 
     void reset();
     void push(std::span<const float> samples);  // 12 kHz
@@ -129,6 +140,7 @@ private:
     void trim();
 
     RxTuning tuning_;
+    std::shared_ptr<const LearnedCodec> model_;
     AnalyticFilter analytic_;
     ChannelEstimator chanest_;
     std::vector<cf> buf_;
