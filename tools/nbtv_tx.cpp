@@ -16,7 +16,7 @@ int main(int argc, char** argv) {
         std::printf(
             "用法：nbtv-tx [選項] 影像.ppm [影像2.ppm …]\n"
             "  --out 檔名      輸出的 WAV（預設 nbtv.wav）\n"
-            "  --mode N        模式編號：數位 0–5、類比 8–10、學習式 11–12（預設 1）\n"
+            "  --mode N        模式編號：數位 0–5、類比 8–10、學習式 11–13（預設 1）\n"
             "  --model 檔名    學習式模式的權重檔（預設用專案 models/ 裡給那個模式的）\n"
             "  --call 呼號     最多 9 個字元\n"
             "  --frames N      總共送幾幀，影像輪流使用（預設：每張影像一幀）\n"
@@ -41,10 +41,10 @@ int main(int argc, char** argv) {
         return 2;
     }
     if (mode.kind == NBTV_MODE_LEARNED) {
-        const std::string model_path = args.str("model", default_model_path(mode.learned_values));
+        const std::string model_path = args.str("model", default_model_path(mode.learned_values, mode.learned_width));
         std::vector<std::uint8_t> bytes;
         nbtv_model* model = read_file(model_path, bytes) ? nbtv_model_load(bytes.data(), bytes.size()) : nullptr;
-        if (model == nullptr || nbtv_model_values(model) != mode.learned_values) {
+        if (model == nullptr || nbtv_model_values(model) != mode.learned_values || nbtv_model_width(model) != mode.learned_width) {
             std::fprintf(stderr, "學習式模式需要權重檔：%s 讀不到、不是權重檔，或不是給這個模式用的\n", model_path.c_str());
             return 1;
         }

@@ -15,9 +15,16 @@ import torch.nn.functional as F
 H, W = 72, 96
 MAX_SNR_DB = 30.0
 MIN_SNR_DB = {1: -2.0, 2: -6.0}   # 各結構的解碼器認得的最低訊雜比（訓練時涵蓋到這裡）
-# 解析度每減半一次的通道數。models/ 裡的權重都是這一組，C++ 的推論（core/src/learned_codec.cpp）也只認得這一組；
-# 別的寬度（train.py --widths）目前只能在 PyTorch 裡訓練與評估，用來試「模型加大有沒有幫助」。
+# 解析度每減半一次的通道數。模式 11、12 的模型是這一組；模式 13 的模型每一層加寬一倍（64, 128, 256, 384，train.py --widths）。
+# 權重檔沒有另外記寬度：讀的一方（這裡的 widths_of、C++ 的 core/src/learned_codec.cpp）由張量的形狀看出來。
+# 哪個模式用哪種寬度的模型寫在核心的模式表（core/src/modes.hpp）。
 DEFAULT_WIDTHS = (32, 64, 128, 192)
+
+
+def widths_of(state):
+    """從權重（state_dict）看出各層的寬度：編碼器開頭的卷積，以及三個把解析度減半的卷積的輸出通道數。"""
+    return tuple(int(state[name].shape[0])
+                 for name in ("enc.stem.weight", "enc.stages.0.weight", "enc.stages.3.weight", "enc.stages.6.weight"))
 
 
 class ResBlock(nn.Module):

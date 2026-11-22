@@ -4,13 +4,15 @@
 #    0   8  魔術字 "NBTVLRN1"
 #    8   4  格式版本（1）
 #   12   4  結構編號（見 model.py：1 是只吃訊雜比的解碼器，2 是另外吃「各個值可不可靠」的解碼器）
-#   16   4  潛在通道數（一張畫面是「通道數 × 9 × 12」個實數：模式 11 的模型 72 → 7776，模式 12 的模型 24 → 2592）
+#   16   4  潛在通道數（一張畫面是「通道數 × 9 × 12」個實數：模式 11、13 的模型 72 → 7776，模式 12 的模型 24 → 2592）
 #   20   4  張量個數
 #   24   4  數值型別：0 = float32、1 = float16
 #   28   4  保留（0）
 #   之後每個張量：名稱長度（uint16）、名稱（ASCII，和 PyTorch 的 state_dict 相同）、維度數（uint8）、
 #                 各維度（uint32）、資料（PyTorch 的排列）
 #   最後 4 位元組：前面所有位元組的 CRC-32（和 zlib 相同）。這個值也是模型的識別碼，收發兩端必須相同。
+#   各層的寬度（model.py 的 widths）不另外記：讀的一方由張量的形狀看出來（model.widths_of、C++ 的 learned_codec.cpp）。
+#   模式 11、12 的模型是 32／64／128／192，模式 13 的每一層加寬一倍。
 #
 # 預設存成 float16：第一版的權重在 800 張測試小圖、0／10／20 dB／無雜訊下的 PSNR 和 float32 到小數第三位都相同，
 # 檔案小一半。（每個輸出通道各自量化成 int8 的話再小一半，但 PSNR 會掉 0.02–0.14 dB。）
@@ -37,7 +39,7 @@ import zlib
 import numpy as np
 import torch
 
-from model import DEFAULT_WIDTHS, JSCC
+from model import DEFAULT_WIDTHS, JSCC, widths_of
 
 MAGIC = b"NBTVLRN1"
 REF_MAGIC = b"NBTVLRF2"
@@ -116,9 +118,6 @@ if __name__ == "__main__":
     else:
         ckpt = torch.load(args.checkpoint, map_location="cpu")
         source, source_latent, source_arch = ckpt["model"], ckpt["latent"], ckpt.get("architecture", 1)
-        if tuple(ckpt.get("widths", DEFAULT_WIDTHS)) != DEFAULT_WIDTHS:
-            # 權重檔沒有記各層的寬度，C++ 的推論也只認得預設的那一組
-            raise SystemExit("這個檢查點的各層寬度不是預設值，C++ 的推論讀不了，所以不匯出；先用 evaluate.py 在 PyTorch 裡評估")
     architecture = args.architecture or source_arch
     source = {k: v.detach().cpu().float() for k, v in source.items()}
     if architecture == 2 and source_arch == 1:
@@ -130,13 +129,15 @@ if __name__ == "__main__":
     state, latent, crc, arch = read_weights(args.weights)   # 讀回來用，之後算的和 C++ 看到的是同一份數值
     assert crc == model_id and latent == source_latent and arch == architecture and list(state) == list(source)
     worst = max(float((state[k] - v).abs().max()) for k, v in source.items())
+    widths = widths_of(state)   # 權重檔沒有另外記寬度，讀的一方都是由張量的形狀看出來
     print(f"已寫入 {args.weights}：結構 {architecture}、{len(state)} 個張量、{sum(v.numel() for v in state.values())} 個參數、"
-          f"{'float16' if half else 'float32'}、{os.path.getsize(args.weights)} 位元組；識別碼 {model_id:08X}")
+          f"{'float16' if half else 'float32'}、{os.path.getsize(args.weights)} 位元組；識別碼 {model_id:08X}"
+          + ("" if widths == DEFAULT_WIDTHS else f"；各層寬度 {'／'.join(str(w) for w in widths)}"))
     print(f"存檔捨入造成的最大權重誤差 {worst:.2e}")
 
     if args.reference:
         out_path, images = args.reference[0], args.reference[1:]
-        model = JSCC(latent, architecture)
+        model = JSCC(latent, architecture, widths)
         model.load_state_dict(state)
         model.eval()
         count = model.real_dims

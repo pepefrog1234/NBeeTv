@@ -12,6 +12,7 @@
 #include "args.hpp"
 #include "channel.hpp"
 #include "learned_codec.hpp"
+#include "learned_frame.hpp"
 #include "model_file.hpp"
 #include "modes.hpp"
 #include "ppm.hpp"
@@ -177,11 +178,11 @@ int main(int argc, char** argv) {
         }
     }
     if (mode->is_learned()) {
-        const std::string model_path = args.str("model", default_model_path(mode->learned_values));
+        const std::string model_path = args.str("model", default_model_path(mode->learned_values, mode->learned_width));
         std::vector<std::uint8_t> bytes;
         std::string error = "讀不到檔案";
         if (read_file(model_path, bytes)) g_model = LearnedCodec::load(bytes, &error);
-        if (g_model == nullptr || g_model->value_count() != mode->learned_values) {
+        if (g_model == nullptr || !learned_model_fits(*mode, *g_model)) {
             std::fprintf(stderr, "學習式模式需要權重檔 %s：%s\n", model_path.c_str(), g_model == nullptr ? error.c_str() : "不是給這個模式用的");
             return 2;
         }

@@ -312,6 +312,7 @@ void test_learned_mode(int mode_id, const char* weights, double min_psnr) {
     nbtv_model_destroy(nullptr);
     CHECK_EQ(nbtv_model_id(nullptr), 0);
     CHECK_EQ(nbtv_model_values(nullptr), 0);
+    CHECK_EQ(nbtv_model_width(nullptr), 0);
     nbtv_tx_set_model(nullptr, nullptr);
     nbtv_rx_set_model(nullptr, nullptr);
 
@@ -326,6 +327,7 @@ void test_learned_mode(int mode_id, const char* weights, double min_psnr) {
     nbtv_model* model = load_model(weights, &found);
     if (model == nullptr) return;
     CHECK_EQ(nbtv_model_values(model), mode.learned_values);
+    CHECK_EQ(nbtv_model_width(model), mode.learned_width);
     CHECK(nbtv_model_id(model) != 0);
 
     const std::vector<std::uint8_t> rgb = test_images::load("cat");
@@ -436,7 +438,7 @@ void test_learned_mode(int mode_id, const char* weights, double min_psnr) {
 // 兩個學習式模式各有自己的模型：發射機、接收機都設定兩個，一次發射裡換模式，各用各的模型
 void test_learned_two_models() {
     bool found[2] = {false, false};
-    nbtv_model* models[2] = {load_model("learned_7776_v2", &found[0]), load_model("learned_2592_v2", &found[1])};
+    nbtv_model* models[2] = {load_model("learned_7776_v3", &found[0]), load_model("learned_2592_v2", &found[1])};
     if (models[0] == nullptr || models[1] == nullptr) {
         for (nbtv_model* m : models) nbtv_model_destroy(m);
         return;
@@ -506,6 +508,77 @@ void test_learned_two_models() {
     nbtv_tx_destroy(tx);
 }
 
+// 模式 11 與 13 的實數一樣多，模型的寬度不同：各用各的模型，設定其中一個不會讓另一個模式也能用
+void test_learned_two_widths() {
+    bool found[2] = {false, false};
+    nbtv_model* narrow = load_model("learned_7776_v3", &found[0]);
+    nbtv_model* wide = load_model("learned_7776_wide_v1", &found[1]);
+    if (narrow == nullptr || wide == nullptr) {
+        nbtv_model_destroy(narrow);
+        nbtv_model_destroy(wide);
+        return;
+    }
+    CHECK_EQ(nbtv_model_values(narrow), nbtv_model_values(wide));
+    CHECK(nbtv_model_width(narrow) != nbtv_model_width(wide));
+    CHECK(nbtv_model_id(narrow) != nbtv_model_id(wide));
+
+    const int rate = 12000;
+    const std::vector<std::uint8_t> rgb = test_images::load("cat");
+    nbtv_tx* tx = nbtv_tx_create(rate);
+    nbtv_rx* rx = nbtv_rx_create(rate);
+    nbtv_rx* partial = nbtv_rx_create(rate);  // 這一個只有模式 11 的模型
+    nbtv_tx_set_model(tx, narrow);
+    CHECK_EQ(nbtv_tx_set_mode(tx, 13), 0);
+    std::vector<float> frame(static_cast<std::size_t>(nbtv_tx_frame_samples(tx)));
+    // 只有模式 11 的模型：模式 13 編不出幀
+    CHECK_EQ(nbtv_tx_encode_image(tx, rgb.data(), frame.data(), static_cast<int>(frame.size()), nullptr, nullptr), -1);
+    nbtv_tx_set_model(tx, wide);  // 不會取代模式 11 的那一個
+    nbtv_rx_set_model(rx, narrow);
+    nbtv_rx_set_model(rx, wide);
+    nbtv_rx_set_model(partial, narrow);
+    nbtv_model_destroy(narrow);
+    nbtv_model_destroy(wide);
+
+    const int ids[] = {13, 11};
+    std::vector<float> audio(static_cast<std::size_t>(rate / 4), 0.0f);
+    for (int id : ids) {
+        CHECK_EQ(nbtv_tx_set_mode(tx, id), 0);
+        nbtv_tx_frame_info info{};
+        CHECK_EQ(nbtv_tx_encode_image(tx, rgb.data(), frame.data(), static_cast<int>(frame.size()), nullptr, &info),
+                 static_cast<int>(frame.size()));
+        CHECK_EQ(info.mode_id, id);
+        audio.insert(audio.end(), frame.begin(), frame.end());
+    }
+    audio.insert(audio.end(), static_cast<std::size_t>(rate / 2), 0.0f);
+    for (nbtv_rx* r : {rx, partial}) nbtv_rx_push(r, audio.data(), static_cast<int>(audio.size()));
+
+    nbtv_rx_frame f;
+    int n = 0;
+    while (nbtv_rx_poll_frame(rx, &f)) {
+        if (n < 2) CHECK_EQ(f.mode_id, ids[n]);
+        CHECK_EQ(f.decoded, 1);
+        CHECK_EQ(f.model_missing, 0);
+        // 用錯模型的話解出來的是雜訊（10 dB 以下）
+        CHECK(test_images::psnr(std::vector<std::uint8_t>(f.rgb, f.rgb + NBTV_IMAGE_RGB_BYTES), rgb) > 28.0);
+        ++n;
+    }
+    CHECK_EQ(n, 2);
+    n = 0;
+    while (nbtv_rx_poll_frame(partial, &f)) {
+        if (n < 2) {
+            CHECK_EQ(f.mode_id, ids[n]);
+            CHECK_EQ(f.decoded, ids[n] == 11 ? 1 : 0);
+            CHECK_EQ(f.model_missing, ids[n] == 11 ? 0 : 1);
+            CHECK_EQ(f.header_ok, 1);
+        }
+        ++n;
+    }
+    CHECK_EQ(n, 2);
+    nbtv_rx_destroy(partial);
+    nbtv_rx_destroy(rx);
+    nbtv_tx_destroy(tx);
+}
+
 }  // namespace
 
 int main() {
@@ -516,9 +589,11 @@ int main() {
     loopback(48000, 9, "rocket");
     loopback(12000, 8, "coffee");
     test_payload_path();
-    test_learned_mode(11, "learned_7776_v2", 27.5);
+    test_learned_mode(11, "learned_7776_v3", 28.3);
     test_learned_mode(12, "learned_2592_v2", 23.5);
+    test_learned_mode(13, "learned_7776_wide_v1", 29.4);
     test_learned_two_models();
+    test_learned_two_widths();
     test_spectrum();
     return check::finish("c_api");
 }

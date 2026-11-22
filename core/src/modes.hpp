@@ -29,6 +29,7 @@ struct Mode {
 
     // 只有學習式模式使用，其餘為 0
     int learned_values = 0;  // 一張畫面變成幾個實數；模型的輸出要一樣多
+    int learned_width = 0;   // 模型第一層的通道數：實數個數相同、大小不同的模型各用一個模式
 
     constexpr bool is_digital() const { return kind == ModeKind::Digital; }
     constexpr bool is_analog() const { return kind == ModeKind::Analog; }
@@ -60,7 +61,7 @@ struct Mode {
     }
 };
 
-inline constexpr std::array<Mode, 11> kModes{{
+inline constexpr std::array<Mode, 12> kModes{{
     // id  種類                酬載符號  乘數  位元/格  碼率    K
     {0, ModeKind::Digital, 200, 2503, 2, 1, 4, 3240},
     {1, ModeKind::Digital, 200, 2503, 2, 1, 2, 7200},
@@ -72,10 +73,12 @@ inline constexpr std::array<Mode, 11> kModes{{
     {8, ModeKind::Analog, 37, 464, 0, 0, 0, 0},
     {9, ModeKind::Analog, 100, 1255, 0, 0, 0, 0},
     {10, ModeKind::Analog, 200, 2509, 0, 0, 0, 0},
-    // 學習式（實驗中）：幀的安排和類比相同（11 比照模式 9，12 比照模式 8），只是實數由類神經網路產生
+    // 學習式（實驗中）：幀的安排和類比相同（11、13 比照模式 9，12 比照模式 8），只是實數由類神經網路產生
     // （見 learned_frame.hpp）。每個模式各有自己的模型，實數的個數是「潛在通道數 × 9 × 12」：72 與 24 個通道。
-    {11, ModeKind::Learned, 100, 1255, 0, 0, 0, 0, 7776},
-    {12, ModeKind::Learned, 37, 464, 0, 0, 0, 0, 2592},
+    // 13 的幀和 11 完全相同，只是模型的每一層加寬一倍（運算量約四倍）。
+    {11, ModeKind::Learned, 100, 1255, 0, 0, 0, 0, 7776, 32},
+    {12, ModeKind::Learned, 37, 464, 0, 0, 0, 0, 2592, 32},
+    {13, ModeKind::Learned, 100, 1255, 0, 0, 0, 0, 7776, 64},
 }};
 
 constexpr const Mode* find_mode(int id) {
@@ -96,7 +99,8 @@ constexpr bool mode_table_is_consistent() {
             if (m.image_bytes() <= 0) return false;
         } else if (m.analog_cells() <= 0) {
             return false;
-        } else if (m.is_learned() && (m.learned_values <= 0 || m.learned_values % 2 != 0 || m.learned_values > m.analog_values())) {
+        } else if (m.is_learned() && (m.learned_values <= 0 || m.learned_values % 2 != 0 || m.learned_values > m.analog_values() ||
+                                      m.learned_width <= 0)) {
             return false;
         }
     }

@@ -39,7 +39,7 @@ const std::vector<std::uint16_t>& learned_value_order(const Mode& mode) {
 }
 
 bool learned_model_fits(const Mode& mode, const LearnedCodec& codec) {
-    return mode.is_learned() && codec.value_count() == mode.learned_values;
+    return mode.is_learned() && codec.value_count() == mode.learned_values && codec.base_width() == mode.learned_width;
 }
 
 void LearnedModels::set(std::shared_ptr<const LearnedCodec> model) {
@@ -48,7 +48,7 @@ void LearnedModels::set(std::shared_ptr<const LearnedCodec> model) {
         return;
     }
     for (std::shared_ptr<const LearnedCodec>& held : models_) {
-        if (held->value_count() == model->value_count()) {
+        if (held->value_count() == model->value_count() && held->base_width() == model->base_width()) {
             held = std::move(model);
             return;
         }

@@ -52,6 +52,7 @@ void fill(const Mode& m, nbtv_mode_info* out) {
     out->analog_values = m.analog_values();
     out->analog_coefficients = m.is_analog() ? nbtv::analog_plan(m).coefficients : 0;
     out->learned_values = m.learned_values;
+    out->learned_width = m.learned_width;
 }
 
 constexpr bool valid_rate(int sample_rate) { return sample_rate == 12000 || sample_rate == 48000; }
@@ -166,6 +167,8 @@ void nbtv_model_destroy(nbtv_model* model) { delete model; }
 uint32_t nbtv_model_id(const nbtv_model* model) { return model != nullptr ? model->codec->model_id() : 0; }
 
 int nbtv_model_values(const nbtv_model* model) { return model != nullptr ? model->codec->value_count() : 0; }
+
+int nbtv_model_width(const nbtv_model* model) { return model != nullptr ? model->codec->base_width() : 0; }
 
 /* ---- 呼號 ---- */
 

@@ -124,10 +124,12 @@ struct LearnedRow {
     int id, analog_id, frame_symbols;
     double seconds;
     int analog_values, latent_channels;  // 標頭之外放得下的實數個數；模型的潛在通道數（實數個數 = 通道數 × 9 × 12）
+    int width;                           // 模型第一層的通道數
 };
 const LearnedRow kLearnedSpec[] = {
-    {11, 9, 102, 2.720, 7782, 72},
-    {12, 8, 39, 1.040, 2658, 24},
+    {11, 9, 102, 2.720, 7782, 72, 32},
+    {12, 8, 39, 1.040, 2658, 24, 32},
+    {13, 9, 102, 2.720, 7782, 72, 64},  // 幀和模式 11 完全相同，模型的每一層加寬一倍
 };
 
 void test_learned_modes() {
@@ -149,6 +151,7 @@ void test_learned_modes() {
         CHECK_EQ(m->header_cells(), 176);
         CHECK_EQ(m->analog_values(), row.analog_values);
         CHECK_EQ(m->learned_values, row.latent_channels * 9 * 12);
+        CHECK_EQ(m->learned_width, row.width);
         CHECK(m->learned_values <= m->analog_values());             // 放得進去
         CHECK(m->learned_values + 9 * 12 > m->analog_values());     // 而且再多一個通道就放不下
         CHECK_EQ(m->interleaver_cells(), m->data_cells());
@@ -156,24 +159,26 @@ void test_learned_modes() {
         CHECK_EQ(m->image_bytes(), 0);
         CHECK_EQ(m->padding_cells(), 0);
     }
-    // 其他模式都沒有這個欄位；學習式模式的實數個數兩兩不同（發射機、接收機靠它決定哪個模型給哪個模式用）
+    // 其他模式都沒有這兩個欄位；學習式模式的「實數個數與模型寬度」兩兩不同（發射機、接收機靠它決定哪個模型給哪個模式用）
     for (const Mode& other : kModes) {
         CHECK_EQ(other.learned_values > 0, other.is_learned());
+        CHECK_EQ(other.learned_width > 0, other.is_learned());
         learned_count -= other.is_learned() ? 1 : 0;
         for (const Mode& another : kModes) {
-            if (&other != &another && other.is_learned() && another.is_learned()) CHECK(other.learned_values != another.learned_values);
+            if (&other != &another && other.is_learned() && another.is_learned())
+                CHECK(other.learned_values != another.learned_values || other.learned_width != another.learned_width);
         }
     }
     CHECK_EQ(learned_count, 0);  // 上面的表涵蓋了所有的學習式模式
 }
 
 void test_undefined_ids() {
-    for (int id : {-1, 6, 7, 13, 15, 16}) CHECK(find_mode(id) == nullptr);
+    for (int id : {-1, 6, 7, 14, 15, 16}) CHECK(find_mode(id) == nullptr);
 }
 
 void test_c_api() {
     CHECK(std::strcmp(nbtv_version_string(), "0.1.0") == 0);
-    CHECK_EQ(nbtv_mode_count(), 11);
+    CHECK_EQ(nbtv_mode_count(), 12);
     for (int i = 0; i < nbtv_mode_count(); ++i) {
         nbtv_mode_info a{};
         nbtv_mode_info b{};
@@ -200,6 +205,7 @@ void test_c_api() {
         CHECK_EQ(a.analog_values, m->analog_values());
         CHECK((a.analog_coefficients > 0) == m->is_analog());
         CHECK_EQ(a.learned_values, m->learned_values);
+        CHECK_EQ(a.learned_width, m->learned_width);
         CHECK(a.analog_coefficients <= a.analog_values);
         CHECK_EQ(b.frame_samples, a.frame_samples);
         CHECK_EQ(b.image_bytes, a.image_bytes);

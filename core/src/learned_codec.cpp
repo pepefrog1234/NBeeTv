@@ -22,8 +22,7 @@ constexpr std::uint32_t kFormatVersion = 1;
 // 結構編號：1 的解碼器只吃訊雜比；2 的另外吃各個值的可靠程度（輸入的通道數加倍），訓練時涵蓋的訊雜比也比較低
 constexpr std::uint32_t kMaxArchitecture = 2;
 
-// 以下和 model.py 相同
-constexpr int kWidths[4] = {32, 64, 128, 192};  // 解析度每減半一次的通道數
+// 以下和 model.py 相同。各層的寬度（解析度每減半一次的通道數，共 kStages + 1 個）不是固定的，由權重檔看出來
 constexpr int kStages = 3;
 constexpr int kBlocksPerStage = 2;
 constexpr int kSnrFeatures = 64;
@@ -32,6 +31,7 @@ constexpr int kGridW = kImageWidth / 8;   // 12
 
 // 擋掉壞掉的檔案要求的巨大配置
 constexpr std::uint32_t kMaxLatent = 1024;
+constexpr std::uint32_t kMaxWidth = 1024;
 constexpr std::uint32_t kMaxTensors = 4096;
 constexpr std::uint64_t kMaxTensorValues = std::uint64_t{1} << 24;
 
@@ -400,6 +400,7 @@ struct LearnedCodec::Impl {
     std::uint32_t id = 0;
     int latent = 0;
     int architecture = 1;
+    int widths[kStages + 1] = {};  // 解析度每減半一次的通道數
 
     // 編碼器：96×72×3 →（每一級解析度減半）→ 12×9×latent
     Conv enc_stem;
@@ -484,22 +485,34 @@ bool build(std::span<const std::uint8_t> file, LearnedCodec::Impl& m, std::strin
     m.latent = static_cast<int>(latent);
     m.architecture = static_cast<int>(architecture);
 
+    // 各層的寬度不另外記在檔案裡：就是編碼器開頭的卷積，以及三個把解析度減半的卷積的輸出通道數。
+    // 其餘的張量下面逐一核對，都要和這四個數對得上。
+    for (int i = 0; i <= kStages; ++i) {
+        const std::string name = i == 0 ? "enc.stem.weight" : "enc.stages." + std::to_string((i - 1) * (1 + kBlocksPerStage)) + ".weight";
+        const auto it = tensors.find(name);
+        if (it == tensors.end() || it->second.dims[0] > kMaxWidth) {
+            error = "權重檔缺少張量或形狀不符：" + name;
+            return false;
+        }
+        m.widths[i] = static_cast<int>(it->second.dims[0]);
+    }
+
     Builder b{tensors, error};
-    bool ok = b.conv("enc.stem", kWidths[0], 3, 5, 1, 2, m.enc_stem);
+    bool ok = b.conv("enc.stem", m.widths[0], 3, 5, 1, 2, m.enc_stem);
     for (int s = 0; s < kStages; ++s) {
         // model.py 的 stages 是 [縮小的卷積、殘差塊、殘差塊] 重複三次
         const int first = s * (1 + kBlocksPerStage);
-        ok = ok && b.conv("enc.stages." + std::to_string(first), kWidths[s + 1], kWidths[s], 3, 2, 1, m.enc_down[s]);
+        ok = ok && b.conv("enc.stages." + std::to_string(first), m.widths[s + 1], m.widths[s], 3, 2, 1, m.enc_down[s]);
         for (int j = 0; j < kBlocksPerStage; ++j)
-            ok = ok && b.block("enc.stages." + std::to_string(first + 1 + j), kWidths[s + 1], m.enc_block[s][j]);
+            ok = ok && b.block("enc.stages." + std::to_string(first + 1 + j), m.widths[s + 1], m.enc_block[s][j]);
     }
-    ok = ok && b.conv("enc.head", m.latent, kWidths[3], 1, 1, 0, m.enc_head);
+    ok = ok && b.conv("enc.head", m.latent, m.widths[3], 1, 1, 0, m.enc_head);
 
     ok = ok && b.linear("dec.snr_embed.0", kSnrFeatures, 1, m.snr1) && b.linear("dec.snr_embed.2", kSnrFeatures, kSnrFeatures, m.snr2);
     // 結構 2：輸入是「收到的值」接上「可靠程度」，通道數加倍
-    ok = ok && b.conv("dec.inp", kWidths[3], m.latent * (m.architecture >= 2 ? 2 : 1), 1, 1, 0, m.dec_inp);
+    ok = ok && b.conv("dec.inp", m.widths[3], m.latent * (m.architecture >= 2 ? 2 : 1), 1, 1, 0, m.dec_inp);
     for (int s = 0; s < kStages; ++s) {
-        const int channels = kWidths[3 - s], next = kWidths[2 - s];
+        const int channels = m.widths[3 - s], next = m.widths[2 - s];
         const std::string stage = std::to_string(s);
         for (int j = 0; j < kBlocksPerStage; ++j) {
             const std::string which = stage + "." + std::to_string(j);
@@ -508,8 +521,8 @@ bool build(std::span<const std::uint8_t> file, LearnedCodec::Impl& m, std::strin
         }
         ok = ok && b.conv("dec.ups." + stage + ".0", next * 4, channels, 3, 1, 1, m.dec_up[s]);
     }
-    for (int j = 0; j < kBlocksPerStage; ++j) ok = ok && b.block("dec.tail." + std::to_string(j), kWidths[0], m.dec_tail[j]);
-    ok = ok && b.conv("dec.out", 3, kWidths[0], 5, 1, 2, m.dec_out);
+    for (int j = 0; j < kBlocksPerStage; ++j) ok = ok && b.block("dec.tail." + std::to_string(j), m.widths[0], m.dec_tail[j]);
+    ok = ok && b.conv("dec.out", 3, m.widths[0], 5, 1, 2, m.dec_out);
     if (!ok) return false;
     if (b.used != tensors.size()) {
         error = "權重檔裡有這個模型用不到的張量";
@@ -536,6 +549,11 @@ std::unique_ptr<LearnedCodec> LearnedCodec::load(std::span<const std::uint8_t> f
 std::uint32_t LearnedCodec::model_id() const { return impl_->id; }
 
 int LearnedCodec::value_count() const { return impl_->latent * kGridH * kGridW; }
+
+std::array<int, 4> LearnedCodec::widths() const {
+    static_assert(kStages + 1 == 4);
+    return {impl_->widths[0], impl_->widths[1], impl_->widths[2], impl_->widths[3]};
+}
 
 int LearnedCodec::architecture() const { return impl_->architecture; }
 

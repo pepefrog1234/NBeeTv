@@ -1,6 +1,7 @@
-// 學習式影像編碼：權重檔的解析、C++ 的推論和 PyTorch 算出來的是否一致，以及模式 11、12 的幀與完整的收發鏈。
+// 學習式影像編碼：權重檔的解析、C++ 的推論和 PyTorch 算出來的是否一致，以及模式 11、12、13 的幀與完整的收發鏈。
 // 每個模式各有一份權重（models/）與一份參考答案（data/…_ref.bin，由 tools/learned/export.py 產生）。
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -45,10 +46,12 @@ struct ModelCase {
     double flipped;          // 同上：純色的地方變成另一色的比例（最差的一張）的上限
 };
 const ModelCase kCases[] = {
-    // 量到的：收發鏈 27.5、27.4 dB，衰落谷底 26.7 dB，剪影 28.9 dB、0.0%
-    {11, "learned_7776_v2", 0x90DE77EDu, {27.778, 28.757, 29.051}, 27.270, 27.5, 25.5, 25.0, 27.0, 0.01},
+    // 量到的：收發鏈 28.3、28.3 dB，衰落谷底 27.5 dB，剪影 30.3 dB、0.0%
+    {11, "learned_7776_v3", 0xD6ED61D0u, {28.677, 29.665, 29.837}, 28.149, 28.3, 26.4, 25.8, 28.4, 0.01},
     // 量到的：收發鏈 23.6、23.8 dB，衰落谷底 23.1 dB，剪影 24.1 dB、1.3%
     {12, "learned_2592_v2", 0xBD805526u, {23.888, 25.168, 24.806}, 23.570, 23.6, 22.0, 21.5, 22.0, 0.025},
+    // 模式 13：幀和模式 11 相同，模型的每一層加寬一倍。量到的：收發鏈 29.0、29.0 dB，衰落谷底 28.3 dB，剪影 30.6 dB、0.0%
+    {13, "learned_7776_wide_v1", 0x8D00009Au, {29.539, 30.796, 30.963}, 28.858, 29.0, 27.1, 26.6, 28.7, 0.01},
 };
 
 std::vector<std::uint8_t> read_file(const std::string& path) {
@@ -98,6 +101,10 @@ void test_loader(const ModelCase& model, const std::vector<std::uint8_t>& file) 
     CHECK_EQ(codec->value_count(), find_mode(model.mode_id)->learned_values);
     CHECK_EQ(codec->model_id(), model.model_id);
     CHECK_EQ(codec->architecture(), 2);
+    // 各層的寬度由張量的形狀看出來；第一個要和模式指定的相同，後面的依序是它的 2、4、6 倍（model.py 的兩組寬度都是這樣）
+    const int width = find_mode(model.mode_id)->learned_width;
+    CHECK(codec->widths() == (std::array<int, 4>{width, 2 * width, 4 * width, 6 * width}));
+    CHECK_EQ(codec->base_width(), width);
     CHECK_NEAR(codec->min_snr_db(), -6.0, 1e-6);
 
     // 不是權重檔
@@ -152,9 +159,9 @@ void test_loader(const ModelCase& model, const std::vector<std::uint8_t>& file) 
         CHECK(error.find("enc.stem.weight") != std::string::npos);
     }
     {
-        std::vector<std::uint8_t> bad = file;  // 第一個張量的第一個維度（名稱 15 個字、維度數 1 個位元組之後）32 → 31
-        CHECK_EQ(static_cast<int>(bad[34 + 15 + 1]), 32);
-        bad[34 + 15 + 1] = 31;
+        std::vector<std::uint8_t> bad = file;  // 第一個張量的第一個維度（名稱 15 個字、維度數 1 個位元組之後）少 1：
+        CHECK_EQ(static_cast<int>(bad[34 + 15 + 1]), width);  // 寬度是由它看出來的，其餘的張量就都對不上了
+        bad[34 + 15 + 1] = static_cast<std::uint8_t>(width - 1);
         fix_crc(bad);
         CHECK(LearnedCodec::load(bad) == nullptr);
     }
@@ -599,7 +606,9 @@ void test_silhouette_fading(const ModelCase& expected, const std::shared_ptr<con
     const double mean = pictures > 0 ? total / pictures : 0.0;
     std::printf("  模式 %d，黑白剪影過差通道（0、2、5 dB）：%d 幀收到 %d 張，平均 %.1f dB；純色的地方最多有 %.1f%% 變成另一色\n", mode.id,
                 sent, pictures, mean, 100.0 * worst_flip);
-    // 模式 11：第一版的權重（結構 1，同樣的幀）在這裡是平均 25.5 dB、純色的地方最多有 2.9% 變成另一色；第二版是 28.9 dB、0%。
+    // 模式 11：第一版的權重（結構 1，同樣的幀）在這裡是平均 25.5 dB、純色的地方最多有 2.9% 變成另一色；第二版是 28.9 dB、0%；
+    // 現在的第三版（結構和第二版相同，多訓練 5.2 萬步）是 30.3 dB、0%。
+    // 模式 13（加寬的模型）：30.6 dB、0%。
     // 模式 12：送的值只有三分之一，衰落很深的幀（量到的訊雜比 −1 dB 上下）邊緣會糊在一起，最差的一張有 1.3% 變色；
     // 平均 24.1 dB。同樣的畫面與通道，類比模式 8 是平均 15.8 dB、最差的一張 3.6%。
     CHECK(pictures >= sent * 3 / 4);
@@ -616,7 +625,7 @@ void test_two_models(const std::vector<std::shared_ptr<const LearnedCodec>>& mod
     const Mode& long_mode = *find_mode(kCases[0].mode_id);
     const Mode& short_mode = *find_mode(kCases[1].mode_id);
 
-    // 一組模型：每種實數個數留一個，後來的取代先前的；空指標清掉全部
+    // 一組模型：每種「實數個數與寬度」留一個，後來的取代先前的；空指標清掉全部
     {
         LearnedModels set;
         CHECK(set.find(long_mode) == nullptr && set.find(short_mode) == nullptr);
@@ -627,7 +636,7 @@ void test_two_models(const std::vector<std::shared_ptr<const LearnedCodec>>& mod
         CHECK(set.find(long_mode) == models[0].get() && set.find(short_mode) == models[1].get());
         const std::shared_ptr<const LearnedCodec> other = altered_model(files[0], *models[0]);
         CHECK(other != nullptr);
-        set.set(other);  // 實數個數和第一個相同：取代它，另一個不動
+        set.set(other);  // 實數個數與寬度都和第一個相同：取代它，另一個不動
         CHECK(set.find(long_mode) == other.get() && set.find(short_mode) == models[1].get());
         set.set(nullptr);
         CHECK(set.find(long_mode) == nullptr && set.find(short_mode) == nullptr);
@@ -696,6 +705,75 @@ void test_two_models(const std::vector<std::shared_ptr<const LearnedCodec>>& mod
     }
 }
 
+// 模式 11 與 13 的幀完全相同、實數一樣多，只差在模型的寬度：兩個模型可以同時掛著，各給各的模式用，
+// 接收機由前導符號認出是哪個模式，不會拿錯模型。narrow、wide 是模式 11、13 的模型。
+void test_two_widths(const std::shared_ptr<const LearnedCodec>& narrow, const std::shared_ptr<const LearnedCodec>& wide) {
+    const auto rgb = test_images::load("cat");
+    const Mode& mode11 = *find_mode(11);
+    const Mode& mode13 = *find_mode(13);
+    CHECK_EQ(narrow->value_count(), wide->value_count());
+    CHECK(narrow->base_width() != wide->base_width());
+    CHECK(learned_model_fits(mode11, *narrow) && !learned_model_fits(mode13, *narrow));
+    CHECK(learned_model_fits(mode13, *wide) && !learned_model_fits(mode11, *wide));
+    CHECK(learned_encode(mode13, *narrow, AnalogHeader{}, rgb).empty());  // 拿錯模型編不出幀
+    CHECK(learned_encode(mode11, *wide, AnalogHeader{}, rgb).empty());
+    {
+        LearnedModels set;
+        set.set(narrow);
+        CHECK(set.find(mode11) == narrow.get() && set.find(mode13) == nullptr);
+        set.set(wide);  // 實數個數相同、寬度不同：不取代，兩個都留著
+        CHECK(set.find(mode11) == narrow.get() && set.find(mode13) == wide.get());
+    }
+
+    Transmitter tx;
+    tx.set_callsign("N0CALL");
+    tx.set_model(narrow);
+    CHECK(tx.learned_frame(mode13, rgb).empty());  // 只有模式 11 的模型：模式 13 編不出幀
+    CHECK_EQ(tx.sequence(), 0);
+    tx.set_model(wide);
+    const Mode* const sent[] = {&mode11, &mode13, &mode11};
+    std::vector<float> signal;
+    for (const Mode* mode : sent) {
+        const std::vector<float> frame = tx.learned_frame(*mode, rgb);
+        CHECK_EQ(static_cast<int>(frame.size()), mode->frame_samples());
+        signal.insert(signal.end(), frame.begin(), frame.end());
+    }
+    std::vector<float> audio(3000, 0.0f);
+    audio.insert(audio.end(), signal.begin(), signal.end());
+    audio.insert(audio.end(), 6000, 0.0f);
+    sim::ChannelParams clean;
+    clean.add_noise = false;
+    sim::Channel channel(clean, link_util::mean_power(signal));
+    std::vector<float> received;
+    channel.process(audio, received);
+
+    // 接收端兩個模型都有：三幀都有畫面，而且是各自的模型解的（用錯模型解出來的是 10 dB 以下的雜訊）
+    Receiver both;
+    both.set_model(narrow);
+    both.set_model(wide);
+    std::vector<RxFrame> frames = link_util::run_receiver(both, received);
+    CHECK_EQ(static_cast<int>(frames.size()), 3);
+    for (std::size_t i = 0; i < frames.size() && i < std::size(sent); ++i) {
+        const RxFrame& f = frames[i];
+        CHECK(f.decoded && f.header_ok && f.is_learned && !f.model_missing);
+        CHECK_EQ(f.mode_id, sent[i]->id);
+        if (f.decoded) CHECK(test_images::psnr(f.rgb, rgb) > 28.0);
+    }
+    // 接收端只有其中一個：另一個模式的幀收得到、標頭也解得出來，只是沒有畫面
+    for (const auto& only : {narrow, wide}) {
+        Receiver rx;
+        rx.set_model(only);
+        frames = link_util::run_receiver(rx, received);
+        CHECK_EQ(static_cast<int>(frames.size()), 3);
+        for (std::size_t i = 0; i < frames.size() && i < std::size(sent); ++i) {
+            const bool mine = learned_model_fits(*sent[i], *only);
+            CHECK(frames[i].header_ok && frames[i].mode_id == sent[i]->id);
+            CHECK_EQ(frames[i].decoded, mine);
+            CHECK_EQ(frames[i].model_missing, !mine);
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -720,6 +798,9 @@ int main() {
         models.push_back(codec);
         files.push_back(std::move(file));
     }
-    if (models.size() == std::size(kCases)) test_two_models(models, files);
+    if (models.size() == std::size(kCases)) {  // 依 kCases 的順序：模式 11、12、13
+        test_two_models(models, files);
+        test_two_widths(models[0], models[2]);
+    }
     return check::finish("learned");
 }

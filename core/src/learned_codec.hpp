@@ -6,10 +6,11 @@
 // 以 model_id() 辨認。網路在兩端各自以浮點數計算，不同機器的結果會有末位的差異；那遠小於通道的雜訊，
 // 不影響互通。
 //
-// 這裡只有推論本身；數據機用到它的地方是模式 11 與 12（各用一份權重），見 learned_frame.hpp。
+// 這裡只有推論本身；數據機用到它的地方是模式 11、12、13（各用一份權重），見 learned_frame.hpp。
 // 和核心其他部分一樣不開執行緒。
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -33,8 +34,14 @@ public:
     // 權重檔的識別碼（檔案內容的 CRC-32）。
     std::uint32_t model_id() const;
 
-    // 一張畫面變成幾個實數：潛在通道數 × 9 × 12（模式 11 的模型是 7776，模式 12 的是 2592）。
+    // 一張畫面變成幾個實數：潛在通道數 × 9 × 12（模式 11、13 的模型是 7776，模式 12 的是 2592）。
     int value_count() const;
+
+    // 各層的寬度：解析度每減半一次的通道數，共四個。權重檔沒有另外記，是由張量的形狀看出來的。
+    // 模式 11、12 的模型是 32、64、128、192；模式 13 的每一層加寬一倍（運算量約四倍）。
+    std::array<int, 4> widths() const;
+    // 第一個寬度。模式用它和實數個數來認自己的模型（learned_model_fits）。
+    int base_width() const { return widths()[0]; }
 
     // 權重檔的結構編號（tools/learned/model.py）：1 的解碼器只吃訊雜比，2 的另外吃各個值的可靠程度。
     int architecture() const;

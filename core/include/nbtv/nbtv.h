@@ -70,6 +70,7 @@ typedef struct nbtv_mode_info {
     int analog_values;     /* 標頭之外可以放的實數個數（每格兩個） */
     int analog_coefficients; /* 類比：實際傳送的係數個數（全部是 20736 個）；其餘為 0 */
     int learned_values;    /* 學習式：一張畫面變成幾個實數（模型的輸出要一樣多）；其餘為 0 */
+    int learned_width;     /* 學習式：模型第一層的通道數（實數個數相同、大小不同的模型各用一個模式）；其餘為 0 */
 } nbtv_mode_info;
 
 /* 已定義的模式個數。 */
@@ -85,7 +86,8 @@ int nbtv_mode_by_id(int id, nbtv_mode_info *out);
 
 /*
  * 學習式模式（NBTV_MODE_LEARNED）的編解碼是一個類神經網路，權重放在獨立的檔案裡（models/ 底下的 .bin）。
- * 每個學習式模式各有自己的模型：模型的實數個數（nbtv_model_values）和模式的 learned_values 相同，就是給它用的。
+ * 每個學習式模式各有自己的模型：模型的實數個數（nbtv_model_values）與寬度（nbtv_model_width）
+ * 和模式的 learned_values、learned_width 都相同，就是給它用的。
  * 收發兩端必須用同一份權重。外殼把檔案內容讀進記憶體後交給 nbtv_model_load，再設定給發射機與接收機
  * （要用幾個學習式模式就設定幾個）；同一個模型可以給多個物件用，設定之後就可以 nbtv_model_destroy（物件自己會留著）。
  * 模型載入後不會再改變，可以同時被不同執行緒上的物件使用。
@@ -101,6 +103,9 @@ uint32_t nbtv_model_id(const nbtv_model *model);
 
 /* 一張畫面變成幾個實數；要和模式的 learned_values 相同才能用在那個模式。 */
 int nbtv_model_values(const nbtv_model *model);
+
+/* 模型第一層的通道數（愈大的模型愈寬，運算量也愈大）；要和模式的 learned_width 相同才能用在那個模式。 */
+int nbtv_model_width(const nbtv_model *model);
 
 /* ------------------------------------------------------------------ 呼號 */
 

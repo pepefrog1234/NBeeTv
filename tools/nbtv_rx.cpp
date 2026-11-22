@@ -47,7 +47,7 @@ int main(int argc, char** argv) {
     const std::string dir = args.str("out-dir", "");
     Receiver rx;
     rx.set_trace(args.has("trace"));
-    // 每個學習式模式各一份模型：先載入專案 models/ 裡的，--model 指定的那一份再取代實數個數相同的
+    // 每個學習式模式各一份模型：先載入專案 models/ 裡的，--model 指定的那一份再取代實數個數與寬度都相同的
     auto load_model = [&](const std::string& path, bool required) {
         std::vector<std::uint8_t> bytes;
         std::string error = "讀不到檔案";
@@ -59,7 +59,7 @@ int main(int argc, char** argv) {
         return loaded || !required;
     };
     for (const Mode& m : kModes) {
-        if (m.is_learned()) load_model(default_model_path(m.learned_values), false);
+        if (m.is_learned()) load_model(default_model_path(m.learned_values, m.learned_width), false);
     }
     if (args.has("model") && !load_model(args.str("model", ""), true)) return 1;
     int index = 0, good = 0;

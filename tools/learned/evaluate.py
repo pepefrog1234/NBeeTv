@@ -7,13 +7,16 @@ import numpy as np
 import torch
 
 from export import read_ppm, read_weights
-from model import DEFAULT_WIDTHS, JSCC, psnr_uint8
+from model import DEFAULT_WIDTHS, JSCC, psnr_uint8, widths_of
 
 path = sys.argv[1]
 widths = DEFAULT_WIDTHS
 if path.endswith(".bin"):
     state, latent, model_id, architecture = read_weights(path)
+    widths = widths_of(state)
     label = f"權重檔 {model_id:08X}"
+    if widths != DEFAULT_WIDTHS:
+        label += "，各層寬度 " + "／".join(str(w) for w in widths)
 else:
     ckpt = torch.load(path, map_location="cpu")
     state, latent, architecture = ckpt["model"], ckpt["latent"], ckpt.get("architecture", 1)
