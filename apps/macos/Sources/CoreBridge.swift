@@ -197,6 +197,8 @@ final class CoreTransmitter {
     func setMode(_ id: Int) -> Bool { nbtv_tx_set_mode(handle, Int32(id)) == 0 }
     func setCallsign(_ callsign: String) { nbtv_tx_set_callsign(handle, callsign) }
     var frameSamples: Int { Int(nbtv_tx_frame_samples(handle)) }
+    /// 影像編碼器的速度檔 0（最慢、畫質最好）到 10；負值是核心的預設值。
+    func setEncoderSpeed(_ speed: Int) { nbtv_tx_set_encoder_speed(handle, Int32(speed)) }
 
     /// 把一張 96×72 的畫面做成一幀音訊。失敗（例如畫面壓不進去）回傳 nil。
     func encode(rgb: Data) -> EncodedFrame? {

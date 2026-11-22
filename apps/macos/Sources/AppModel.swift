@@ -183,7 +183,12 @@ final class AppModel: ObservableObject {
     private var txTapLogged = Date.distantPast
 
     static let pttLeadSeconds = 0.3      // 按下 PTT 後等多久才開始送音訊
-    static let prepareLeadSeconds = 0.6  // 目前這張剩多久時開始準備下一張
+    static let prepareLeadSeconds = 0.6  // 目前這張剩多久時開始準備下一張（至少）
+    /// 最近準備一張（取畫面＋編碼）花了多久；偶爾特別慢的一次會讓它維持高一陣子。
+    private var txPrepareSeconds = 0.0
+    /// 目前這張剩多久時開始準備下一張。數位模式的影像編碼在慢的機器上可能要大半秒，
+    /// 所以照實際花的時間提早，下一張才趕得及在目前這張播完之前排進去。
+    private var prepareLead: Double { max(AppModel.prepareLeadSeconds, txPrepareSeconds * 1.5 + 0.25) }
     static let historyLimit = 60
 
     init(settings: AppSettings, live: Bool) {
@@ -194,6 +199,10 @@ final class AppModel: ObservableObject {
         // 設定改了，用到設定的畫面也要重畫
         settings.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }.store(in: &cancellables)
         guard live, let engine else { return }
+        // 除錯用：指定影像編碼器的速度檔（預設由核心決定），用來在快的機器上模擬編碼很慢的情形
+        if let speed = ProcessInfo.processInfo.environment["NBTV_DEBUG_ENCODER_SPEED"].flatMap({ Int($0) }) {
+            txQueue.async { self.transmitter.setEncoderSpeed(speed) }
+        }
 
         engine.onRxUpdate = { [weak self] update in self?.queuedUpdates.append(update) }
         engine.onMonitorRows = { [weak self] rows in self?.queuedMonitorRows += rows }
@@ -674,8 +683,13 @@ final class AppModel: ObservableObject {
                 _ = self.transmitter.finish()
                 self.transmitter.setMode(mode.id)
                 self.transmitter.setCallsign(callsign)
+                let began = Date()
                 let frame = self.transmitter.encode(rgb: rgb)
-                DispatchQueue.main.async { self.firstFrameReady(frame, session: session) }
+                let spent = Date().timeIntervalSince(began)
+                DispatchQueue.main.async {
+                    if session == self.txSession { self.txPrepareSeconds = spent }
+                    self.firstFrameReady(frame, session: session)
+                }
             }
         }
     }
@@ -809,7 +823,7 @@ final class AppModel: ObservableObject {
 
         if txPhase == .transmitting {
             // 目前這張快播完時，取來源當下那一格做下一張
-            if !txPreparing, Double(txEnd - position) / Double(NBTV.sampleRate) < AppModel.prepareLeadSeconds { prepareNextFrame() }
+            if !txPreparing, Double(txEnd - position) / Double(NBTV.sampleRate) < prepareLead { prepareNextFrame() }
         } else if !txPreparing {
             if txTailState == 0 {
                 queueTail()
@@ -822,6 +836,7 @@ final class AppModel: ObservableObject {
     private func prepareNextFrame() {
         txPreparing = true
         let session = txSession
+        let started = Date()
         captureSourceFrame { [weak self] captured in
             guard let self, session == self.txSession else { return }
             // 來源一時沒有畫面（剛切換來源）：重送上一格，不要讓電台空著發射
@@ -842,8 +857,11 @@ final class AppModel: ObservableObject {
                 let spent = Date().timeIntervalSince(began)
                 DispatchQueue.main.async {
                     guard session == self.txSession else { return }
+                    // 下一次要提早多久：以這次從取畫面到編好的時間為準；比上次快的話慢慢降回來
+                    self.txPrepareSeconds = max(Date().timeIntervalSince(started), self.txPrepareSeconds * 0.8)
                     if let frame, self.txPhase == .transmitting {
                         self.enqueue(frame)
+                        DebugTap.log(String(format: "準備這一張花了 %.0f 毫秒，下一張提早 %.2f 秒開始準備", self.txPrepareSeconds * 1000, self.prepareLead))
                         AppModel.trace?(String(format: "第 %d 張編好排入（編碼 %.0f 毫秒，前一張還剩 %.2f 秒）", self.txNextNumber - 1, spent * 1000,
                                                Double(self.txEnd - Int64(frame.samples.count) - (self.engine?.output.playedSamples ?? 0)) / Double(NBTV.sampleRate)))
                     } else {
