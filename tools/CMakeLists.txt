@@ -14,6 +14,8 @@ nbtv_add_tool(nbtv-chan nbtv_chan.cpp)
 target_link_libraries(nbtv-chan PRIVATE nbtvsim)
 nbtv_add_tool(nbtv-sim nbtv_sim.cpp)
 target_link_libraries(nbtv-sim PRIVATE nbtvsim)
+nbtv_add_tool(nbtv-learned nbtv_learned.cpp)
+target_compile_definitions(nbtv-learned PRIVATE NBTV_MODEL_DIR="${PROJECT_SOURCE_DIR}/models")
 
 # 設計工具：產生寫進核心的常數，平常不需要執行。
 nbtv_add_tool(design_preamble design/design_preamble.cpp)

@@ -4,6 +4,7 @@
 
 - **數位模式**：OFDM＋LDPC，每張畫面是一張獨立的 AV1（AVIF）影像，共六種速率。
 - **相干類比模式**：同一套 OFDM，直接傳影像的 DCT 係數；訊號愈弱畫面愈糊，但不會整張收不到。
+- **學習式編碼**（實驗中）：用類神經網路把畫面直接變成通道上的值，弱訊號時比相干類比清楚。目前只有模型與 C++ 的推論，還沒有接進數據機。
 - 先做 macOS，之後不排除 iOS 與 Android。
 
 ## 設計文件
@@ -17,10 +18,11 @@
 | --- | --- |
 | `core/` | 平台無關的 C++20 核心函式庫。不開執行緒、不碰音訊裝置。 |
 | `core/include/nbtv/nbtv.h` | 核心對外唯一的介面（C API），各平台的外殼只用它。 |
-| `core/src/` | 核心的實作：OFDM 收發、同步、通道估測、LDPC、影像編解碼、相干類比。 |
-| `core/tests/` | 單元測試與端對端測試。`data/` 是三張 96×72 的測試圖。 |
+| `core/src/` | 核心的實作：OFDM 收發、同步、通道估測、LDPC、影像編解碼、相干類比、學習式編碼的推論。 |
+| `core/tests/` | 單元測試與端對端測試。`data/` 是三張 96×72 的測試圖，以及學習式編碼的參考答案。 |
 | `sim/` | 短波通道模擬（Watterson 衰落、雜訊、頻偏、取樣時脈誤差），測試與工具共用。 |
-| `tools/` | 命令列工具：`nbtv-tx`、`nbtv-rx`、`nbtv-chan`、`nbtv-sim`。`design/` 是產生核心常數用的設計工具。 |
+| `tools/` | 命令列工具：`nbtv-tx`、`nbtv-rx`、`nbtv-chan`、`nbtv-sim`、`nbtv-learned`。`design/` 是產生核心常數用的設計工具，`learned/` 是學習式編碼的訓練與匯出程式（Python）。 |
+| `models/` | 學習式編碼的權重檔（11.7 MB）。 |
 | `apps/macos/` | macOS 外殼（SwiftUI）。 |
 
 ## 建置與測試
@@ -60,6 +62,9 @@ mkdir -p out && build/tools/nbtv-rx --out-dir out rx.wav
 # 掉幀率或畫質的統計（多執行緒）
 build/tools/nbtv-sim --mode 1 --channel poor --snr 3,4,5,6 --frames 400
 build/tools/nbtv-sim --mode 9 --channel poor --snr 10 --image core/tests/data/cat.ppm
+
+# 學習式編碼（還沒有接進數據機，只看這一段）：畫面 → 通道值 → 加 10 dB 白雜訊 → 解回來
+build/tools/nbtv-learned --snr 10 --out out/learned.ppm core/tests/data/cat.ppm
 ```
 
 每個工具加 `--help` 會列出全部選項。`nbtv-rx --trace` 會印出同步與解碼的過程。
@@ -74,6 +79,7 @@ build/tools/nbtv-sim --mode 9 --channel poor --snr 10 --image core/tests/data/ca
 | LDPC（DVB-S2 短碼）、位元交錯、格點交錯、CRC | 完成，含測試 |
 | 影像編解碼（AV1／AVIF，位元率控制，外殼拆裝） | 完成，含測試 |
 | 相干類比模式 | 完成，含測試；係數表改用參數模型（見下） |
+| 學習式影像編碼 | 實驗中：模型已訓練，C++ 的推論完成並和 PyTorch 逐一對過；還沒有接進數據機的模式。見 [tools/learned/README.md](tools/learned/README.md) |
 | C API、48 kHz 重取樣、瀑布圖頻譜 | 完成，含測試 |
 | 通道模擬與命令列工具 | 完成 |
 | macOS 外殼（SwiftUI） | 第一版完成：五張版面、收發流程、PTT（VOX／序列埠／rigctld）。以內附測試圖的模擬收發與 BlackHole 音訊迴路驗證過；鏡頭擷取與真的序列埠控制線還沒測，細節見 [apps/macos/README.md](apps/macos/README.md) |
@@ -114,6 +120,12 @@ AWGN 每點 96 幀、衰落通道每點 240 幀，衰落通道的數字有 ±1 d
 比 AV1 低，所以沒有換的理由。
 
 **相干類比**（三張測試圖，白雜訊，格點訊雜比）：模式 8、9、10 沒有雜訊時約 21–22、25、34 dB；10 dB 時約 21、23、27 dB。
+
+**學習式編碼**（實驗中；只比「畫面 ↔ 格點」這一段：白雜訊、理想等化，不經過數據機）：和模式 9 用同樣多的通道資源。
+800 張沒有參與訓練的照片小圖，格點訊雜比 0、10、20 dB 與沒有雜訊時是 25.1、30.6、33.3、33.8 dB；
+模式 9 在同一批圖上是 22.0、28.7、33.6、35.1 dB。也就是訊號差時好 2–3 dB，訊號好時差 1 dB 左右。
+三張測試圖上是 22.7、26.5、27.5、27.6 dB（模式 9：19.1、23.3、24.9、25.2 dB）。
+已知的弱點與量法見 [tools/learned/README.md](tools/learned/README.md)。
 
 **干擾**（模式 1、白雜訊之外再加干擾；`nbtv-sim --impulse`、`--tone`）：
 
@@ -177,6 +189,7 @@ AWGN 每點 96 幀、衰落通道每點 240 幀，衰落通道的數字有 ±1 d
 ## 還沒做的
 
 - 相干類比「畫面靜止時把連續幾幀平均」。
+- 學習式編碼接進數據機：模式與幀結構、通道值怎麼排到格點上、衰落通道下的表現（訓練時一張畫面的所有格點是同一個訊雜比）。
 - 固定量化表與霍夫曼表的 baseline JPEG 備案（標頭的格式編號已保留）。
 - 更高解析度的檔位、呼號的可讀識別（草案的未決事項）。
 - 強的窄頻干擾：自動陷波，或是把被干擾的導頻排除在通道估測之外。
@@ -188,4 +201,5 @@ AWGN 每點 96 幀、衰落通道每點 240 幀，衰落通道的數字有 ±1 d
 LDPC 的位址表是 ETSI EN 302 307-1 附錄 C（DVB-S2 短幀）定義的那幾張；這裡的數值是對照 GNU Radio gr-dtv 與 xdsopl/LDPC
 兩份實作裡的表抄錄的（兩者逐項相同，雜湊值記在 `core/tests/test_ldpc.cpp`），沒有直接對過 ETSI 的原文。
 位元交錯的常數來自 ETSI EN 302 755（DVB-T2）。
+學習式編碼的權重（`models/`）是用 COCO val2017 的照片訓練的；那些照片的著作權屬於各拍攝者，各自採用不同的創用 CC 授權（有些限非商業使用），散布權重之前要先確認。
 數位模式的影像編解碼連結 libavif、libaom（BSD）與 dav1d（BSD）。
