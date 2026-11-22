@@ -297,6 +297,9 @@ final class AudioOutput {
     var gain: Float = 1.0
     private(set) var isRunning = false
     private(set) var underruns = 0
+    /// 裝置總共來取了幾格、其中有幾格是因為佇列空了而補的靜音（除錯用；即時執行緒寫、其他執行緒只讀）
+    private(set) var renderedFrames: Int64 = 0
+    private(set) var silentFrames: Int64 = 0
 
     /// queueSeconds：佇列最多放幾秒的音訊。要放得下「目前這張還沒播完的部分＋下一張」。
     init(queueSeconds: Double = 14) {
@@ -323,6 +326,8 @@ final class AudioOutput {
             try check(AudioUnitInitialize(unit), "初始化輸出裝置")
             ring.clear()
             underruns = 0
+            renderedFrames = 0
+            silentFrames = 0
             self.unit = unit
             try check(AudioOutputUnitStart(unit), "啟動輸出裝置")
         } catch {
@@ -366,6 +371,8 @@ final class AudioOutput {
         let frames = Int(frameCount)
         let dest = data.assumingMemoryBound(to: Float.self)
         let got = ring.read(into: dest, count: frames)
+        renderedFrames += Int64(frames)
+        silentFrames += Int64(frames - got)
         if got < frames {
             (dest + got).update(repeating: 0, count: frames - got)
             // 佇列在播放途中空掉一次算一次（發射結束時最後那一批不滿也會算到一次）

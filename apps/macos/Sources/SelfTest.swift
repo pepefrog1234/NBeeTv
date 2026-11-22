@@ -1,7 +1,9 @@
 // 開發用，都不開視窗：
 //   --transmit-test／--receive-test：把測試圖送到某個輸出裝置／從某個輸入裝置接收（見各函式的說明）
-//   --selftest [--rig 主機:連接埠]：逐項檢查外殼自己的零件：
-//   1. Swift 與核心之間的收發（不經音訊裝置）
+//   --selftest [--rig 主機:連接埠] [--no-camera] [--no-audio] [--no-devices]：逐項檢查外殼自己的零件
+//   （--no-camera 不開鏡頭，--no-audio 不經過音訊裝置，--no-devices 兩者都不要；
+//     --ask-camera 還沒有相機權限時向系統要求，--save-camera-frame <檔名> 把鏡頭取到的那一格存成 PPM）：
+//   1. Swift 與核心之間的收發（不經音訊裝置），包含類比模式送全黑、全白的畫面
 //   2. 影片檔來源（做一段影片、開啟、跳到指定位置、取一格）
 //   3. rigctld 的 PTT（要給 --rig，對著真的 rigctld 測）
 //   4. 音訊輸出（需要 BlackHole 虛擬音效卡）
@@ -24,8 +26,10 @@ enum SelfTest {
         return arguments[index + 1]
     }
 
-    /// --transmit-test --device <名稱> [--mode <編號>] [--frames <張數>] [--callsign <呼號>]
+    /// --transmit-test --device <名稱> [--mode <編號>] [--frames <張數>] [--callsign <呼號>] [--flat <0–255>]
     /// 不開視窗，把內附的測試圖用指定的模式送到指定的輸出裝置（配合另一個行程或真的 app 的接收測試）。
+    /// --flat 改送整張同一個亮度的畫面：類比模式下這種畫面整幀的能量只在少數幾個格點上，是接收端最容易出問題的內容
+    /// （很暗、過曝或被蓋住的鏡頭拍到的就是這種畫面）。
     static func transmitTest(arguments: [String]) -> Int32 {
         NSApplication.shared.setActivationPolicy(.prohibited)
         setvbuf(stdout, nil, _IOLBF, 0)
@@ -36,7 +40,10 @@ enum SelfTest {
         }
         let modeID = option("--mode", in: arguments).flatMap(Int.init) ?? 5
         let count = option("--frames", in: arguments).flatMap(Int.init) ?? 3
-        let images = ["coffee", "rocket", "cat"].compactMap(Demo.testImage)
+        var images = ["coffee", "rocket", "cat"].compactMap(Demo.testImage)
+        if let level = option("--flat", in: arguments).flatMap({ UInt8($0) }) {
+            images = [Data(repeating: level, count: NBTV.rgbBytes)]
+        }
         guard let mode = Modes.find(modeID), !images.isEmpty else { return 1 }
         let tx = CoreTransmitter()
         tx.setMode(modeID)
@@ -125,19 +132,34 @@ enum SelfTest {
             report("內附的測試圖", false)
             return 1
         }
+        // --no-camera：不開鏡頭。--no-audio：不經過音訊裝置（BlackHole 上有別的程式在收發時，自發自收的結果沒有意義，
+        // 送出去的測試訊號也會混進別人的聲音裡）。--no-devices：兩者都不要。
+        let devices = !arguments.contains("--no-devices")
+        let useCamera = devices && !arguments.contains("--no-camera")
+        let useAudio = devices && !arguments.contains("--no-audio")
         testCoreLoopback(coffee)
+        testFlatPictures()
         testExport(coffee)
         testDroppedFrameTail(coffee, rocket)
         testResampler(coffee)
         testVideoFile(rocket)
-        testCamera()
+        if useCamera {
+            testCamera(ask: arguments.contains("--ask-camera"), savePath: option("--save-camera-frame", in: arguments))
+        } else {
+            report("鏡頭", nil, "指定了不開鏡頭")
+        }
         testSerialErrors()
         if let index = arguments.firstIndex(of: "--rig"), index + 1 < arguments.count {
             testRigctld(arguments[index + 1])
         } else {
             report("rigctld PTT", nil, "沒有給 --rig 主機:連接埠")
         }
-        testAudio(coffee)
+        if useAudio {
+            testAudio(coffee)
+        } else {
+            report("音訊輸出、BlackHole 自發自收", nil, "指定了不經過音訊裝置")
+        }
+        if DebugTap.isEnabled, devices { testDebugTap() }
         print("[selftest] \(failures == 0 ? "沒有失敗的項目" : "\(failures) 項失敗")")
         return failures == 0 ? 0 : 1
     }
@@ -168,6 +190,66 @@ enum SelfTest {
             report("核心收發（\(mode.label)）", good.count == 2 && same,
                    "解出 \(good.count)/2 張\(mode.isDigital ? "，畫面\(same ? "與預覽相同" : "與預覽不同")" : "")")
         }
+    }
+
+    /// 類比模式送沒有細節的畫面（全黑、全白）：很暗、過曝或被蓋住的鏡頭拍到的就是這種畫面。
+    /// 這種幀整幀的能量只在少數幾個格點上；訊號很乾淨時，接收機曾經完全認不出來（核心的導頻驗證）。
+    private static func testFlatPictures() {
+        var details: [String] = []
+        var ok = true
+        for modeID in [8, 9, 10] {
+            guard let mode = Modes.find(modeID) else { continue }
+            for level: UInt8 in [0, 255] {
+                let picture = Data(repeating: level, count: NBTV.rgbBytes)
+                let tx = CoreTransmitter()
+                tx.setMode(modeID)
+                tx.setCallsign("BX4ACP")
+                var audio = Demo.silence(seconds: 0.3)
+                for _ in 0..<2 {
+                    guard let frame = tx.encode(rgb: picture) else {
+                        report("類比模式送全黑、全白的畫面", false, "\(mode.name) 編碼失敗")
+                        return
+                    }
+                    audio += frame.samples
+                }
+                audio += tx.finish() + Demo.silence(seconds: 0.5)
+                let good = Demo.receive(audio).flatMap(\.frames).filter { $0.decoded && $0.headerOK && $0.rgb != nil }
+                // 收到的畫面要是原本的亮度：平均每個數值差不到 12／255
+                let error = good.compactMap(\.rgb).map { rgb in
+                    rgb.reduce(0.0) { $0 + abs(Double($1) - Double(level)) } / Double(max(rgb.count, 1))
+                }.max() ?? 255
+                if good.count != 2 || error >= 12 { ok = false }
+                details.append("\(mode.name) \(level == 0 ? "全黑" : "全白") \(good.count)/2" + (good.isEmpty ? "" : String(format: "（差 %.1f）", error)))
+            }
+        }
+        report("類比模式送全黑、全白的畫面", ok, details.joined(separator: "、"))
+    }
+
+    /// 除錯紀錄（設定了 debugTapDirectory 才測）：從 BlackHole 收兩秒（只收不放），檢查音訊檔與紀錄檔有沒有寫出來。
+    private static func testDebugTap() {
+        guard let directory = DebugTap.directory,
+              let device = AudioDevices.inputs().first(where: { $0.name.contains("BlackHole") }) else {
+            report("除錯紀錄", nil, "找不到 BlackHole 虛擬音效卡")
+            return
+        }
+        let engine = RadioEngine()
+        do {
+            try engine.startReceiving(deviceID: device.id)
+        } catch {
+            report("除錯紀錄", false, error.localizedDescription)
+            return
+        }
+        _ = Demo.wait(timeout: 2) { false }
+        engine.stopReceiving()
+        _ = Demo.wait(timeout: 0.5) { false }
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        func size(_ name: String) -> Int {
+            ((try? FileManager.default.attributesOfItem(atPath: directory.appendingPathComponent(name).path))?[.size] as? NSNumber)?.intValue ?? 0
+        }
+        let audio = names.filter { $0.contains("-rx-") }.map(size).max() ?? 0
+        let log = names.filter { $0.hasSuffix("-log.txt") }.map(size).max() ?? 0
+        // 兩秒的 48 kHz 浮點取樣是 384000 位元組；裝置啟動要一點時間，收到一半以上就算有在寫
+        report("除錯紀錄", audio > 190_000 && log > 0, "音訊檔 \(audio) 位元組、紀錄檔 \(log) 位元組，在 \(directory.path)")
     }
 
     // MARK: 存檔
@@ -292,10 +374,19 @@ enum SelfTest {
 
     // MARK: 鏡頭
 
-    /// 只有在已經取得相機權限時才測（不主動跳出權限對話框）。
-    private static func testCamera() {
-        let status = AVCaptureDevice.authorizationStatus(for: .video)
+    /// 平常只有在已經取得相機權限時才測，不主動跳出權限對話框；ask 為 true（--ask-camera）時，
+    /// 還沒決定過權限的話會向系統要求，等使用者回答（最多一分鐘）。
+    /// savePath（--save-camera-frame）：把取到的那一格（縮成 96×72）存成 PPM，方便拿同一格餵給命令列工具。
+    private static func testCamera(ask: Bool, savePath: String?) {
+        var status = AVCaptureDevice.authorizationStatus(for: .video)
         let cameras = CameraSource.devices()
+        if status == .notDetermined, ask {
+            var answered = false
+            AVCaptureDevice.requestAccess(for: .video) { _ in answered = true }
+            print("[selftest] 等使用者回答相機權限的詢問……")
+            _ = Demo.wait(timeout: 60) { answered }
+            status = AVCaptureDevice.authorizationStatus(for: .video)
+        }
         guard status == .authorized else {
             report("鏡頭", nil, "找到 \(cameras.count) 個鏡頭；相機權限狀態 \(status.rawValue)（尚未授權），沒有實際擷取")
             return
@@ -310,13 +401,58 @@ enum SelfTest {
             started = true
         }
         _ = Demo.wait(timeout: 5) { started }
-        let got = failure == nil && Demo.wait(timeout: 6) { box.get().buffer != nil }
+        var ok = failure == nil && Demo.wait(timeout: 6) { box.get().buffer != nil }
+        // 鏡頭剛開的頭幾格通常偏暗（自動曝光還沒穩定），等一下再取
+        if ok { _ = Demo.wait(timeout: 1.5) { false } }
         var detail = failure ?? "沒有收到畫面"
-        if got, let buffer = box.get().buffer, let frame = FrameScaler.scale(buffer, mode: .fill) {
-            detail = "來源 \(Int(frame.sourceSize.width))×\(Int(frame.sourceSize.height)) → 96×72"
-        }
+        let buffer = box.get().buffer
         camera.stop()
-        report("鏡頭（\(cameras.first?.name ?? "預設")）", got, detail)
+        if ok, let buffer, let frame = FrameScaler.scale(buffer, mode: .fill) {
+            // 亮度的平均與標準差（0–255）。標準差只有個位數的畫面（很暗、過曝、對著白牆）幾乎沒有細節，
+            // 類比模式下整幀的能量會集中在少數幾個格點上，是接收端最難處理的內容。
+            var sum = 0.0, squares = 0.0
+            let pixels = frame.rgb.count / 3
+            frame.rgb.withUnsafeBytes { raw in
+                let p = raw.bindMemory(to: UInt8.self)
+                for i in 0..<pixels {
+                    let y = 0.299 * Double(p[3 * i]) + 0.587 * Double(p[3 * i + 1]) + 0.114 * Double(p[3 * i + 2])
+                    sum += y
+                    squares += y * y
+                }
+            }
+            let mean = sum / Double(max(pixels, 1))
+            let deviation = (squares / Double(max(pixels, 1)) - mean * mean).squareRoot()
+            detail = String(format: "來源 %d×%d → 96×72，亮度平均 %.0f、標準差 %.1f", Int(frame.sourceSize.width), Int(frame.sourceSize.height),
+                            mean, deviation)
+            if let savePath {
+                var file = Data("P6\n\(NBTV.imageWidth) \(NBTV.imageHeight)\n255\n".utf8)
+                file.append(frame.rgb)
+                let saved = (try? file.write(to: URL(fileURLWithPath: savePath))) != nil
+                detail += saved ? "，已存成 \(savePath)" : "，存不進 \(savePath)"
+            }
+            // 拿鏡頭拍到的這一格實際收發一次（不經音訊裝置）：每個類比模式與一個數位模式各送兩張
+            var results: [String] = []
+            for modeID in [8, 9, 10, 5] {
+                guard let mode = Modes.find(modeID), mode.isDigital ? NBTV.hasImageCodec : true else { continue }
+                let tx = CoreTransmitter()
+                tx.setMode(modeID)
+                tx.setCallsign("BX4ACP")
+                var audio = Demo.silence(seconds: 0.3)
+                var encoded = 0
+                for _ in 0..<2 {
+                    if let sent = tx.encode(rgb: frame.rgb) {
+                        audio += sent.samples
+                        encoded += 1
+                    }
+                }
+                audio += tx.finish() + Demo.silence(seconds: 0.5)
+                let good = Demo.receive(audio).flatMap(\.frames).filter { $0.decoded && $0.headerOK && $0.rgb != nil }
+                if encoded != 2 || good.count != 2 { ok = false }
+                results.append("\(mode.name) \(good.count)/2")
+            }
+            detail += "；用這一格收發：" + results.joined(separator: "、")
+        }
+        report("鏡頭（\(AVCaptureDevice.default(for: .video)?.localizedName ?? "預設")）", ok, detail)
     }
 
     // MARK: 2. 影片檔

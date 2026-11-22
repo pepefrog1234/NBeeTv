@@ -23,6 +23,7 @@ set(NBTV_APP_SOURCES
   Sources/SettingsWindow.swift
   Sources/ModeMenu.swift
   Sources/Demo.swift
+  Sources/DebugTap.swift
   Sources/Snapshot.swift
   Sources/SelfTest.swift
 )

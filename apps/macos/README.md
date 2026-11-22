@@ -88,8 +88,8 @@ open "build-app/apps/macos/NBTV 2.app"
 | 參數 | 作用 |
 | --- | --- |
 | `--snapshot <目錄>` | 不碰任何裝置、不要求權限，把五張版面各算成一張 PNG（`1-receiving`、`2-transmitting`、`3-idle-video`、`4-settings`、`5-mode-menu`），用來對照版面稿。畫面、縮圖、狀態、瀑布圖都是內附的測試圖真的經過核心收發算出來的。同一個目錄裡還會留下示範用的 `rocket_launch.mp4`。環境變數 `NBTV_SNAPSHOT_EXTRA_SIZE=寬x高` 會多算一張其他視窗大小的「接收中」；`NBTV_SNAPSHOT_GAP=秒數` 改變示範資料裡兩次發射之間的空檔（預設 0.8 秒；不論多長都應該解出 6 張），解出來的張數不是 6 張時會印出接收機依序交出了什麼。 |
-| `--selftest [--rig 主機:連接埠]` | 逐項檢查外殼自己的零件：核心收發、存檔的內容、停止時的尾巴、取樣率轉換、來源畫面的縮放、影片檔來源與方向、鏡頭（已經有相機權限才測）、序列埠的錯誤處理、rigctld（給了 `--rig` 才測，對著真的 rigctld）、音訊輸出與自發自收（需要 BlackHole 虛擬音效卡與麥克風權限）。有失敗的項目時結束碼是 1。 |
-| `--transmit-test [--device 名稱] [--mode 編號] [--frames 張數] [--callsign 呼號]` | 把內附的測試圖送到指定的輸出裝置（預設找名稱裡有 BlackHole 的）。 |
+| `--selftest [--rig 主機:連接埠] [--no-camera] [--no-audio] [--no-devices] [--ask-camera] [--save-camera-frame 檔名]` | 逐項檢查外殼自己的零件：核心收發（含類比模式送全黑、全白的畫面）、存檔的內容、停止時的尾巴、取樣率轉換、來源畫面的縮放、影片檔來源與方向、鏡頭（已經有相機權限才測）、序列埠的錯誤處理、rigctld（給了 `--rig` 才測，對著真的 rigctld）、音訊輸出與自發自收（需要 BlackHole 虛擬音效卡與麥克風權限）。有失敗的項目時結束碼是 1。鏡頭那一項除了確認取得到畫面，還會印出那一格的亮度平均與標準差，並拿它在三個類比模式與一個數位模式各收發兩張（不經音訊裝置）。平常只有已經取得相機權限時才測；加上 `--ask-camera` 會在還沒決定過權限時向系統要求（用 `open` 啟動 bundle 時，問的是這個 app 的權限），`--save-camera-frame 檔名` 把那一格存成 PPM。`--no-camera` 不開鏡頭；`--no-audio` 不經過音訊裝置（BlackHole 上有別的程式在收發時，自發自收的結果沒有意義）；`--no-devices` 兩者都不要。 |
+| `--transmit-test [--device 名稱] [--mode 編號] [--frames 張數] [--callsign 呼號] [--flat 0–255]` | 把內附的測試圖送到指定的輸出裝置（預設找名稱裡有 BlackHole 的）。`--flat` 改送整張同一個亮度的畫面（全黑是 0）：類比模式下這是接收端最容易出問題的內容。 |
 | `--receive-test [--device 名稱] [--seconds 秒數]` | 從指定的輸入裝置接收，印出解出來的每一幀，以及實際交給接收機的取樣率。 |
 
 要在沒有人操作的情況下驗證真的 app（真的視窗、真的音訊裝置），用環境變數：
@@ -113,6 +113,38 @@ NBTV_DEBUG_VIDEO=影片.mp4 NBTV_DEBUG_SCRIPT="2:tx;9:stop;14:quit" $APP
 
 注意：`output=` 找不到符合的裝置時會用系統預設的輸出裝置；測試時不要把訊號送進真的電台。
 
+### 收不到畫面時：查「送出什麼、聽到什麼」
+
+看不出問題在哪一段時，可以讓 app 把音訊與收發的每一步記下來（`Sources/DebugTap.swift`）。
+把使用者預設值 `debugTapDirectory` 設成一個目錄，下次啟動 app 生效：
+
+```sh
+defaults write tw.hf-nbtv.mac debugTapDirectory -string "$PWD/build-app/tap"    # 第二個 app 是 tw.hf-nbtv.mac2
+defaults delete tw.hf-nbtv.mac debugTapDirectory                                # 用完記得關掉
+```
+
+目錄裡會有：
+
+| 檔案 | 內容 |
+| --- | --- |
+| `app1-log.txt`（第二個 app 是 `app2-log.txt`） | 每一步的時間與狀態：啟動時的裝置與設定、按下發射、每一張排入時佇列的狀況、裝置實際取走幾格、同步與解碼的結果。 |
+| `app1-tx-時分秒.f32` | 每次發射排進輸出佇列的取樣（乘上輸出音量之前）。 |
+| `app1-rx-時分秒.f32` | 每次開始接收後交給接收機的取樣。 |
+
+音訊檔沒有檔頭：32 位元浮點、48 kHz、單聲道，每個檔案最多 15 分鐘。轉成 WAV 就能交給命令列工具：
+
+```sh
+sox -t f32 -r 48000 -c 1 build-app/tap/app2-rx-時分秒.f32 -e float -b 32 rx.wav
+build/tools/nbtv-rx --trace rx.wav
+```
+
+實際遇過的例子：發射端記下來的音訊每一幀都解得回來，接收端記下來的音訊裡卻有一段一段完全是 0 的空白
+（每段 10–50 毫秒）。接收用的是 SDR 軟體送進虛擬音效卡的聲音，SDR 接收機以每秒一千萬個取樣的速率、
+和螢幕內建的鏡頭共用同一個 USB 2.0 集線器；平常每秒掉一次（約 2% 的時間是空的），鏡頭一開變成每秒七八次
+（兩成的時間是空的），而且中間的聲音還少了將近 2%，等於整段被壓短。這種聲音任何模式都解不出來，
+SDR 軟體的瀑布圖上則是訊號兩側出現很多「毛邊」。這種情形要處理的是接收的那一段：
+SDR 接收機不要和鏡頭共用集線器，或是調低它的取樣率。
+
 ## 原始碼
 
 | 檔案 | 內容 |
@@ -133,6 +165,7 @@ NBTV_DEBUG_VIDEO=影片.mp4 NBTV_DEBUG_SCRIPT="2:tx;9:stop;14:quit" $APP
 | `Sources/MainWindow.swift`、`Sources/ReceivePanels.swift`、`Sources/SidePanel.swift`、`Sources/SettingsWindow.swift`、`Sources/ModeMenu.swift` | 五張版面。發射模式選單的每一列都取自核心的模式表（`nbtv_mode_at`）。 |
 | `Sources/WindowChrome.swift` | 把視窗的紅黃綠控制鈕排到頂列的垂直中央。 |
 | `Sources/Demo.swift`、`Sources/Snapshot.swift`、`Sources/SelfTest.swift` | 開發用：示範資料、`--snapshot`、`--selftest` 與收發測試。 |
+| `Sources/DebugTap.swift` | 除錯用：把送出與聽到的音訊、收發的每一步記到檔案（平常不開）。 |
 
 ## 執行緒
 
@@ -163,7 +196,8 @@ NBTV_DEBUG_VIDEO=影片.mp4 NBTV_DEBUG_SCRIPT="2:tx;9:stop;14:quit" $APP
   （程式與第一個相同，第一個的對傳是驗證過的）。
 - **在背景執行時不被系統拖慢**：只加了宣告，沒有實際比較過視窗被蓋住時有沒有漏掉音訊。
 
-- **鏡頭擷取**：相機權限沒有授權過，鏡頭這個預設來源完全沒跑過。
+- **用鏡頭當來源連續發射**：只用 `--selftest --ask-camera` 取過一格（1920×1080 → 96×72），在三個類比模式與數位 5
+  各收發兩張都成功，但那不經過音訊裝置，也不是 app 的發射流程。真的 app 以鏡頭為來源、經音訊裝置連續發射，還沒有驗證過。
 - **序列埠的 RTS／DTR**：只測了開不了的埠與虛擬終端機的錯誤處理，沒有接真的控制線。
 - 用 `open`（LaunchServices）啟動時 app 自己的權限詢問，以及拒絕權限之後的訊息。
 - 存檔對話框按下「儲存」之後實際寫檔、全螢幕、裝置熱插拔與系統預設裝置改變。

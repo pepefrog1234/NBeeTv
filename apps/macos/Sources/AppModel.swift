@@ -179,6 +179,8 @@ final class AppModel: ObservableObject {
     private var txTailState = 0         // 0：還沒排尾巴，1：正在取，2：已排入
     private var txLastRGB: Data?        // 這次發射最近送出的那一格；來源一時沒有畫面時重送它
     private var txTimer: Timer?
+    private var txTap: DebugTap.Stream?        // 除錯用：排進輸出佇列的取樣原樣記到檔案（見 DebugTap）
+    private var txTapLogged = Date.distantPast
 
     static let pttLeadSeconds = 0.3      // 按下 PTT 後等多久才開始送音訊
     static let prepareLeadSeconds = 0.6  // 目前這張剩多久時開始準備下一張
@@ -227,6 +229,7 @@ final class AppModel: ObservableObject {
     func start() {
         guard live else { return }
         refreshDevices()
+        DebugTap.log("啟動：輸入「\(inputDeviceName)」、輸出「\(outputDeviceName)」、來源 \(settings.sourceKind.rawValue)、模式 \(settings.txModeID)、PTT \(settings.pttMode.rawValue)、輸出音量 \(settings.outputLevelDb) dB")
         if ProcessInfo.processInfo.environment["NBTV_NO_DEVICES"] == nil {
             requestAudioAccessAndReceive()
             restartSource()
@@ -313,7 +316,9 @@ final class AppModel: ObservableObject {
             activeInputID = device.id
             activeInputRate = AudioDevices.sampleRate(device.id)
             inputDeviceName = device.name
+            DebugTap.log("開始接收：輸入「\(device.name)」，裝置取樣率 \(Int(activeInputRate)) Hz")
         } catch {
+            DebugTap.log("開始接收失敗：\(error.localizedDescription)")
             notice = "無法開啟輸入裝置「\(device.name)」：\(error.localizedDescription)"
         }
     }
@@ -467,6 +472,7 @@ final class AppModel: ObservableObject {
             // 等使用者回答權限的這段時間裡可能已經改選影片檔了，那就不要開鏡頭
             guard let self, self.settings.sourceKind == .camera else { return }
             self.camera.start(deviceID: self.settings.cameraID) { error in
+                DebugTap.log(error.map { "鏡頭開不起來：\($0)" } ?? "鏡頭開始擷取")
                 DispatchQueue.main.async { if self.settings.sourceKind == .camera { self.sourceMessage = error } }
             }
         }
@@ -654,6 +660,7 @@ final class AppModel: ObservableObject {
         txDisplay = nil
         txLastRGB = nil
         let callsign = settings.callsign
+        DebugTap.log("按下發射：模式 \(mode.id)、來源 \(settings.sourceKind.rawValue)")
         captureSourceFrame { [weak self] rgb in
             guard let self, session == self.txSession else { return }
             guard let rgb else {
@@ -679,6 +686,7 @@ final class AppModel: ObservableObject {
             failTransmit(NBTV.hasImageCodec ? "畫面編碼失敗" : "這個建置沒有影像編碼器，數位模式不能發射")
             return
         }
+        DebugTap.log("第一張編好（\(frame.samples.count) 個取樣），按下 PTT（\(settings.pttMode.rawValue)）")
         // 先按下 PTT，再開始送音訊。driver 先登記起來：之後不論從哪裡取消，
         // 「放開」都會排在這個「按下」的後面（pttQueue 是序列佇列），不會留下按著不放的 PTT。
         let driver = settings.makePTTDriver()
@@ -695,6 +703,7 @@ final class AppModel: ObservableObject {
                 }
                 return
             }
+            DebugTap.log("PTT 已按下")
             DispatchQueue.main.async { self.goOnAir(first: frame, session: session) }
         }
     }
@@ -718,6 +727,10 @@ final class AppModel: ObservableObject {
             return
         }
         txLead = Int64(AppModel.pttLeadSeconds * Double(NBTV.sampleRate))
+        txTap?.close()
+        txTap = DebugTap.Stream(kind: "tx")
+        DebugTap.log(String(format: "開始送音訊：輸出「%@」，裝置取樣率 %d Hz，輸出增益 %.4f", device.name, Int(AudioDevices.sampleRate(device.id)), engine.output.gain))
+        txTap?.write([Float](repeating: 0, count: Int(txLead)))
         engine.output.enqueue([Float](repeating: 0, count: Int(txLead)))
         txEnd = txLead
         txMonitored = txLead
@@ -742,6 +755,15 @@ final class AppModel: ObservableObject {
         }
         let start = txEnd
         txEnd += Int64(frame.samples.count)
+        txTap?.write(frame.samples)
+        if DebugTap.isEnabled {
+            let peak = frame.samples.reduce(Float(0)) { max($0, abs($1)) }
+            let bad = frame.samples.contains { !$0.isFinite }
+            let rate = Double(NBTV.sampleRate)
+            DebugTap.log(String(format: "第 %d 張排入：模式 %d、%d 個取樣、峰值 %.3f%@，佇列裡 %.2f 秒，已播 %.2f 秒，佇列空掉 %d 次",
+                                txNextNumber, frame.modeID, frame.samples.count, peak, bad ? "（含 NaN 或無限大！）" : "",
+                                Double(engine.output.queuedSamples) / rate, Double(engine.output.playedSamples) / rate, engine.output.underruns))
+        }
         let digital = Modes.find(frame.modeID)?.isDigital ?? true
         onAir.append(OnAirFrame(start: start, end: txEnd, samples: frame.samples, preview: NBTV.image(fromRGB: frame.preview),
                                 bytes: digital ? frame.imageBytes : nil, number: txNextNumber))
@@ -753,6 +775,14 @@ final class AppModel: ObservableObject {
     private func txTick() {
         guard let engine, txPhase == .transmitting || txPhase == .stopping else { return }
         let position = engine.output.playedSamples
+        if DebugTap.isEnabled, Date().timeIntervalSince(txTapLogged) >= 1 {
+            txTapLogged = Date()
+            let rate = Double(NBTV.sampleRate)
+            DebugTap.log(String(format: "發射中：已播 %.2f 秒、已排到 %.2f 秒、佇列裡 %.2f 秒、裝置取了 %lld 格（其中靜音 %lld 格）、佇列空掉 %d 次、%@%@",
+                                Double(position) / rate, Double(txEnd) / rate, Double(engine.output.queuedSamples) / rate,
+                                engine.output.renderedFrames, engine.output.silentFrames, engine.output.underruns,
+                                txPhase == .transmitting ? "發射中" : "停止中", txPreparing ? "、正在準備下一張" : ""))
+        }
 
         // 把已經送出去的部分交給頻譜分析
         if position > txMonitored {
@@ -796,8 +826,14 @@ final class AppModel: ObservableObject {
             guard let self, session == self.txSession else { return }
             // 來源一時沒有畫面（剛切換來源）：重送上一格，不要讓電台空著發射
             guard self.txPhase == .transmitting, let rgb = captured ?? self.txLastRGB else {
+                DebugTap.log("準備下一張：沒有畫面可用（或已經不在發射）")
                 self.txPreparing = false
                 return
+            }
+            if captured == nil { DebugTap.log("準備下一張：來源沒有新的畫面，重送上一格") }
+            if DebugTap.isEnabled {
+                let mean = rgb.reduce(0) { $0 + Int($1) } / max(rgb.count, 1)
+                DebugTap.log("準備下一張：來源 \(self.settings.sourceKind.rawValue)，畫面 \(rgb.count) 位元組、平均亮度 \(mean)")
             }
             self.txLastRGB = rgb
             self.txQueue.async {
@@ -812,6 +848,7 @@ final class AppModel: ObservableObject {
                                                Double(self.txEnd - Int64(frame.samples.count) - (self.engine?.output.playedSamples ?? 0)) / Double(NBTV.sampleRate)))
                     } else {
                         // 編好之後才發現已經按了停止：這張不送，發射機也回到編它之前的狀態（見 queueTail）
+                        if frame == nil { DebugTap.log(String(format: "編碼失敗（花了 %.0f 毫秒）：這一張沒有東西可以送", spent * 1000)) }
                         if frame != nil {
                             self.txQueue.async { self.transmitter.discardLast() }
                             AppModel.trace?("停止時下一張剛編好：不送")
@@ -825,6 +862,7 @@ final class AppModel: ObservableObject {
 
     /// 停止發射：送完目前這張後放開 PTT、回到接收。
     func stopTransmit() {
+        DebugTap.log("按下停止")
         switch txPhase {
         case .transmitting:
             txPhase = .stopping
@@ -864,6 +902,8 @@ final class AppModel: ObservableObject {
                 // 尾巴要緊接在最後一張後面才有意義；佇列已經空了（來不及）就只補靜音
                 let late = engine.output.playedSamples >= self.txEnd
                 let block = (late ? [] : tail) + [Float](repeating: 0, count: NBTV.sampleRate / 10)
+                self.txTap?.write(block)
+                DebugTap.log("排入尾巴 \(block.count) 個取樣\(late ? "（佇列已經空了，只補靜音）" : "")")
                 engine.output.enqueue(block)
                 self.txEnd += Int64(block.count)
                 self.txTailState = 2
@@ -879,12 +919,20 @@ final class AppModel: ObservableObject {
 
     private func failTransmit(_ message: String?) {
         if let message { notice = message }
+        DebugTap.log(message.map { "發射中止：\($0)" } ?? "發射取消")
         AppModel.trace?(message.map { "發射中止：\($0)" } ?? "發射取消")
         endTransmit()
     }
 
     /// 停止輸出、放開 PTT、回到接收。
     private func endTransmit() {
+        if let engine {
+            DebugTap.log(String(format: "發射結束：已播 %.2f 秒、已排到 %.2f 秒、送出 %d 張、裝置取了 %lld 格（其中靜音 %lld 格）、佇列空掉 %d 次",
+                                Double(engine.output.playedSamples) / Double(NBTV.sampleRate), Double(txEnd) / Double(NBTV.sampleRate),
+                                txFramesSent, engine.output.renderedFrames, engine.output.silentFrames, engine.output.underruns))
+        }
+        txTap?.close()
+        txTap = nil
         txSession += 1
         txTimer?.invalidate()
         txTimer = nil
@@ -908,7 +956,9 @@ final class AppModel: ObservableObject {
         pttQueue.async {
             do {
                 try driver.key(false)
+                DebugTap.log("PTT 已放開")
             } catch {
+                DebugTap.log("放開 PTT 失敗：\(error.localizedDescription)")
                 DispatchQueue.main.async { self.notice = "放開 PTT 失敗：\(error.localizedDescription)" }
             }
         }

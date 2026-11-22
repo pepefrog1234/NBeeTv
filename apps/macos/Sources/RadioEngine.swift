@@ -51,6 +51,8 @@ final class RadioEngine {
     private var activeGeneration = 0
     private var pending = RxUpdate()          // 還沒交給介面的更新
     private var lastDelivery: UInt64 = 0      // 上次交給介面的時間（DispatchTime 的奈秒）
+    private var rxTap: DebugTap.Stream?       // 除錯用：交給接收機的取樣原樣記到檔案（見 DebugTap）
+    private var tapSynced = false             // 上一次記到紀錄檔的同步狀態
     /// 音訊每 20 毫秒進來一段，但介面不需要更新得那麼勤（整個視窗重排一次並不便宜）：
     /// 攢到這麼久才交一次；解出新的一幀時立刻交。
     private static let deliveryInterval: UInt64 = 80_000_000
@@ -74,6 +76,9 @@ final class RadioEngine {
             pending = RxUpdate()
             activeGeneration = current
             receiving = true
+            rxTap?.close()
+            rxTap = DebugTap.Stream(kind: "rx")
+            tapSynced = false
         }
         do {
             try input.start(deviceID: deviceID)
@@ -85,7 +90,11 @@ final class RadioEngine {
 
     func stopReceiving() {
         input.stop()
-        coreQueue.sync { receiving = false }
+        coreQueue.sync {
+            receiving = false
+            rxTap?.close()
+            rxTap = nil
+        }
     }
 
     /// 發射時把送出的音訊交給頻譜分析，瀑布圖顯示送出的訊號。
@@ -104,10 +113,19 @@ final class RadioEngine {
 
     private func process(_ samples: [Float]) {
         guard receiving else { return }
+        rxTap?.write(samples)
         receiver.push(samples)
         spectrum.push(samples)
         pending.take(receiver.status())
-        while let frame = receiver.pollFrame() { pending.frames.append(frame) }
+        while let frame = receiver.pollFrame() {
+            DebugTap.log("接收：收到一幀，模式 \(frame.modeID)，\(frame.decoded ? "解碼成功" : "沒解出來")，標頭\(frame.headerOK ? "正確" : "錯誤")，序號 \(frame.sequence)")
+            pending.frames.append(frame)
+        }
+        if pending.synced != tapSynced {
+            tapSynced = pending.synced
+            DebugTap.log(tapSynced ? String(format: "接收：同步到模式 %d，頻偏 %+.1f Hz，輸入 %.1f dB", pending.modeID, pending.offsetHz, pending.inputLevelDb)
+                                   : String(format: "接收：失去同步，輸入 %.1f dB", pending.inputLevelDb))
+        }
         while let row = spectrum.poll() { pending.spectrumRows.append(row) }
         let now = DispatchTime.now().uptimeNanoseconds
         guard !pending.frames.isEmpty || now - lastDelivery >= RadioEngine.deliveryInterval else { return }
