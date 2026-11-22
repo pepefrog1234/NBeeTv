@@ -220,6 +220,9 @@ final class VideoFileSource {
     var loop = true
     /// 播到結尾停住了（循環播放時不會發生）。重新播放、拖動位置或換檔案之後就不算。
     private var reachedEnd = false
+    /// 最近一次要它播（play）還是要它停（pause、rewind）。循環播放的影片剛好在播到結尾的那一瞬間被暫停時，
+    /// 「播完了」的通知還在路上；靠這個知道不要再從頭播。
+    private var wantsPlay = false
 
     init() {
         player.isMuted = true  // 影片的聲音不能混進發射的音訊
@@ -243,6 +246,8 @@ final class VideoFileSource {
                 self.reachedEnd = true
                 return
             }
+            // 通知送到之前已經被暫停了：就停在結尾，下一次播放再從頭來（見 play）
+            guard self.wantsPlay else { return }
             self.player.seek(to: .zero)
             self.player.play()
         }
@@ -280,6 +285,7 @@ final class VideoFileSource {
         duration = 0
         quarterTurns = 0
         reachedEnd = false
+        wantsPlay = false
     }
 
     var isPlaying: Bool { player.rate != 0 }
@@ -294,10 +300,14 @@ final class VideoFileSource {
     func play() {
         if hasEnded { player.seek(to: .zero) }
         reachedEnd = false
+        wantsPlay = true
         player.play()
     }
 
-    func pause() { player.pause() }
+    func pause() {
+        wantsPlay = false
+        player.pause()
+    }
 
     func seek(to seconds: Double) {
         reachedEnd = false
@@ -307,6 +317,7 @@ final class VideoFileSource {
     /// 回到開頭並停在那裡；位置移過去之後在主執行緒上呼叫 completion（之後 copyCurrentFrame 拿到的才是開頭那一格）。
     func rewind(completion: @escaping () -> Void) {
         reachedEnd = false
+        wantsPlay = false
         player.pause()
         player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) { _ in
             DispatchQueue.main.async(execute: completion)

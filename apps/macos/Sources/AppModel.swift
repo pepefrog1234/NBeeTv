@@ -944,6 +944,7 @@ final class AppModel: ObservableObject {
         switch txPhase {
         case .transmitting:
             txPhase = .stopping
+            pauseVideoWithTransmit()   // 之後不會再取新的畫面，影片不必等這一張送完才停
             dropQueuedFrame()
             if !txPreparing { queueTail() }
         case .starting:
@@ -962,6 +963,20 @@ final class AppModel: ObservableObject {
         AppModel.trace?("影片播完：送完最後一張就停止發射")
         txPhase = .stopping
         if !txPreparing { queueTail() }
+    }
+
+    /// 發射停下來了（按了停止，或送到一半出錯）：來源的影片跟著暫停。沒有在送的這段時間影片不會自己往前走，
+    /// 下一次發射從停下的地方接著播（見 goOnAir）。還沒開始送就取消的不算，影片維持原來的樣子。
+    private func pauseVideoWithTransmit() {
+        guard settings.sourceKind == .video, video.url != nil else { return }
+        let wasPlaying = video.isPlaying
+        // 看起來沒在播也照樣交代一次：循環播放的影片剛好播到結尾的那一瞬間，要這樣它才不會自己又從頭播（見 VideoFileSource）
+        video.pause()
+        videoPlaying = false
+        guard wasPlaying else { return }
+        if !scrubbing { videoPosition = video.position }
+        DebugTap.log(String(format: "發射停止：影片暫停在 %.1f 秒", video.position))
+        AppModel.trace?("發射停止：影片跟著暫停")
     }
 
     /// 「送完目前這張」就停：下一張如果已經排進輸出佇列、但還沒開始播，把它拿掉。
@@ -1019,6 +1034,8 @@ final class AppModel: ObservableObject {
                                 Double(engine.output.playedSamples) / Double(NBTV.sampleRate), Double(txEnd) / Double(NBTV.sampleRate),
                                 txFramesSent, engine.output.renderedFrames, engine.output.silentFrames, engine.output.underruns))
         }
+        // 送到一半出錯才會在「發射中」直接走到這裡（按停止的話，當下就暫停過了；之後使用者自己又按播放的不再管）
+        if txPhase == .transmitting { pauseVideoWithTransmit() }
         txTap?.close()
         txTap = nil
         txSession += 1

@@ -103,7 +103,7 @@ struct SidePanel: View {
             VStack(alignment: .leading, spacing: 0) {
                 Text(sourceCaption).lineHeight()
                 if model.settings.sourceKind == .video {
-                    Text(model.videoPlaysOnce ? "按下發射才開始播放，每送一張取當下那一格" : "影片照常播放，每送一張就取當下那一格").lineHeight()
+                    Text(model.videoPlaysOnce ? "按下發射才開始播放，每送一張取當下那一格" : "影片循環播放，每送一張就取當下那一格").lineHeight()
                 }
             }
             .font(Theme.ui(12))

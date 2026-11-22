@@ -696,9 +696,11 @@ enum SelfTest {
     ///   * 影片播完，再送出它的最後一格，然後自動停止、放開 PTT、回到待機
     ///   * 送出去的每一張都解得回來：第一張是影片開頭的畫面，最後一張是結尾的畫面
     ///   * 影片停在結尾時再按一次發射，會回到開頭重新來過
-    ///   * 勾了循環播放就不會自動停止，要按停止
+    ///   * 播到一半按停止，影片當下就跟著暫停；再按一次發射，從停下的地方接著播到結尾
+    ///   * 勾了循環播放就不會自動停止，要按停止；按了停止影片一樣跟著暫停
+    ///   * 還沒開始送音訊就取消的，影片維持原來的樣子
     private static func testVideoTransmit(_ image: Data) {
-        let name = "影片來源：發射時自動播放、播完自動停止"
+        let name = "影片來源：發射時自動播放、停止時暫停、播完自動停止"
         let seconds = 3
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("nbtv-selftest-tx-\(getpid()).mp4")
         defer { try? FileManager.default.removeItem(at: url) }
@@ -706,29 +708,33 @@ enum SelfTest {
             report(name, false, "示範影片做不出來")
             return
         }
-        // 影片開頭與結尾那一格縮成 96×72 的樣子，之後拿來認收到的畫面
-        var first: Data?, last: Data?
-        do {
-            let source = VideoFileSource()
-            var opened: Bool?
-            source.open(url) { opened = $0 }
-            guard Demo.wait(timeout: 10, until: { opened != nil }), opened == true else {
-                report(name, false, "影片無法開啟")
-                return
-            }
-            for (time, isFirst) in [(0.0, true), (Double(seconds), false)] {
-                source.seek(to: time)
-                var rgb: Data?
-                _ = Demo.wait(timeout: 5) {
-                    if let buffer = source.copyCurrentFrame() { rgb = FrameScaler.scale(buffer, mode: .fill)?.rgb }
-                    return rgb != nil
-                }
-                if isFirst { first = rgb } else { last = rgb }
-            }
-            source.close()
+        // 另外開一份同樣的影片，用來取指定位置那一格縮成 96×72 的樣子，之後拿來認收到的畫面
+        let reference = VideoFileSource()
+        defer { reference.close() }
+        var referenceOpened: Bool?
+        reference.open(url) { referenceOpened = $0 }
+        guard Demo.wait(timeout: 10, until: { referenceOpened != nil }), referenceOpened == true else {
+            report(name, false, "影片無法開啟")
+            return
         }
+        func picture(at time: Double) -> Data? {
+            // 等位置確實移過去了再取，才不會拿到上一個位置留下來的那一格
+            var arrived = false
+            reference.player.seek(to: CMTime(seconds: time, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) { _ in
+                DispatchQueue.main.async { arrived = true }
+            }
+            guard Demo.wait(timeout: 5, until: { arrived }) else { return nil }
+            var rgb: Data?
+            _ = Demo.wait(timeout: 5) {
+                if let buffer = reference.copyCurrentFrame() { rgb = FrameScaler.scale(buffer, mode: .fill)?.rgb }
+                return rgb != nil
+            }
+            return rgb
+        }
+        let first = picture(at: 0), last = picture(at: Double(seconds))
         guard let first, let last, difference(first, last) > 12 else {
-            report(name, false, "取不到影片開頭與結尾的畫面，或兩者太像")
+            report(name, false, "取不到影片開頭與結尾的畫面，或兩者太像（開頭\(first == nil ? "沒取到" : "有")、結尾\(last == nil ? "沒取到" : "有")"
+                   + (first != nil && last != nil ? String(format: "，平均差 %.1f", difference(first!, last!)) : "") + "）")
             return
         }
 
@@ -797,7 +803,62 @@ enum SelfTest {
             details.append("\(label)送出 \(result.count) 張、解回 \(good.count) 張")
         }
 
-        // 循環播放：影片播完會從頭再播，發射不會自己停
+        // 播到一半按停止：影片當下就跟著暫停，之後不會自己往前走
+        var pausedAt: Double?
+        _ = sent.take()
+        _ = ptt.take()
+        model.startTransmit()   // 影片停在結尾，所以這一次從頭來
+        // 先等它真的從頭播起來（畫面上的播放位置每 0.1 秒才更新一次，剛開始還留著上一次結尾的數字），再等播到一半
+        if Demo.wait(timeout: 10, until: { model.txPhase == .transmitting && model.videoPlaying && model.videoPosition < 1 }),
+           Demo.wait(timeout: 10, until: { model.txPhase == .transmitting && model.videoPlaying && model.videoPosition >= 1.4 }) {
+            model.stopTransmit()
+            let pausedAtOnce = !model.videoPlaying
+            let stoppedAt = model.videoPosition
+            if !Demo.wait(timeout: 10, until: { model.txPhase == .idle }) { problems.append("播到一半按停止：發射沒有結束") }
+            Demo.spin(0.6)   // 影片要是還在播，這段時間會繼續往前走，甚至播完
+            if !pausedAtOnce || model.videoPlaying || abs(model.videoPosition - stoppedAt) > 0.15 {
+                problems.append(String(format: "播到一半按停止：影片沒有跟著暫停（按停止時在 %.2f 秒，後來在 %.2f 秒%@）", stoppedAt, model.videoPosition,
+                                       model.videoPlaying ? "，而且還在播" : ""))
+            }
+            if stoppedAt > Double(seconds) - 1 { problems.append(String(format: "播到一半按停止：按停止時影片已經到 %.2f 秒，不算一半", stoppedAt)) }
+            if ptt.take() != [true, false] { problems.append("播到一半按停止：PTT 不是「按下一次、放開一次」") }
+            let frames = Demo.receive(sent.take() + Demo.silence(seconds: 0.5)).flatMap(\.frames)
+            let good = frames.filter { $0.decoded && $0.headerOK && $0.callsign == "N0CALL" }
+            if good.isEmpty || good.count != model.txFramesSent || frames.count != good.count {
+                problems.append("播到一半按停止：送出 \(model.txFramesSent) 張，解回來 \(good.count) 張")
+            }
+            if let head = good.first?.rgb, difference(head, first) >= difference(head, last) { problems.append("播到一半按停止：第一張不是影片開頭的畫面") }
+            details.append(String(format: "播到 %.1f 秒按停止，影片停在 %.1f 秒（送出 %d 張）", stoppedAt, model.videoPosition, model.txFramesSent))
+            pausedAt = model.videoPosition
+        } else {
+            problems.append("播到一半按停止：按下發射之後影片一直沒有播到一半")
+            model.stopTransmit()
+            _ = Demo.wait(timeout: 10) { model.txPhase == .idle }
+        }
+
+        // 再按一次發射：從停下的地方接著播（第一張是停下的那一格，不是影片開頭），播完照樣自動停止
+        if let pausedAt {
+            let label = "停下之後再按一次"
+            if let here = picture(at: pausedAt), min(difference(here, first), difference(here, last)) > 4 {
+                if let result = transmitOnce(label) {
+                    let good = result.frames.filter { $0.decoded && $0.headerOK && $0.callsign == "N0CALL" }
+                    // 剩下一秒半左右：停下的那一格、中間一張、結尾一張
+                    if result.count < 2 || result.count > 4 { problems.append("\(label)：送出 \(result.count) 張，預期 2–4 張") }
+                    if good.count != result.count || result.frames.count != result.count {
+                        problems.append("\(label)：送出 \(result.count) 張，解回來 \(good.count) 張")
+                    }
+                    if let head = good.first?.rgb, let tail = good.last?.rgb {
+                        if difference(head, here) >= difference(head, first) { problems.append("\(label)：沒有從停下的地方接著播（第一張是影片開頭的畫面）") }
+                        if difference(tail, last) >= difference(tail, first) { problems.append("\(label)：最後一張不是影片結尾的畫面") }
+                    }
+                    details.append("\(label)從停下的地方接著送出 \(result.count) 張")
+                }
+            } else {
+                problems.append("\(label)：取不到影片停下那個位置的畫面，或它和開頭、結尾太像")
+            }
+        }
+
+        // 循環播放：影片播完會從頭再播，發射不會自己停；按了停止，影片一樣跟著暫停
         settings.loopVideo = true
         _ = sent.take()
         _ = ptt.take()
@@ -807,12 +868,71 @@ enum SelfTest {
             problems.append("循環播放時發射自己停了")
         } else {
             model.stopTransmit()
+            let pausedAtOnce = !model.videoPlaying
             if !Demo.wait(timeout: 10, until: { model.txPhase == .idle }) { problems.append("循環播放時按停止沒有結束發射") }
             Demo.spin(0.3)
+            // 按停止的時候影片可能剛好在從結尾跳回開頭，所以不比按下那一刻的位置，只看停下來之後還有沒有在動
+            let rested = model.videoPosition
+            Demo.spin(0.5)
+            if !pausedAtOnce || model.videoPlaying || abs(model.videoPosition - rested) > 0.05 {
+                problems.append(String(format: "循環播放：按停止之後影片沒有跟著暫停（%.2f 秒 → %.2f 秒）", rested, model.videoPosition))
+            }
             if ptt.take() != [true, false] { problems.append("循環播放：PTT 不是「按下一次、放開一次」") }
-            details.append("循環播放時送了 \(model.txFramesSent) 張、按停止才結束")
+            details.append("循環播放時送了 \(model.txFramesSent) 張、按停止才結束，影片跟著暫停")
         }
+
+        // 還沒開始送音訊就取消（按下發射馬上又按停止）：影片維持原來的樣子。這裡先自己按播放，取消之後它應該還在播
+        if !model.videoPlaying { model.toggleVideoPlayback() }
+        Demo.spin(0.3)
+        _ = ptt.take()
+        model.startTransmit()
+        model.stopTransmit()
+        if model.txPhase != .idle { problems.append("還沒開始送就取消：沒有馬上回到待機") }
+        Demo.spin(0.5)
+        if !model.videoPlaying { problems.append("還沒開始送就取消：原本在播的影片被暫停了") }
+        if ptt.take().last == true { problems.append("還沒開始送就取消：PTT 還按著") }
+        _ = Demo.wait(timeout: 10) { model.txPhase == .idle }
         report(name, problems.isEmpty, problems.isEmpty ? details.joined(separator: "；") : problems.joined(separator: "；"))
+        testPauseAtLoopPoint(url)
+    }
+
+    /// 循環播放的影片剛好播到結尾的那一瞬間被暫停（例如這時按下停止發射）：「播完了」的通知是排到主執行緒上、
+    /// 晚一點才送到的，送到的時候不能又把影片從頭播起來。這裡佔住主執行緒等影片走到結尾，讓通知確實排在暫停的後面。
+    private static func testPauseAtLoopPoint(_ url: URL) {
+        let name = "循環播放的影片剛好在結尾被暫停"
+        let source = VideoFileSource()
+        defer { source.close() }
+        source.loop = true
+        var opened: Bool?
+        source.open(url) { opened = $0 }
+        guard Demo.wait(timeout: 10, until: { opened != nil }), opened == true, source.duration > 1 else {
+            report(name, false, "影片無法開啟")
+            return
+        }
+        source.seek(to: source.duration - 0.6)
+        Demo.spin(0.3)
+        source.play()
+        // 不讓主執行緒的事件迴圈跑：位置不再往前走、而且已經在結尾附近，就是播完了
+        var position = source.position, still = 0
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline, still < 15 {
+            usleep(10_000)
+            let now = source.position
+            still = (now == position && now >= source.duration - 0.2) ? still + 1 : 0
+            position = now
+        }
+        let reached = still >= 15
+        source.pause()
+        Demo.spin(0.8)   // 通知這時才送到
+        let stayed = !source.isPlaying && source.position >= source.duration - 0.2
+        let rested = source.position
+        // 之後再播放，要從頭來
+        source.play()
+        let restarted = Demo.wait(timeout: 3) { source.isPlaying && source.position > 0.1 && source.position < source.duration - 1 }
+        source.pause()
+        report(name, reached && stayed && restarted,
+               String(format: "%@；暫停之後停在 %.2f 秒%@；再播放%@從頭來", reached ? "播到了結尾" : "一直沒有播到結尾", rested,
+                      stayed ? "" : "（沒有停住）", restarted ? "" : "沒有"))
     }
 
     // MARK: 序列埠
