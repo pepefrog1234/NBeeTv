@@ -22,7 +22,7 @@ int main(int argc, char** argv) {
             "  --lead 秒       開頭的靜音（預設 0.5）\n"
             "  --tail 秒       結尾的靜音（預設 0.5）\n"
             "  --papr dB       包絡峰均比目標；0 用預設值，負值不削波\n"
-            "  --speed N       影像編碼器的速度檔 0–10（預設 6）\n"
+            "  --speed N       影像編碼器的速度檔 0–10（預設 3）\n"
             "影像必須是 96×72 的二進位 PPM，例如：ffmpeg -i 照片.jpg -vf scale=96:72 -pix_fmt rgb24 影像.ppm\n");
         return args.has("help") ? 0 : 2;
     }

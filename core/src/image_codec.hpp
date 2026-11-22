@@ -16,7 +16,11 @@ struct ImageEncodeResult {
     int encodes = 0;                    // 搜尋時實際編了幾次
 };
 
-inline constexpr int kDefaultEncoderSpeed = 6;  // libaom 的速度檔 0（最慢最好）..10
+// libaom 的速度檔 0（最慢最好）..10。畫面只有 96×72，編碼器多花一點力氣的效果很明顯：
+// 同樣的位元組數，速度檔 3 比 6 高 1–3 dB，每張畫面（含位元率搜尋）的時間是 6 的五到七倍；
+// 再慢下去只多不到 1 dB，時間卻再加倍以上。數字見 README 與 test_image。
+// 改速度檔不影響相容性：收到的都是標準的 AV1，哪一種解碼器都能解。
+inline constexpr int kDefaultEncoderSpeed = 3;
 
 // 對量化參數做二分搜尋，取酬載不超過 max_bytes 的最佳品質（最多編 7 次）。
 // rgb 是 96×72×3。量化到最粗還是放不下時回傳 false。

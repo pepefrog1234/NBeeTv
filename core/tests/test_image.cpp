@@ -79,7 +79,7 @@ void test_codec() {
             CHECK(psnr > (q == 0 ? 21.0 : 27.0));
         }
         // 酬載加回外殼後，與 libavif 直接輸出的檔案逐位元相同（各種速度檔都要成立）
-        for (int speed : {2, 6, 9}) {
+        for (int speed : {2, 3, 6, 9}) {
             std::vector<std::uint8_t> file;
             CHECK(image_encode_avif_file(rgb, 30, speed, file));
             const auto payload = payload_from_avif(file);

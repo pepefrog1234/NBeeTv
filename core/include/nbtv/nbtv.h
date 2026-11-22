@@ -99,7 +99,7 @@ int nbtv_has_image_codec(void);
 
 /*
  * 把一張畫面壓成不超過 max_bytes 的影像酬載（對品質做二分搜尋，最多編 7 次）。
- * speed 是編碼器的速度檔 0（最慢、畫質最好）到 10，負值表示用預設值 6。
+ * speed 是編碼器的速度檔 0（最慢、畫質最好）到 10，負值表示用預設值 3。
  * 回傳酬載的位元組數；放不下、out 太小或沒有編解碼器時回傳 -1。
  */
 int nbtv_image_encode(const uint8_t *rgb, int max_bytes, int speed, uint8_t *out, int out_capacity);
