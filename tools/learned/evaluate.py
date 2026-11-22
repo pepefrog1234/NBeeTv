@@ -7,17 +7,21 @@ import numpy as np
 import torch
 
 from export import read_ppm, read_weights
-from model import JSCC, psnr_uint8
+from model import DEFAULT_WIDTHS, JSCC, psnr_uint8
 
 path = sys.argv[1]
+widths = DEFAULT_WIDTHS
 if path.endswith(".bin"):
     state, latent, model_id, architecture = read_weights(path)
     label = f"權重檔 {model_id:08X}"
 else:
     ckpt = torch.load(path, map_location="cpu")
     state, latent, architecture = ckpt["model"], ckpt["latent"], ckpt.get("architecture", 1)
+    widths = tuple(ckpt.get("widths", DEFAULT_WIDTHS))
     label = f"檢查點，訓練 {ckpt['step']} 步"
-model = JSCC(latent, architecture)
+    if widths != DEFAULT_WIDTHS:
+        label += "，各層寬度 " + "／".join(str(w) for w in widths)
+model = JSCC(latent, architecture, widths)
 model.load_state_dict(state)
 dev = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 model.to(dev).eval()

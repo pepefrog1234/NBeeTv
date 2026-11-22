@@ -15,6 +15,9 @@ import torch.nn.functional as F
 H, W = 72, 96
 MAX_SNR_DB = 30.0
 MIN_SNR_DB = {1: -2.0, 2: -6.0}   # 各結構的解碼器認得的最低訊雜比（訓練時涵蓋到這裡）
+# 解析度每減半一次的通道數。models/ 裡的權重都是這一組，C++ 的推論（core/src/learned_codec.cpp）也只認得這一組；
+# 別的寬度（train.py --widths）目前只能在 PyTorch 裡訓練與評估，用來試「模型加大有沒有幫助」。
+DEFAULT_WIDTHS = (32, 64, 128, 192)
 
 
 class ResBlock(nn.Module):
@@ -35,7 +38,7 @@ class ResBlock(nn.Module):
 class Encoder(nn.Module):
     """3×72×96 → latent_ch×9×12"""
 
-    def __init__(self, latent_ch, widths=(32, 64, 128, 192), blocks=2):
+    def __init__(self, latent_ch, widths=DEFAULT_WIDTHS, blocks=2):
         super().__init__()
         self.stem = nn.Conv2d(3, widths[0], 5, padding=2)
         stages = []
@@ -52,7 +55,7 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     """latent_ch×9×12（收到的值）＋訊雜比 → 3×72×96。reliability 為真時，另外吃同樣形狀的「可靠程度」。"""
 
-    def __init__(self, latent_ch, widths=(32, 64, 128, 192), blocks=2, reliability=False):
+    def __init__(self, latent_ch, widths=DEFAULT_WIDTHS, blocks=2, reliability=False):
         super().__init__()
         self.reliability = reliability
         self.snr_embed = nn.Sequential(nn.Linear(1, 64), nn.GELU(), nn.Linear(64, 64), nn.GELU())
@@ -107,13 +110,14 @@ def receive(y, noise_var, ref):
 
 
 class JSCC(nn.Module):
-    def __init__(self, latent_ch, architecture=1):
+    def __init__(self, latent_ch, architecture=1, widths=DEFAULT_WIDTHS):
         super().__init__()
         self.latent_ch = latent_ch
         self.architecture = architecture
+        self.widths = tuple(int(w) for w in widths)
         self.min_snr_db = MIN_SNR_DB[architecture]
-        self.enc = Encoder(latent_ch)
-        self.dec = Decoder(latent_ch, reliability=architecture >= 2)
+        self.enc = Encoder(latent_ch, self.widths)
+        self.dec = Decoder(latent_ch, self.widths, reliability=architecture >= 2)
 
     @property
     def real_dims(self):

@@ -37,7 +37,7 @@ import zlib
 import numpy as np
 import torch
 
-from model import JSCC
+from model import DEFAULT_WIDTHS, JSCC
 
 MAGIC = b"NBTVLRN1"
 REF_MAGIC = b"NBTVLRF2"
@@ -116,6 +116,9 @@ if __name__ == "__main__":
     else:
         ckpt = torch.load(args.checkpoint, map_location="cpu")
         source, source_latent, source_arch = ckpt["model"], ckpt["latent"], ckpt.get("architecture", 1)
+        if tuple(ckpt.get("widths", DEFAULT_WIDTHS)) != DEFAULT_WIDTHS:
+            # 權重檔沒有記各層的寬度，C++ 的推論也只認得預設的那一組
+            raise SystemExit("這個檢查點的各層寬度不是預設值，C++ 的推論讀不了，所以不匯出；先用 evaluate.py 在 PyTorch 裡評估")
     architecture = args.architecture or source_arch
     source = {k: v.detach().cpu().float() for k, v in source.items()}
     if architecture == 2 and source_arch == 1:
