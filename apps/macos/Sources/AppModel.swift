@@ -68,6 +68,7 @@ final class AppModel: ObservableObject {
         let callsign: String
         let sequence: Int    // 幀序號；不知道時是 -1
         let time: Date
+        let snrDb: Double    // 收到這一張時接收機量到的訊雜比（3 kHz 雜訊頻寬）
     }
 
     let settings: AppSettings
@@ -189,7 +190,8 @@ final class AppModel: ObservableObject {
     /// 目前這張剩多久時開始準備下一張。數位模式的影像編碼在慢的機器上可能要大半秒，
     /// 所以照實際花的時間提早，下一張才趕得及在目前這張播完之前排進去。
     private var prepareLead: Double { max(AppModel.prepareLeadSeconds, txPrepareSeconds * 1.5 + 0.25) }
-    static let historyLimit = 60
+    /// 「最近收到」最多留幾張（都在記憶體裡，一張約 23 KB）；超過就丟掉最舊的。
+    static let historyLimit = 5000
 
     init(settings: AppSettings, live: Bool) {
         self.settings = settings
@@ -371,7 +373,8 @@ final class AppModel: ObservableObject {
         lastResult = .ok
         if frame.headerOK, !frame.callsign.isEmpty { syncCallsign = frame.callsign }
         history.insert(ReceivedFrame(image: image, payload: frame.payload, isDigital: frame.isDigital, modeID: frame.modeID,
-                                     callsign: frame.headerOK ? frame.callsign : "", sequence: frame.headerOK ? frame.sequence : -1, time: time),
+                                     callsign: frame.headerOK ? frame.callsign : "", sequence: frame.headerOK ? frame.sequence : -1, time: time,
+                                     snrDb: frame.snrDb),
                        at: 0)
         if history.count > AppModel.historyLimit { history.removeLast(history.count - AppModel.historyLimit) }
     }
@@ -460,8 +463,8 @@ final class AppModel: ObservableObject {
             camera.stop()
             if video.url == nil {
                 sourceMessage = "還沒選擇影片檔"
-            } else {
-                video.play()
+            } else if settings.loopVideo {
+                video.play()   // 不循環的影片停在原來的位置，按下發射才開始播（見 goOnAir）
             }
         }
     }
@@ -509,7 +512,8 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func openVideo(_ url: URL, autoplay: Bool = true, completion: ((Bool) -> Void)? = nil) {
+    /// autoplay 是 nil 時照「循環播放」的設定：循環的影片開了就播；不循環的停在開頭，按下發射才開始播、播完自動停止發射。
+    func openVideo(_ url: URL, autoplay: Bool? = nil, completion: ((Bool) -> Void)? = nil) {
         sourceMessage = nil
         if settings.sourceKind == .video { clearSourceFrame() }
         video.loop = settings.loopVideo
@@ -519,7 +523,11 @@ final class AppModel: ObservableObject {
                 self.videoName = url.lastPathComponent
                 self.videoDuration = self.video.duration
                 self.videoPosition = 0
-                if autoplay { self.video.play() }
+                if autoplay ?? self.settings.loopVideo {
+                    self.video.play()
+                } else if autoplay == nil {
+                    self.video.seek(to: 0)   // 停在開頭；移一下位置，開頭那一格才會送出來當預覽
+                }
             } else {
                 self.videoName = nil
                 self.videoDuration = 0
@@ -671,28 +679,65 @@ final class AppModel: ObservableObject {
         txLastRGB = nil
         let callsign = settings.callsign
         DebugTap.log("按下發射：模式 \(mode.id)、來源 \(settings.sourceKind.rawValue)")
-        captureSourceFrame { [weak self] rgb in
+        let encodeFirst = { [weak self] in
             guard let self, session == self.txSession else { return }
-            guard let rgb else {
-                self.failTransmit("沒有來源畫面可以發射")
-                return
-            }
-            self.txLastRGB = rgb
-            self.txQueue.async {
-                // 上一次若有編好卻沒送出去的幀（取消、PTT 失敗），先取消它，再把重取樣濾波器清乾淨
-                self.transmitter.discardLast()
-                _ = self.transmitter.finish()
-                self.transmitter.setMode(mode.id)
-                self.transmitter.setCallsign(callsign)
-                let began = Date()
-                let frame = self.transmitter.encode(rgb: rgb)
-                let spent = Date().timeIntervalSince(began)
-                DispatchQueue.main.async {
-                    if session == self.txSession { self.txPrepareSeconds = spent }
-                    self.firstFrameReady(frame, session: session)
+            self.captureSourceFrame { [weak self] rgb in
+                guard let self, session == self.txSession else { return }
+                guard let rgb else {
+                    self.failTransmit("沒有來源畫面可以發射")
+                    return
+                }
+                self.txLastRGB = rgb
+                self.txQueue.async {
+                    // 上一次若有編好卻沒送出去的幀（取消、PTT 失敗），先取消它，再把重取樣濾波器清乾淨
+                    self.transmitter.discardLast()
+                    _ = self.transmitter.finish()
+                    self.transmitter.setMode(mode.id)
+                    self.transmitter.setCallsign(callsign)
+                    let began = Date()
+                    let frame = self.transmitter.encode(rgb: rgb)
+                    let spent = Date().timeIntervalSince(began)
+                    DispatchQueue.main.async {
+                        if session == self.txSession { self.txPrepareSeconds = spent }
+                        self.firstFrameReady(frame, session: session)
+                    }
                 }
             }
         }
+        if settings.sourceKind == .video, video.url != nil, video.hasEnded {
+            // 影片上一次播完停在結尾：先回到開頭，等開頭那一格出來，第一張才不會是結尾的畫面
+            DebugTap.log("影片停在結尾：回到開頭再發射")
+            video.rewind { [weak self] in self?.waitForVideoFrame(session: session, attempts: 25, then: encodeFirst) }
+        } else {
+            encodeFirst()
+        }
+    }
+
+    /// 影片的位置剛移過（rewind）：新位置的那一格要一點時間才解得出來。每 20 毫秒看一次，拿到了（或等了半秒）就繼續。
+    private func waitForVideoFrame(session: Int, attempts: Int, then: @escaping () -> Void) {
+        guard session == txSession else { return }
+        if let buffer = video.copyCurrentFrame() {
+            latestFrame.set(buffer, turns: video.quarterTurns)
+            then()
+        } else if attempts <= 0 {
+            then()
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
+                self?.waitForVideoFrame(session: session, attempts: attempts - 1, then: then)
+            }
+        }
+    }
+
+    /// 來源是不循環的影片，而且已經播完、停在最後一格。
+    private var videoFinished: Bool {
+        settings.sourceKind == .video && video.url != nil && !settings.loopVideo && video.hasEnded
+    }
+
+    /// 測試用：之後的發射不開音訊裝置，改由模擬的輸出照實際的時間把取樣取走（見 AudioOutput.simulated），
+    /// 取走的取樣交給 sink（在別的佇列上呼叫）。
+    func debugUseSimulatedOutput(sink: (([Float]) -> Void)?) {
+        engine?.output.simulated = true
+        engine?.output.simulatedSink = sink
     }
 
     private func firstFrameReady(_ frame: EncodedFrame?, session: Int) {
@@ -729,28 +774,39 @@ final class AppModel: ObservableObject {
         engine.stopReceiving()
         clearSyncState()
         engine.resetSpectrum()
-        guard let device = AudioDevices.resolve(uid: settings.outputDeviceUID, input: false) else {
+        let device = engine.output.simulated ? nil : AudioDevices.resolve(uid: settings.outputDeviceUID, input: false)
+        guard device != nil || engine.output.simulated else {
             failTransmit("找不到音訊輸出裝置")
             return
         }
+        let deviceName = device?.name ?? "模擬的輸出"
         do {
             engine.output.gain = settings.outputGain
-            try engine.output.start(deviceID: device.id)
-            outputDeviceName = device.name
+            try engine.output.start(deviceID: device?.id ?? 0)
+            if let device { outputDeviceName = device.name }
         } catch {
-            failTransmit("無法開啟輸出裝置「\(device.name)」：\(error.localizedDescription)")
+            failTransmit("無法開啟輸出裝置「\(deviceName)」：\(error.localizedDescription)")
             return
         }
         txLead = Int64(AppModel.pttLeadSeconds * Double(NBTV.sampleRate))
         txTap?.close()
         txTap = DebugTap.Stream(kind: "tx")
-        DebugTap.log(String(format: "開始送音訊：輸出「%@」，裝置取樣率 %d Hz，輸出增益 %.4f", device.name, Int(AudioDevices.sampleRate(device.id)), engine.output.gain))
+        DebugTap.log(String(format: "開始送音訊：輸出「%@」，裝置取樣率 %d Hz，輸出增益 %.4f", deviceName,
+                            Int(device.map { AudioDevices.sampleRate($0.id) } ?? Double(NBTV.sampleRate)), engine.output.gain))
         txTap?.write([Float](repeating: 0, count: Int(txLead)))
         engine.output.enqueue([Float](repeating: 0, count: Int(txLead)))
         txEnd = txLead
         txMonitored = txLead
         txPhase = .transmitting
         guard enqueue(first) else { return }
+        // 來源是影片檔：開始送音訊的同時讓影片開始播放（已經在播的不動）。
+        // 不循環的影片播完之後，再送出它的最後一格就自動停止（見 prepareNextFrame）。
+        if settings.sourceKind == .video, video.url != nil, !video.isPlaying {
+            video.play()
+            videoPlaying = true
+            DebugTap.log("影片開始播放")
+            AppModel.trace?("影片開始播放")
+        }
         let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in self?.txTick() }
         RunLoop.main.add(timer, forMode: .common)
         txTimer = timer
@@ -838,6 +894,8 @@ final class AppModel: ObservableObject {
         txPreparing = true
         let session = txSession
         let started = Date()
+        // 來源的影片已經播完：這次取到的是它的最後一格，這一張排進去之後就收尾
+        let lastPicture = videoFinished
         captureSourceFrame { [weak self] captured in
             guard let self, session == self.txSession else { return }
             // 來源一時沒有畫面（剛切換來源）：重送上一格，不要讓電台空著發射
@@ -865,6 +923,7 @@ final class AppModel: ObservableObject {
                         DebugTap.log(String(format: "準備這一張花了 %.0f 毫秒，下一張提早 %.2f 秒開始準備", self.txPrepareSeconds * 1000, self.prepareLead))
                         AppModel.trace?(String(format: "第 %d 張編好排入（編碼 %.0f 毫秒，前一張還剩 %.2f 秒）", self.txNextNumber - 1, spent * 1000,
                                                Double(self.txEnd - Int64(frame.samples.count) - (self.engine?.output.playedSamples ?? 0)) / Double(NBTV.sampleRate)))
+                        if lastPicture { self.stopAfterQueuedFrames() }
                     } else {
                         // 編好之後才發現已經按了停止：這張不送，發射機也回到編它之前的狀態（見 queueTail）
                         if frame == nil { DebugTap.log(String(format: "編碼失敗（花了 %.0f 毫秒）：這一張沒有東西可以送", spent * 1000)) }
@@ -893,6 +952,16 @@ final class AppModel: ObservableObject {
         default:
             break
         }
+    }
+
+    /// 來源的影片播完了，它的最後一格也已經排進輸出佇列：和按下停止一樣收尾（送完、補尾巴、放開 PTT、回到接收），
+    /// 差別是不拿掉已經排進去的那一張——對方要看得到影片的結尾。
+    private func stopAfterQueuedFrames() {
+        guard txPhase == .transmitting else { return }
+        DebugTap.log("影片播完：最後一格已經排入，送完就停止發射")
+        AppModel.trace?("影片播完：送完最後一張就停止發射")
+        txPhase = .stopping
+        if !txPreparing { queueTail() }
     }
 
     /// 「送完目前這張」就停：下一張如果已經排進輸出佇列、但還沒開始播，把它拿掉。
@@ -1001,6 +1070,15 @@ final class AppModel: ObservableObject {
 
     /// 音量條的長度：−50 dB 以下是空的，0 dB 是滿的。
     static func levelFraction(_ db: Double, floor: Double = -50) -> Double { min(max((db - floor) / -floor, 0), 1) }
+
+    /// 發射來源是不循環的影片檔：按下發射才開始播，播完自動停止發射。
+    var videoPlaysOnce: Bool { settings.sourceKind == .video && videoName != nil && !settings.loopVideo }
+
+    /// 「12.3 dB」「−1.4 dB」：標在收到的畫面上的訊雜比，取到小數一位。
+    static func snrText(_ db: Double) -> String {
+        let tenths = Int((abs(db) * 10).rounded())
+        return (db < 0 && tenths > 0 ? "−" : "") + "\(tenths / 10).\(tenths % 10) dB"
+    }
 
     /// 「−18 dB」：負號用數學的減號，與版面稿一致。
     static func dbText(_ db: Double) -> String {

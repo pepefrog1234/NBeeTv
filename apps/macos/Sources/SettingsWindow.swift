@@ -1,11 +1,13 @@
-// 設定視窗：呼號、音訊裝置、輸出音量、PTT 控制。改了立刻生效並存進 UserDefaults。
+// 設定視窗：呼號、音訊裝置、輸出音量、PTT 控制、顯示的選項。改了立刻生效並存進 UserDefaults。
 import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject var model: AppModel
     var placeholderControls = false
-    /// 排版區的高度。真的視窗裡內容會往上延伸到標題列底下，所以比版面稿的 700 少一個標題列的高度。
-    var height: CGFloat = 700
+    /// 整個設定視窗的高度：版面稿是 700，後來多了「顯示」那一組，加高到 800。
+    static let windowHeight: CGFloat = 800
+    /// 排版區的高度。真的視窗裡內容會往上延伸到標題列底下，所以要比 windowHeight 少一個標題列的高度。
+    var height: CGFloat = SettingsView.windowHeight
 
     var body: some View {
         VStack(spacing: 0) {
@@ -15,6 +17,7 @@ struct SettingsView: View {
                 section("電台") { station }
                 section("音訊") { audio }
                 section("PTT 控制") { ptt }
+                section("顯示") { display }
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 24)
@@ -98,6 +101,16 @@ struct SettingsView: View {
         return row("我的呼號", "寫進每張畫面的標頭，最多 9 個字元", first: true) {
             field(Binding(get: { settings.callsign }, set: { settings.callsign = NBTV.normalizeCallsign($0) }),
                   width: 150, font: Theme.mono(13, .semibold), tracking: 0.52, label: "我的呼號")
+        }
+    }
+
+    // MARK: 顯示
+
+    private var display: some View {
+        let settings = model.settings
+        return row("在收到的畫面上標示訊雜比", "畫面與縮圖的左上角，標出收到那一張當下的訊雜比", first: true) {
+            CheckBox(isOn: Binding(get: { settings.showFrameSNR }, set: { settings.showFrameSNR = $0 }), title: "")
+                .accessibilityLabel("在收到的畫面上標示訊雜比")
         }
     }
 

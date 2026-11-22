@@ -23,6 +23,10 @@ final class AppSettings: ObservableObject {
     @Published var scaleMode: ScaleMode { didSet { store?.set(scaleMode.rawValue, forKey: "scaleMode") } }
     @Published var cameraID: String { didSet { store?.set(cameraID, forKey: "cameraID") } }
     @Published var loopVideo: Bool { didSet { store?.set(loopVideo, forKey: "loopVideo") } }
+    /// 在收到的畫面與縮圖的左上角標出那一張的訊雜比
+    @Published var showFrameSNR: Bool { didSet { store?.set(showFrameSNR, forKey: "showFrameSNR") } }
+    /// 測試用：不是 nil 時，發射用它給的 PTT 驅動，不看 pttMode（自我測試用來確認 PTT 有按下、有放開）。
+    var debugPTTDriver: (() -> PTTDriver)?
 
     /// store 傳 nil 時只存在記憶體裡（示範與測試用）。
     init(store: UserDefaults? = .standard) {
@@ -42,6 +46,7 @@ final class AppSettings: ObservableObject {
         scaleMode = ScaleMode(rawValue: store?.string(forKey: "scaleMode") ?? "") ?? .fill
         cameraID = store?.string(forKey: "cameraID") ?? ""
         loopVideo = (store?.object(forKey: "loopVideo") as? Bool) ?? true
+        showFrameSNR = (store?.object(forKey: "showFrameSNR") as? Bool) ?? false
     }
 
     /// 底列與設定視窗顯示的 PTT 說明
@@ -54,6 +59,7 @@ final class AppSettings: ObservableObject {
     }
 
     func makePTTDriver() -> PTTDriver {
+        if let debugPTTDriver { return debugPTTDriver() }
         switch pttMode {
         case .none: return NoPTT()
         case .serial: return SerialPTT(path: serialPort, line: serialLine)

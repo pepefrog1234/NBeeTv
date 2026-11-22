@@ -239,7 +239,7 @@ struct CheckBox: View {
                     }
                 }
                 .frame(width: 14, height: 14)
-                Text(title)
+                if !title.isEmpty { Text(title) }
             }
             .contentShape(Rectangle())
         }

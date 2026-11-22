@@ -147,14 +147,16 @@ struct FooterBar: View {
 
 /// 左側主區。畫面最寬 576 pt（96×72 的六倍）；視窗變大時多出來的寬度給右邊的面板、高度給頻譜。
 /// 版面稿是用 CSS 的彈性盒排的，這裡照同樣的規則把各塊的大小算出來：
-///   * 右邊一欄至少 280 pt 寬，縮圖三張一列、隨欄寬放大（最多 128 pt 寬）
+///   * 右邊一欄至少 280 pt 寬，縮圖三張一列、隨欄寬放大（最多 128 pt 寬）；最近收到最多佔兩列的高度，更多張在裡面捲動
 ///   * 上半部的高度取「畫面加資訊列」與「訊號面板加最近收到」兩者較高的，但要留至少 192 pt 給頻譜
 struct MainColumn: View {
     @EnvironmentObject var model: AppModel
 
     var body: some View {
         GeometryReader { geo in
-            let metrics = Metrics(width: geo.size.width - 40, height: geo.size.height - 36, frames: min(model.history.count, 6))
+            // 最近收到一次看得到兩列（六張），更早的在那一塊裡面捲動，所以版面只看前六張
+            let metrics = Metrics(width: geo.size.width - 40, height: geo.size.height - 36,
+                                  frames: min(model.history.count, RecentPanel.visibleCount))
             VStack(spacing: 16) {
                 HStack(alignment: .top, spacing: 16) {
                     PictureSection(pictureHeight: metrics.pictureHeight)

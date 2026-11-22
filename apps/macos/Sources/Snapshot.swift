@@ -35,6 +35,29 @@ enum SnapshotRunner {
             }
         }
 
+        // 開發用：NBTV_SNAPSHOT_HISTORY=<張數> 把收到的畫面重複到這麼多張，多算兩張「接收中」：
+        // 很多張時的樣子（many-received.png），以及「最近收到」往下捲 NBTV_SNAPSHOT_SCROLL 點（預設 300）之後的樣子（many-received-scrolled.png）。
+        // 配合 NBTV_SNAPSHOT_SNR=1（打開「在收到的畫面上標示訊雜比」）可以一起看標示的樣子。
+        let environment = ProcessInfo.processInfo.environment
+        if let count = environment["NBTV_SNAPSHOT_HISTORY"].flatMap({ Int($0) }), !receiving.history.isEmpty {
+            let original = receiving.history
+            var many = original
+            while many.count < count {
+                let source = original[many.count % original.count]
+                many.append(AppModel.ReceivedFrame(image: source.image, payload: source.payload, isDigital: source.isDigital, modeID: source.modeID,
+                                                   callsign: source.callsign, sequence: source.sequence,
+                                                   time: (many.last?.time ?? Date()).addingTimeInterval(-3),
+                                                   snrDb: source.snrDb - Double(many.count % 9) * 1.7))
+            }
+            receiving.history = many
+            render(MainWindowView(placeholderControls: true).environmentObject(receiving), width: 1280, height: 840,
+                   to: directory.appendingPathComponent("many-received.png"))
+            render(MainWindowView(placeholderControls: true).environmentObject(receiving), width: 1280, height: 840,
+                   to: directory.appendingPathComponent("many-received-scrolled.png"),
+                   scrollBy: environment["NBTV_SNAPSHOT_SCROLL"].flatMap { Double($0) } ?? 300)
+            receiving.history = original
+        }
+
         // 2. 發射中
         let transmitting = makeTransmittingModel(coffee: coffee, rocket: rocket, cat: cat, history: receiving.history)
         render(MainWindowView(placeholderControls: true).environmentObject(transmitting), width: 1280, height: 840,
@@ -46,7 +69,7 @@ enum SnapshotRunner {
                to: directory.appendingPathComponent("3-idle-video.png"))
 
         // 4. 設定
-        render(SettingsView(placeholderControls: true).environmentObject(receiving), width: 560, height: 700,
+        render(SettingsView(placeholderControls: true).environmentObject(receiving), width: 560, height: SettingsView.windowHeight,
                to: directory.appendingPathComponent("4-settings.png"))
 
         // 5. 發射模式選單
@@ -73,6 +96,9 @@ enum SnapshotRunner {
         settings.serialLine = .rts
         settings.txModeID = 1
         settings.sourceKind = source
+        // 開發用：NBTV_SNAPSHOT_SNR=1 打開「在收到的畫面上標示訊雜比」，NBTV_SNAPSHOT_NO_LOOP=1 取消「循環播放」
+        settings.showFrameSNR = ProcessInfo.processInfo.environment["NBTV_SNAPSHOT_SNR"] != nil
+        settings.loopVideo = ProcessInfo.processInfo.environment["NBTV_SNAPSHOT_NO_LOOP"] == nil
         return settings
     }
 
@@ -217,7 +243,8 @@ enum SnapshotRunner {
 
     // MARK: 算圖
 
-    private static func render<V: View>(_ view: V, width: CGFloat, height: CGFloat, to url: URL) {
+    /// scrollBy：算圖之前，把畫面裡第一個可以捲動的區域（主視窗裡只有「最近收到」）往下捲這麼多點。
+    private static func render<V: View>(_ view: V, width: CGFloat, height: CGFloat, to url: URL, scrollBy: Double? = nil) {
         let size = CGSize(width: width, height: height)
         let host = NSHostingView(rootView: view.frame(width: width, height: height))
         host.frame = CGRect(origin: .zero, size: size)
@@ -227,6 +254,25 @@ enum SnapshotRunner {
         host.layoutSubtreeIfNeeded()
         Demo.spin(0.3)
         host.layoutSubtreeIfNeeded()
+        if let scrollBy {
+            func find(_ view: NSView) -> NSScrollView? {
+                if let scroll = view as? NSScrollView { return scroll }
+                for child in view.subviews {
+                    if let found = find(child) { return found }
+                }
+                return nil
+            }
+            if let scroll = find(host) {
+                scroll.contentView.scroll(to: NSPoint(x: 0, y: scrollBy))
+                scroll.reflectScrolledClipView(scroll.contentView)
+                Demo.spin(0.4)   // 捲進來的縮圖這時候才建立
+                host.layoutSubtreeIfNeeded()
+                print(String(format: "[snapshot] 捲動：內容高 %.0f 點，看得到 %.0f 點，捲到 %.0f 點", scroll.documentView?.frame.height ?? 0,
+                             scroll.contentView.bounds.height, scroll.contentView.bounds.origin.y))
+            } else {
+                print("[snapshot] 注意：找不到可以捲動的區域")
+            }
+        }
         let scale: CGFloat = 2
         guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(width * scale), pixelsHigh: Int(height * scale),
                                          bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,

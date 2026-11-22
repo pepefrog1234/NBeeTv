@@ -301,6 +301,14 @@ final class AudioOutput {
     private(set) var renderedFrames: Int64 = 0
     private(set) var silentFrames: Int64 = 0
 
+    /// 測試用：不開任何裝置，由計時器照實際的時間把佇列裡的取樣取走，就像有一個裝置在播。
+    /// 自我測試用它走完整的發射流程（不需要音訊裝置，也不會真的發出聲音）。要在 start 之前設定。
+    var simulated = false
+    /// 模擬的裝置取走的取樣（佇列空了的部分是 0），在模擬用的佇列上呼叫。
+    var simulatedSink: (([Float]) -> Void)?
+    private var simulationTimer: DispatchSourceTimer?
+    private let simulationQueue = DispatchQueue(label: "nbtv.audio.simulated", qos: .userInitiated)
+
     /// queueSeconds：佇列最多放幾秒的音訊。要放得下「目前這張還沒播完的部分＋下一張」。
     init(queueSeconds: Double = 14) {
         ring = FloatRing(capacity: Int(queueSeconds * Double(NBTV.sampleRate)))
@@ -310,6 +318,10 @@ final class AudioOutput {
 
     func start(deviceID: AudioDeviceID) throws {
         stop()
+        if simulated {
+            startSimulation()
+            return
+        }
         let unit = try makeHALUnit()
         do {
             try setProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, deviceID, "指定輸出裝置")
@@ -340,6 +352,11 @@ final class AudioOutput {
     }
 
     func stop() {
+        if let simulationTimer {
+            simulationTimer.cancel()
+            simulationQueue.sync {}   // 等正在跑的那一次做完
+        }
+        simulationTimer = nil
         if let unit {
             AudioOutputUnitStop(unit)
             AudioUnitUninitialize(unit)
@@ -347,6 +364,34 @@ final class AudioOutput {
         }
         unit = nil
         isRunning = false
+    }
+
+    /// 模擬的裝置：每 10 毫秒取走這段時間該播的取樣。計數的方式和真的裝置（render）相同。
+    private func startSimulation() {
+        ring.clear()
+        underruns = 0
+        renderedFrames = 0
+        silentFrames = 0
+        let began = DispatchTime.now().uptimeNanoseconds
+        var taken: Int64 = 0
+        let timer = DispatchSource.makeTimerSource(queue: simulationQueue)
+        timer.schedule(deadline: .now() + .milliseconds(10), repeating: .milliseconds(10), leeway: .milliseconds(1))
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            let due = Int64(Double(DispatchTime.now().uptimeNanoseconds - began) / 1e9 * Double(NBTV.sampleRate))
+            let frames = Int(due - taken)
+            guard frames > 0 else { return }
+            taken = due
+            var block = [Float](repeating: 0, count: frames)
+            let got = block.withUnsafeMutableBufferPointer { self.ring.read(into: $0.baseAddress!, count: frames) }
+            self.renderedFrames += Int64(frames)
+            self.silentFrames += Int64(frames - got)
+            if got > 0, got < frames { self.underruns += 1 }
+            self.simulatedSink?(block)
+        }
+        simulationTimer = timer
+        timer.resume()
+        isRunning = true
     }
 
     /// 把取樣排進佇列；放不下時回傳 false。

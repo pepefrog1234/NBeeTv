@@ -207,7 +207,8 @@ final class CameraSource: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     }
 }
 
-/// 影片檔。影片照常播放，要畫面時取當下那一格。
+/// 影片檔。要畫面時取播放位置當下那一格。
+/// 循環播放時影片一直播；不循環時播到結尾就停在最後一格（hasEnded），發射流程靠它知道影片播完了。
 final class VideoFileSource {
     let player = AVPlayer()
     private var output: AVPlayerItemVideoOutput?
@@ -217,6 +218,8 @@ final class VideoFileSource {
     /// 影片記載的顯示方向：解出來的畫面要順時針轉幾個 90 度才是正的（手機直拍的影片是 1）
     private(set) var quarterTurns = 0
     var loop = true
+    /// 播到結尾停住了（循環播放時不會發生）。重新播放、拖動位置或換檔案之後就不算。
+    private var reachedEnd = false
 
     init() {
         player.isMuted = true  // 影片的聲音不能混進發射的音訊
@@ -235,7 +238,11 @@ final class VideoFileSource {
         self.url = url
         player.replaceCurrentItem(with: item)
         endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
-            guard let self, self.loop else { return }
+            guard let self else { return }
+            guard self.loop else {
+                self.reachedEnd = true
+                return
+            }
             self.player.seek(to: .zero)
             self.player.play()
         }
@@ -272,6 +279,7 @@ final class VideoFileSource {
         url = nil
         duration = 0
         quarterTurns = 0
+        reachedEnd = false
     }
 
     var isPlaying: Bool { player.rate != 0 }
@@ -280,15 +288,29 @@ final class VideoFileSource {
         return t.isFinite ? t : 0
     }
 
+    /// 影片已經播完、停在結尾（或被拖到結尾停著）。
+    var hasEnded: Bool { reachedEnd || (duration > 0 && !isPlaying && position >= duration - 0.05) }
+
     func play() {
-        if duration > 0, position >= duration - 0.05 { player.seek(to: .zero) }
+        if hasEnded { player.seek(to: .zero) }
+        reachedEnd = false
         player.play()
     }
 
     func pause() { player.pause() }
 
     func seek(to seconds: Double) {
+        reachedEnd = false
         player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    /// 回到開頭並停在那裡；位置移過去之後在主執行緒上呼叫 completion（之後 copyCurrentFrame 拿到的才是開頭那一格）。
+    func rewind(completion: @escaping () -> Void) {
+        reachedEnd = false
+        player.pause()
+        player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) { _ in
+            DispatchQueue.main.async(execute: completion)
+        }
     }
 
     /// 目前播放位置的那一格。暫停時重複呼叫會拿到同一格；還沒有新的一格時回傳 nil。

@@ -21,6 +21,26 @@ struct PixelImage: View {
     }
 }
 
+/// 疊在收到的畫面左上角的訊雜比：那一張收到當下接收機量到的值。設定裡的「在收到的畫面上標示訊雜比」打開才顯示。
+struct SNRBadge: View {
+    let snrDb: Double
+    /// 縮圖上用的小字（不寫「SNR」）
+    var compact = false
+
+    var body: some View {
+        Text((compact ? "" : "SNR ") + AppModel.snrText(snrDb))
+            .font(Theme.mono(compact ? 10 : 13, .semibold))
+            .foregroundColor(.white)
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, compact ? 3 : 6)
+            .padding(.vertical, compact ? 1 : 3)
+            .background(RoundedRectangle(cornerRadius: compact ? 2 : 4).fill(Color.black.opacity(0.62)))
+            .padding(compact ? 2 : 8)
+            .accessibilityLabel("訊雜比 \(AppModel.snrText(snrDb))")
+    }
+}
+
 struct PictureSection: View {
     @EnvironmentObject var model: AppModel
     /// 畫面（4:3）的高度；剩下的高度都給下方的資訊列
@@ -50,6 +70,9 @@ struct PictureSection: View {
         } else if let frame = model.displayedFrame {
             PixelImage(image: frame.image)
                 .accessibilityLabel("收到的畫面：\(frame.callsign) 傳來的 96×72 影像")
+                .overlay(alignment: .topLeading) {
+                    if model.settings.showFrameSNR { SNRBadge(snrDb: frame.snrDb) }
+                }
         } else {
             placeholder("等待訊號", "偵測到同步訊號後會自動解碼並顯示畫面")
         }
@@ -254,15 +277,32 @@ struct StatusPanel: View {
     }
 }
 
-/// 最近收到的六張縮圖，點了就換到主畫面。
+/// 最近收到的縮圖：三張一列、最新的排最前面，點了就換到主畫面。
+/// 一次看得到兩列，更早的往下捲；留在記憶體裡的張數見 AppModel.historyLimit。
 struct RecentPanel: View {
     @EnvironmentObject var model: AppModel
     /// 每張縮圖的寬度（由外面依欄寬與可用的高度算好）
     let thumbnailWidth: CGFloat
+    /// 不捲動時看得到幾張
+    static let visibleCount = 6
+    /// 選取框的寬度，也是捲動區域往外多佔的距離
+    private static let ringInset: CGFloat = 2
 
     var body: some View {
+        // 看得到的列數：三張以內一列，更多就是兩列（外面的 MainColumn.Metrics 用同樣的規則算高度）
+        let rows: CGFloat = model.history.count > 3 ? 2 : 1
         VStack(alignment: .leading, spacing: 10) {
-            SectionTitle("最近收到")
+            HStack(spacing: 8) {
+                SectionTitle("最近收到")
+                if model.history.count > RecentPanel.visibleCount {
+                    // 捲軸會佔掉縮圖的寬度，所以不顯示；還有更多張這件事寫在標題旁邊
+                    Text("共 \(model.history.count) 張，往下捲看更早的")
+                        .font(Theme.ui(12))
+                        .foregroundColor(Theme.tertiary)
+                        .lineLimit(1)
+                        .frame(height: 18)
+                }
+            }
             if model.history.isEmpty {
                 Text("收到的畫面會依時間排在這裡")
                     .font(Theme.ui(12))
@@ -272,10 +312,20 @@ struct RecentPanel: View {
                     .frame(maxWidth: .infinity, minHeight: 190)
                     .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Theme.separator, lineWidth: 1))
             } else {
-                LazyVGrid(columns: Array(repeating: GridItem(.fixed(thumbnailWidth), spacing: 8, alignment: .topLeading), count: 3),
-                          alignment: .leading, spacing: 10) {
-                    ForEach(model.history.prefix(6)) { frame in thumbnail(frame) }
+                ScrollView(.vertical) {
+                    LazyVGrid(columns: Array(repeating: GridItem(.fixed(thumbnailWidth), spacing: 8, alignment: .topLeading), count: 3),
+                              alignment: .leading, spacing: 10) {
+                        ForEach(model.history) { frame in thumbnail(frame) }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(RecentPanel.ringInset)
                 }
+                .scrollIndicators(.never)
+                // 每一列是縮圖（4:3）加下面 18 的說明，列與列之間隔 10
+                .frame(height: rows * (thumbnailWidth * 0.75 + 18) + (rows - 1) * 10 + 2 * RecentPanel.ringInset)
+                // 「目前顯示中」的框畫在縮圖外面 2 點。捲動的區域會裁掉超出去的東西，所以讓它往四邊各多佔 2 點、
+                // 裡面的內容再縮回來：縮圖的位置不變，框也不會被裁掉。
+                .padding(-RecentPanel.ringInset)
             }
         }
         .padding(12)
@@ -291,6 +341,9 @@ struct RecentPanel: View {
             VStack(alignment: .leading, spacing: 4) {
                 PixelImage(image: frame.image)
                     .frame(width: thumbnailWidth, height: thumbnailWidth * 0.75)
+                    .overlay(alignment: .topLeading) {
+                        if model.settings.showFrameSNR { SNRBadge(snrDb: frame.snrDb, compact: true) }
+                    }
                     .clipShape(RoundedRectangle(cornerRadius: 2))
                     .outerRing(shown ? Theme.rx : Color.clear, width: 2, radius: 2)
                 HStack(spacing: 0) {
@@ -306,7 +359,7 @@ struct RecentPanel: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("\(AppModel.timeText(frame.time)) 收到的畫面，\(Modes.find(frame.modeID)?.name ?? "")\(shown ? "，目前顯示中" : "")")
+        .accessibilityLabel("\(AppModel.timeText(frame.time)) 收到的畫面，\(Modes.find(frame.modeID)?.name ?? "")，訊雜比 \(AppModel.snrText(frame.snrDb))\(shown ? "，目前顯示中" : "")")
     }
 }
 

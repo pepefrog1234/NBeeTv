@@ -81,7 +81,7 @@ struct NBTVApp: App {
         }
 
         Window(AppIdentity.settingsTitle, id: "settings") {
-            SettingsView(height: 700 - NBTVApp.titleBar)
+            SettingsView(height: SettingsView.windowHeight - NBTVApp.titleBar)
                 .environmentObject(model)
                 .ignoresSafeArea()
                 .background(TitlebarButtons(barHeight: SettingsView.headerHeight))
@@ -105,7 +105,7 @@ private struct OpenSettingsCommand: View {
 /// 開發用的環境變數，用來在沒有人操作的情況下驗證真的 app（不是離屏算圖）：
 ///   NBTV_DEBUG_SETTINGS="鍵=值;…"   用暫時的設定啟動，不讀也不寫 UserDefaults。可用的鍵：
 ///       callsign、input、output（音訊裝置名稱的一部分）、ptt（none／serial／rigctld）、rig（主機:連接埠）、
-///       mode（發射模式編號）、source（camera／video）
+///       mode（發射模式編號）、source（camera／video）、loop（0／1：影片循環播放）、snr（0／1：在收到的畫面上標示訊雜比）
 ///   NBTV_DEBUG_VIDEO=<影片檔>        啟動後開啟這個影片檔當發射來源
 ///   NBTV_DEBUG_DUMP=<目錄>           dump 動作把視窗的 PNG 存在這裡（沒設就只印狀態）
 ///   NBTV_DEBUG_SCRIPT="秒:動作;…"    主視窗出現後，在指定的秒數執行動作，並把收發流程的轉折印出來。動作：
@@ -156,6 +156,8 @@ enum DebugOptions {
                 }
             case "mode": settings.txModeID = Int(value).flatMap { Modes.find($0)?.id } ?? Modes.defaultID
             case "source": settings.sourceKind = SourceKind(rawValue: value) ?? .camera
+            case "loop": settings.loopVideo = value != "0"
+            case "snr": settings.showFrameSNR = value != "0"
             default: print("[debug] 不認得的設定：\(parts[0])")
             }
         }

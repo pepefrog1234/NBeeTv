@@ -4,7 +4,8 @@
 //   （--no-camera 不開鏡頭，--no-audio 不經過音訊裝置，--no-devices 兩者都不要；
 //     --ask-camera 還沒有相機權限時向系統要求，--save-camera-frame <檔名> 把鏡頭取到的那一格存成 PPM）：
 //   1. Swift 與核心之間的收發（不經音訊裝置），包含類比模式送全黑、全白的畫面
-//   2. 影片檔來源（做一段影片、開啟、跳到指定位置、取一格）
+//   2. 影片檔來源（做一段影片、開啟、跳到指定位置、取一格），以及用影片當來源的整個發射流程
+//      （音訊輸出換成模擬的、PTT 換成記錄用的：按下發射自動播放，播完自動停止、放開 PTT）
 //   3. rigctld 的 PTT（要給 --rig，對著真的 rigctld 測）
 //   4. 音訊輸出（需要 BlackHole 虛擬音效卡）
 //   5. 經 BlackHole 自發自收（另外需要麥克風權限）
@@ -148,6 +149,8 @@ enum SelfTest {
         testDroppedFrameTail(coffee, rocket)
         testResampler(coffee)
         testVideoFile(rocket)
+        testReceivedHistory(coffee)
+        testVideoTransmit(rocket)
         if useCamera {
             testCamera(ask: arguments.contains("--ask-camera"), savePath: option("--save-camera-frame", in: arguments))
         } else {
@@ -279,7 +282,8 @@ enum SelfTest {
                 return
             }
             let received = AppModel.ReceivedFrame(image: picture, payload: frame.payload, isDigital: frame.isDigital, modeID: frame.modeID,
-                                                  callsign: frame.callsign, sequence: frame.sequence, time: Date(timeIntervalSince1970: 1_800_000_000))
+                                                  callsign: frame.callsign, sequence: frame.sequence, time: Date(timeIntervalSince1970: 1_800_000_000),
+                                                  snrDb: frame.snrDb)
             guard let file = AppModel.exportFile(for: received) else {
                 report("存檔的內容", false, "\(mode.name) 產生不出檔案")
                 return
@@ -592,6 +596,223 @@ enum SelfTest {
                                   Int(frame.sourceSize.width), Int(frame.sourceSize.height), mean, ignored))
         }
         report("影片檔的方向", ok, details.joined(separator: "；"))
+    }
+
+    // MARK: 收到的畫面
+
+    /// 收到的每一張都記著自己的訊雜比（設定打開時標在畫面左上角）；「最近收到」留很多張，滿了丟最舊的。
+    private static func testReceivedHistory(_ image: Data) {
+        let name = "收到的畫面：各自的訊雜比、保留的張數"
+        let tx = CoreTransmitter()
+        tx.setMode(8)
+        tx.setCallsign("N0CALL")
+        var signal: [Float] = []
+        for _ in 0..<2 { signal += tx.encode(rgb: image)?.samples ?? [] }
+        signal += tx.finish()
+        // 兩段不同的訊雜比：收到的兩張要各自記著自己的值
+        var frames: [DecodedFrame] = []
+        for snr in [18.0, 6.0] {
+            let audio = Demo.silence(seconds: 0.4) + signal + Demo.silence(seconds: 0.5)
+            let received = Demo.radioChannel(audio, signalPower: Demo.power(signal), snrDb: snr, shiftHz: 0, seed: UInt64(snr))
+            frames += Demo.receive(received).flatMap(\.frames).filter { $0.decoded }.prefix(1)
+        }
+        guard frames.count == 2 else {
+            report(name, false, "示範的訊號解出 \(frames.count)/2 張")
+            return
+        }
+        let model = AppModel(settings: AppSettings(store: nil), live: false)
+        for frame in frames { model.add(frame, time: Date()) }
+        // 最新的排最前面；各自的訊雜比和接收機回報的相同，而且和通道的訊雜比差不多
+        var ok = model.history.count == 2 && model.history[0].snrDb == frames[1].snrDb && model.history[1].snrDb == frames[0].snrDb
+        ok = ok && abs(frames[0].snrDb - 18) < 2.5 && abs(frames[1].snrDb - 6) < 2.5
+        let texts = [12.34, -1.44, -0.04, 9.96, 0].map(AppModel.snrText)
+        ok = ok && texts == ["12.3 dB", "−1.4 dB", "0.0 dB", "10.0 dB", "0.0 dB"]
+        // 超過上限：留下最新的 historyLimit 張
+        let extra = 25
+        for _ in 0..<(AppModel.historyLimit + extra - 2) { model.add(frames[0], time: Date()) }
+        model.add(frames[1], time: Date())
+        ok = ok && model.history.count == AppModel.historyLimit && model.history[0].snrDb == frames[1].snrDb
+        // 點選的那一張被擠掉之後，主畫面回到最新的
+        if let oldest = model.history.last {
+            model.select(oldest)
+            ok = ok && model.displayedFrame?.id == oldest.id
+            for _ in 0..<3 { model.add(frames[0], time: Date()) }
+            ok = ok && model.displayedFrame?.id == model.history.first?.id
+        }
+        report(name, ok, String(format: "兩張的訊雜比 %@、%@（通道是 18、6 dB）；最多留 %d 張", AppModel.snrText(frames[0].snrDb),
+                                AppModel.snrText(frames[1].snrDb), AppModel.historyLimit))
+    }
+
+    // MARK: 影片來源的發射流程
+
+    /// 記錄用的 PTT：把每一次按下、放開記下來，不碰任何硬體。
+    private final class RecordingPTT: PTTDriver {
+        private let lock = NSLock()
+        private var states: [Bool] = []
+        func key(_ on: Bool) throws {
+            lock.lock()
+            states.append(on)
+            lock.unlock()
+        }
+        /// 到目前為止的紀錄，取走之後清空
+        func take() -> [Bool] {
+            lock.lock()
+            defer { lock.unlock() }
+            let result = states
+            states.removeAll()
+            return result
+        }
+    }
+
+    /// 收下模擬的輸出裝置取走的取樣（在別的佇列上被呼叫）。
+    private final class SampleCollector {
+        private let lock = NSLock()
+        private var samples: [Float] = []
+        func append(_ block: [Float]) {
+            lock.lock()
+            samples += block
+            lock.unlock()
+        }
+        func take() -> [Float] {
+            lock.lock()
+            defer { lock.unlock() }
+            let result = samples
+            samples.removeAll()
+            return result
+        }
+    }
+
+    /// 兩張 96×72 的畫面平均每個值差多少。
+    private static func difference(_ a: Data, _ b: Data) -> Double {
+        guard a.count == b.count, !a.isEmpty else { return 255 }
+        var total = 0
+        for (x, y) in zip(a, b) { total += abs(Int(x) - Int(y)) }
+        return Double(total) / Double(a.count)
+    }
+
+    /// 用影片檔當來源的整個發射流程。用的是 app 真正的狀態物件（AppModel），只把音訊輸出換成模擬的裝置、
+    /// PTT 換成記錄用的，所以不需要任何裝置，也不會真的發出聲音：
+    ///   * 不循環的影片開了之後停在開頭；按下發射才開始播
+    ///   * 影片播完，再送出它的最後一格，然後自動停止、放開 PTT、回到待機
+    ///   * 送出去的每一張都解得回來：第一張是影片開頭的畫面，最後一張是結尾的畫面
+    ///   * 影片停在結尾時再按一次發射，會回到開頭重新來過
+    ///   * 勾了循環播放就不會自動停止，要按停止
+    private static func testVideoTransmit(_ image: Data) {
+        let name = "影片來源：發射時自動播放、播完自動停止"
+        let seconds = 3
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("nbtv-selftest-tx-\(getpid()).mp4")
+        defer { try? FileManager.default.removeItem(at: url) }
+        guard let cg = NBTV.image(fromRGB: image), Demo.makeVideo(at: url, from: cg, seconds: seconds, fps: 10) else {
+            report(name, false, "示範影片做不出來")
+            return
+        }
+        // 影片開頭與結尾那一格縮成 96×72 的樣子，之後拿來認收到的畫面
+        var first: Data?, last: Data?
+        do {
+            let source = VideoFileSource()
+            var opened: Bool?
+            source.open(url) { opened = $0 }
+            guard Demo.wait(timeout: 10, until: { opened != nil }), opened == true else {
+                report(name, false, "影片無法開啟")
+                return
+            }
+            for (time, isFirst) in [(0.0, true), (Double(seconds), false)] {
+                source.seek(to: time)
+                var rgb: Data?
+                _ = Demo.wait(timeout: 5) {
+                    if let buffer = source.copyCurrentFrame() { rgb = FrameScaler.scale(buffer, mode: .fill)?.rgb }
+                    return rgb != nil
+                }
+                if isFirst { first = rgb } else { last = rgb }
+            }
+            source.close()
+        }
+        guard let first, let last, difference(first, last) > 12 else {
+            report(name, false, "取不到影片開頭與結尾的畫面，或兩者太像")
+            return
+        }
+
+        setenv("NBTV_NO_DEVICES", "1", 1)   // 狀態物件啟動時不開輸入裝置與鏡頭
+        let settings = AppSettings(store: nil)
+        settings.callsign = "N0CALL"
+        settings.sourceKind = .video
+        settings.loopVideo = false
+        settings.txModeID = 8   // 類比 8：每張 1.04 秒，不需要影像編解碼器
+        let ptt = RecordingPTT()
+        settings.debugPTTDriver = { ptt }
+        let model = AppModel(settings: settings, live: true)
+        let sent = SampleCollector()
+        model.debugUseSimulatedOutput { sent.append($0) }
+        model.start()
+        defer { model.shutdown() }
+
+        var opened: Bool?
+        model.openVideo(url) { opened = $0 }
+        guard Demo.wait(timeout: 10, until: { opened != nil }), opened == true, Demo.wait(timeout: 10, until: { model.canTransmit }) else {
+            report(name, false, "影片開不起來，或一直沒有來源畫面")
+            return
+        }
+        Demo.spin(0.6)
+        var problems: [String] = []
+        if model.videoPlaying || model.videoPosition > 0.2 { problems.append("不循環的影片開了之後沒有停在開頭") }
+
+        /// 按下發射，等它自己結束；回傳（影片有沒有自己開始播、送出幾張、解回來的畫面）。
+        func transmitOnce(_ label: String) -> (frames: [DecodedFrame], count: Int)? {
+            _ = sent.take()
+            _ = ptt.take()
+            model.startTransmit()
+            var played = false
+            let finished = Demo.wait(timeout: 25) {
+                if model.txPhase != .idle, model.videoPlaying { played = true }
+                return model.txPhase == .idle
+            }
+            guard finished else {
+                problems.append("\(label)：影片播完之後沒有自動停止")
+                model.stopTransmit()
+                _ = Demo.wait(timeout: 10) { model.txPhase == .idle }
+                return nil
+            }
+            if !played { problems.append("\(label)：按下發射之後影片沒有開始播放") }
+            Demo.spin(0.3)   // PTT 的放開在背景佇列上做
+            if ptt.take() != [true, false] { problems.append("\(label)：PTT 不是「按下一次、放開一次」") }
+            if model.videoPlaying || model.videoPosition < Double(seconds) - 0.3 { problems.append("\(label)：結束時影片不在結尾") }
+            if let notice = model.notice { problems.append("\(label)：\(notice)") }
+            let frames = Demo.receive(sent.take() + Demo.silence(seconds: 0.5)).flatMap(\.frames)
+            return (frames, model.txFramesSent)
+        }
+
+        var details: [String] = []
+        for label in ["第一次", "影片停在結尾時再按一次"] {
+            guard let result = transmitOnce(label) else { continue }
+            let good = result.frames.filter { $0.decoded && $0.headerOK && $0.callsign == "N0CALL" }
+            // 影片 3 秒、每張 1.04 秒：開頭一張、中間幾張、結尾一張
+            if result.count < 4 || result.count > 6 { problems.append("\(label)：送出 \(result.count) 張，預期 4–6 張") }
+            if good.count != result.count || result.frames.count != result.count {
+                problems.append("\(label)：送出 \(result.count) 張，解回來 \(good.count) 張")
+            }
+            if let head = good.first?.rgb, let tail = good.last?.rgb {
+                if difference(head, first) >= difference(head, last) { problems.append("\(label)：第一張不是影片開頭的畫面") }
+                if difference(tail, last) >= difference(tail, first) { problems.append("\(label)：最後一張不是影片結尾的畫面") }
+            }
+            details.append("\(label)送出 \(result.count) 張、解回 \(good.count) 張")
+        }
+
+        // 循環播放：影片播完會從頭再播，發射不會自己停
+        settings.loopVideo = true
+        _ = sent.take()
+        _ = ptt.take()
+        model.startTransmit()
+        let stoppedByItself = Demo.wait(timeout: Double(seconds) + 3.5) { model.txPhase == .idle }
+        if stoppedByItself {
+            problems.append("循環播放時發射自己停了")
+        } else {
+            model.stopTransmit()
+            if !Demo.wait(timeout: 10, until: { model.txPhase == .idle }) { problems.append("循環播放時按停止沒有結束發射") }
+            Demo.spin(0.3)
+            if ptt.take() != [true, false] { problems.append("循環播放：PTT 不是「按下一次、放開一次」") }
+            details.append("循環播放時送了 \(model.txFramesSent) 張、按停止才結束")
+        }
+        report(name, problems.isEmpty, problems.isEmpty ? details.joined(separator: "；") : problems.joined(separator: "；"))
     }
 
     // MARK: 序列埠

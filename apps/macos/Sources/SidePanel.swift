@@ -102,7 +102,9 @@ struct SidePanel: View {
 
             VStack(alignment: .leading, spacing: 0) {
                 Text(sourceCaption).lineHeight()
-                if model.settings.sourceKind == .video { Text("影片照常播放，每送一張就取當下那一格").lineHeight() }
+                if model.settings.sourceKind == .video {
+                    Text(model.videoPlaysOnce ? "按下發射才開始播放，每送一張取當下那一格" : "影片照常播放，每送一張就取當下那一格").lineHeight()
+                }
             }
             .font(Theme.ui(12))
             .foregroundColor(Theme.secondary)
@@ -204,9 +206,11 @@ struct SidePanel: View {
     }
 
     private var buttonNote: String {
+        if model.txPhase == .transmitting, model.videoPlaysOnce { return "影片播完會自動停止，也可以隨時按停止" }
         if model.txPhase != .idle { return "送完目前這張後放開 PTT，自動回到接收" }
         if model.settings.callsign.isEmpty { return "還沒設定呼號，請先到設定裡填寫" }
         if model.live, !model.canTransmit { return "等來源有畫面後才能發射" }
+        if model.videoPlaysOnce { return "以 \(model.settings.callsign) 發射，影片播完自動停止" }
         return "以 \(model.settings.callsign) 發射，停止後自動回到接收"
     }
 }
