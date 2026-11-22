@@ -1,4 +1,5 @@
 // 端對端：發射 → 通道模擬 → 接收機（同步、通道估測、解碼）。
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
@@ -184,6 +185,60 @@ void test_analog() {
     }
 }
 
+// 相干類比送幾乎沒有細節的畫面：全黑、全白、純色，或是鏡頭被蓋住時那種只有一點雜訊的黑畫面。
+// 這種畫面整幀的能量只在少數幾個係數上，其餘的資料格接近 0。訊號愈乾淨，這種幀愈容易完全收不到：
+// 捕獲後的導頻驗證原本以整個符號的中位數當幅度上限，資料格都是 0 的符號裡導頻就全被壓掉了
+// （見 receiver.cpp 的 pilot_clip_level）。不論畫面內容是什麼，每一幀都要收到、標頭要對、畫面要還原。
+void test_analog_flat_pictures() {
+    auto flat = [](int r, int g, int b) {
+        std::vector<std::uint8_t> rgb(kImageRgbBytes);
+        for (std::size_t i = 0; i < rgb.size(); i += 3) {
+            rgb[i] = static_cast<std::uint8_t>(r);
+            rgb[i + 1] = static_cast<std::uint8_t>(g);
+            rgb[i + 2] = static_cast<std::uint8_t>(b);
+        }
+        return rgb;
+    };
+    struct Picture {
+        const char* name;
+        std::vector<std::uint8_t> rgb;
+    };
+    std::vector<Picture> pictures = {{"全黑", flat(0, 0, 0)}, {"全白", flat(255, 255, 255)}, {"中灰", flat(128, 128, 128)}, {"純紅", flat(200, 30, 30)}};
+    Rng rng(4242);
+    std::vector<std::uint8_t> covered(kImageRgbBytes);
+    for (auto& v : covered) v = static_cast<std::uint8_t>(rng.below(3));
+    pictures.push_back({"蓋住的鏡頭", covered});
+
+    int runs = 0, bad = 0;
+    double worst_psnr = 99.0;
+    for (int id : {8, 9, 10}) {
+        const Mode& m = *find_mode(id);
+        for (const Picture& pic : pictures) {
+            for (double snr : {99.0, 40.0, 12.0}) {  // 99：不加雜訊
+                sim::ChannelParams p;
+                p.add_noise = snr < 90.0;
+                p.snr_db = snr;
+                p.seed = static_cast<std::uint64_t>(500 + id);
+                const LinkResult r = run_analog_link(m, 2, pic.rgb, p);
+                double psnr = 99.0;
+                for (const RxFrame& f : r.frames) psnr = std::min(psnr, test_images::psnr(f.rgb, pic.rgb));
+                // 畫質的下限：純色的畫面整幀功率都在直流係數那幾十個格點上，發射端的削波會讓亮度差幾級
+                const bool ok = r.frames.size() == 2 && r.decoded == 2 && psnr > (snr < 20.0 ? 26.0 : 30.0);
+                ++runs;
+                CHECK(ok);
+                if (ok) {
+                    worst_psnr = std::min(worst_psnr, psnr);
+                } else {
+                    ++bad;
+                    std::printf("  類比模式 %d 送「%s」（%s）：收到 %zu 幀、標頭正確 %d 幀（應為 2），PSNR %.1f dB\n", id, pic.name,
+                                snr < 90.0 ? (snr > 20.0 ? "40 dB" : "12 dB") : "無雜訊", r.frames.size(), r.decoded, psnr);
+                }
+            }
+        }
+    }
+    std::printf("  類比模式送沒有細節的畫面：%d 種情形，%d 種有問題（通過的裡面最低的 PSNR %.1f dB）\n", runs, bad, worst_psnr);
+}
+
 // 一次發射結束後，隔一小段時間又有另一次發射（換人發射、停了再開始）。不論空檔多長，兩次發射的每一幀
 // 都要收到，也不能多出不存在的畫面。這裡的空檔長度都是曾經出過問題的：
 //   - 接收機以為對方還在送、硬收一幀的那段時間裡，新的發射開始了（0.1–1 秒）
@@ -267,6 +322,7 @@ int main() {
     test_weak_signal();
     test_impulse_noise();
     test_analog();
+    test_analog_flat_pictures();
     test_clean();
     test_awgn();
     test_frequency_offset();

@@ -98,6 +98,26 @@ cf limited(cf v, float level) {
     return m > level ? v * (level / m) : v;
 }
 
+// 酬載符號裡導頻的幅度上限：只看「這個符號的導頻位置」上那八九個格點，取它們幅度中位數的 kLimitFactor 倍。
+// row 是格點陣列的列號，j 是它在酬載裡的符號編號（決定導頻在哪幾格）。
+//
+// 這裡不能像前導符號那樣取整個符號 49 個載波的中位數。類比模式的畫面如果幾乎沒有細節
+// （很暗、過曝、純色、鏡頭被蓋住），整幀的能量都在少數幾個係數上，其餘的資料格接近 0，
+// 整個符號的中位數就只剩雜訊的大小，導頻全被壓到那麼小；只有開頭載著標頭的一兩個符號不受影響，
+// 於是十幾個符號的統計量實際上只剩那一兩個符號，真正的幀反而通不過驗證。訊號愈乾淨愈容易發生。
+// 只看導頻位置的話，真正的幀在這些格點上都是導頻，中位數就是導頻的幅度；
+// 不是幀的地方，這些格點上少數特別大的值照樣會被壓下來。
+float pilot_clip_level(const SymbolGrid& grid, int row, int j) {
+    std::array<float, kCarriers> mag;
+    int count = 0;
+    for (int c = 0; c < kCarriers; ++c) {
+        if (is_pilot(j, kFirstBin + c)) mag[static_cast<std::size_t>(count++)] = std::abs(grid.at(row, c));
+    }
+    if (count == 0) return 0.0f;
+    std::nth_element(mag.begin(), mag.begin() + count / 2, mag.begin() + count);
+    return kLimitFactor * mag[static_cast<std::size_t>(count / 2)];
+}
+
 // 同一格相鄰兩個導頻（相隔 3 個符號）是否相干：有訊號而且位置對的時候接近 S/(S+N)，
 // 只有雜訊時接近 0（約 1/sqrt(導頻對數)）。只看第 first 到 last−1 個酬載符號。
 // 每一對符號（第 j 個與第 j+3 個）先各自算出正規化的相關值，再對所有的符號對取平均：每一對的份量相同，
@@ -108,7 +128,7 @@ double pilot_coherence(const SymbolGrid& grid, int first, int last) {
     int pairs = 0;
     for (int j = first; j + 3 < last; ++j) {
         const int ra = j + kPreambleSymbols, rb = ra + 3;
-        const float la = clip_level(&grid.at(ra, 0), kCarriers), lb = clip_level(&grid.at(rb, 0), kCarriers);
+        const float la = pilot_clip_level(grid, ra, j), lb = pilot_clip_level(grid, rb, j);
         cd acc(0, 0);
         double ea = 0.0, eb = 0.0;
         for (int c = 0; c < kCarriers; ++c) {
@@ -622,7 +642,7 @@ Receiver::PilotCheck Receiver::verify_pilots(std::int64_t t0, double cfo, const 
     std::array<cd, kVerifySymbols> acc{};
     double ey = 0.0, ep = 0.0;
     for (int j = 0; j < kVerifySymbols; ++j) {
-        const float level = clip_level(&grid.at(j + kPreambleSymbols, 0), kCarriers);
+        const float level = pilot_clip_level(grid, j + kPreambleSymbols, j);
         for (int c = 0; c < kCarriers; ++c) {
             const int bin = kFirstBin + c;
             if (!is_pilot(j, bin)) continue;
