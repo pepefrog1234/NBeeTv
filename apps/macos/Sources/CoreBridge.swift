@@ -46,23 +46,23 @@ enum NBTV {
     }
 }
 
-/// 學習式模式（模式 11，實驗中）用的模型。權重檔放在 app 的 Resources 裡，第一次用到時載入（約 0.1 秒），
-/// 之後所有的發射機、接收機共用同一份；核心載入之後不會再改動它，所以可以同時在不同的佇列上使用。
+/// 學習式模式（模式 11、12，實驗中）用的模型：每個模式各一份權重，放在 app 的 Resources 裡，第一次用到時載入（各約 0.1 秒），
+/// 之後所有的發射機、接收機共用；核心載入之後不會再改動它們，所以可以同時在不同的佇列上使用。
 enum LearnedModel {
-    static let resourceName = "learned_7776_v2"
+    /// Resources 裡的權重檔（不含副檔名）。哪一份給哪個模式用由核心決定：模型的實數個數和模式的相同就是。
+    static let resourceNames = ["learned_7776_v2", "learned_2592_v2"]
 
-    /// 找不到權重檔或檔案損壞時是 nil：模式選單不會列出學習式模式，收到那種幀也不會有畫面。
-    static let handle: OpaquePointer? = {
-        guard let url = Bundle.main.url(forResource: resourceName, withExtension: "bin"),
+    /// 載入成功的模型。找不到或損壞的那一份不在裡面：對應的模式不會列在選單裡，收到那種幀也不會有畫面。
+    static let handles: [OpaquePointer] = resourceNames.compactMap { name -> OpaquePointer? in
+        guard let url = Bundle.main.url(forResource: name, withExtension: "bin"),
               let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return nil }
         return data.withUnsafeBytes { nbtv_model_load($0.bindMemory(to: UInt8.self).baseAddress, $0.count) }
-    }()
+    }
 
-    static var isAvailable: Bool { handle != nil }
-    /// 一張畫面變成幾個實數
-    static var values: Int { Int(nbtv_model_values(handle)) }
-    /// 權重檔的識別碼；收發兩邊要相同才解得出畫面
-    static var idText: String { String(format: "%08X", nbtv_model_id(handle)) }
+    /// 「一張畫面變成 values 個實數」的那個模型；沒有的話是 nil
+    static func handle(values: Int) -> OpaquePointer? { handles.first { Int(nbtv_model_values($0)) == values } }
+    /// 那個模型的權重檔識別碼；收發兩邊要相同才解得出畫面
+    static func idText(values: Int) -> String? { handle(values: values).map { String(format: "%08X", nbtv_model_id($0)) } }
 }
 
 /// 一個傳輸模式，資料取自 nbtv_mode_at()。
@@ -80,7 +80,7 @@ struct ModeInfo: Identifiable, Hashable {
     let imageBytes: Int
     let analogCoefficients: Int
     let learnedValues: Int
-    var analogQuality = ""  // 粗略／中等／細緻，依酬載長短排出來
+    var quality = ""  // 類比與學習式：粗略／中等／細緻，依每幀的長短
 
     var isDigital: Bool { kind == .digital }
     var isLearned: Bool { kind == .learned }
@@ -94,14 +94,13 @@ struct ModeInfo: Identifiable, Hashable {
         }
     }
 
-    /// 「QPSK 1/2」、「中等」或「實驗中」
+    /// 「QPSK 1/2」或「中等」
     var detail: String {
         switch kind {
         case .digital:
             let modulation = bitsPerCell == 2 ? "QPSK" : "\(1 << bitsPerCell)QAM"
             return "\(modulation) \(rateNum)/\(rateDen)"
-        case .analog: return analogQuality
-        case .learned: return "實驗中"
+        case .analog, .learned: return quality
         }
     }
 
@@ -143,8 +142,8 @@ enum Modes {
             } else if info.kind == NBTV_MODE_ANALOG {
                 kind = .analog
             } else if info.kind == NBTV_MODE_LEARNED {
-                // 學習式模式要有對得上的模型才能用；app 裡沒有權重檔的話就不列出來
-                guard LearnedModel.isAvailable, LearnedModel.values == Int(info.learned_values) else { continue }
+                // 學習式模式要有它的模型才能用；app 裡沒有那一份權重檔的話就不列出來
+                guard LearnedModel.handle(values: Int(info.learned_values)) != nil else { continue }
                 kind = .learned
             } else {
                 continue  // 這一版不認得的種類
@@ -155,18 +154,19 @@ enum Modes {
                                  imageBytes: Int(info.image_bytes), analogCoefficients: Int(info.analog_coefficients),
                                  learnedValues: Int(info.learned_values)))
         }
-        // 類比模式依每幀的長短命名
+        // 類比模式依每幀的長短命名；學習式模式的幀比照類比，和哪個類比模式一樣長就用它的名字
         let names = ["粗略", "中等", "細緻"]
-        let analogOrder = list.filter { $0.kind == .analog }.sorted { $0.payloadSymbols < $1.payloadSymbols }.map(\.id)
-        for i in list.indices {
-            if let rank = analogOrder.firstIndex(of: list[i].id), analogOrder.count == names.count { list[i].analogQuality = names[rank] }
+        let analogLengths = list.filter { $0.kind == .analog }.map(\.payloadSymbols).sorted()
+        for i in list.indices where list[i].kind != .digital {
+            if let rank = analogLengths.firstIndex(of: list[i].payloadSymbols), analogLengths.count == names.count { list[i].quality = names[rank] }
         }
         return list
     }()
 
     static var digital: [ModeInfo] { all.filter(\.isDigital) }
     static var analog: [ModeInfo] { all.filter { $0.kind == .analog } }
-    static var learned: [ModeInfo] { all.filter(\.isLearned) }
+    /// 依每幀的長短排，和類比那一組一樣由粗略到細緻（模式編號是 12、11）
+    static var learned: [ModeInfo] { all.filter(\.isLearned).sorted { $0.payloadSymbols < $1.payloadSymbols } }
     static func find(_ id: Int) -> ModeInfo? { all.first { $0.id == id } }
     static let defaultID = 1
 }
@@ -195,7 +195,7 @@ final class CoreReceiver {
         guard let h = nbtv_rx_create(Int32(sampleRate)), let f = nbtv_shim_frame_alloc() else { fatalError("無法建立接收機") }
         handle = h
         frame = f
-        nbtv_rx_set_model(handle, LearnedModel.handle)
+        for model in LearnedModel.handles { nbtv_rx_set_model(handle, model) }
     }
 
     deinit {
@@ -251,7 +251,7 @@ final class CoreTransmitter {
     init(sampleRate: Int = NBTV.sampleRate) {
         guard let h = nbtv_tx_create(Int32(sampleRate)) else { fatalError("無法建立發射機") }
         handle = h
-        nbtv_tx_set_model(handle, LearnedModel.handle)
+        for model in LearnedModel.handles { nbtv_tx_set_model(handle, model) }
     }
 
     deinit { nbtv_tx_destroy(handle) }

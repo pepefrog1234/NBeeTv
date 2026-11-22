@@ -1,5 +1,6 @@
 // nbtv-rx：解 WAV 檔裡的訊號，把收到的畫面存成 PPM（數位模式另存標準的 .avif）。
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -9,6 +10,7 @@
 #include "image_codec.hpp"
 #include "learned_codec.hpp"
 #include "model_file.hpp"
+#include "modes.hpp"
 #include "ppm.hpp"
 #include "receiver.hpp"
 #include "wav.hpp"
@@ -22,7 +24,8 @@ int main(int argc, char** argv) {
         std::printf(
             "用法：nbtv-rx [選項] 錄音.wav\n"
             "  --out-dir 目錄   收到的畫面存到這裡（預設不存檔，只列出結果）\n"
-            "  --model 檔名     學習式模式（模式 11）的權重檔；預設用專案 models/ 裡的，找不到就不解那個模式的畫面\n"
+            "  --model 檔名     學習式模式的權重檔，取代專案 models/ 裡給同一個模式的那一份\n"
+            "                   （沒有給的話每個學習式模式都用 models/ 裡的，找不到就不解那個模式的畫面）\n"
             "  --trace          印出同步與解碼的過程\n"
             "WAV 的取樣率必須是 12000 或 48000。\n");
         return args.has("help") ? 0 : 2;
@@ -44,19 +47,21 @@ int main(int argc, char** argv) {
     const std::string dir = args.str("out-dir", "");
     Receiver rx;
     rx.set_trace(args.has("trace"));
-    {
+    // 每個學習式模式各一份模型：先載入專案 models/ 裡的，--model 指定的那一份再取代實數個數相同的
+    auto load_model = [&](const std::string& path, bool required) {
         std::vector<std::uint8_t> bytes;
-        std::string error;
-        const std::string model_path = args.str("model", default_model_path());
-        if (read_file(model_path, bytes)) {
-            std::shared_ptr<const LearnedCodec> model = LearnedCodec::load(bytes, &error);
-            if (model == nullptr) std::fprintf(stderr, "%s：%s\n", model_path.c_str(), error.c_str());
-            rx.set_model(std::move(model));
-        } else if (args.has("model")) {
-            std::fprintf(stderr, "讀不到權重檔 %s\n", model_path.c_str());
-            return 1;
-        }
+        std::string error = "讀不到檔案";
+        std::shared_ptr<const LearnedCodec> model;
+        if (read_file(path, bytes)) model = LearnedCodec::load(bytes, &error);
+        const bool loaded = model != nullptr;
+        if (loaded) rx.set_model(std::move(model));
+        else if (required || !bytes.empty()) std::fprintf(stderr, "%s：%s\n", path.c_str(), error.c_str());
+        return loaded || !required;
+    };
+    for (const Mode& m : kModes) {
+        if (m.is_learned()) load_model(default_model_path(m.learned_values), false);
     }
+    if (args.has("model") && !load_model(args.str("model", ""), true)) return 1;
     int index = 0, good = 0;
     auto drain = [&] {
         RxFrame f;

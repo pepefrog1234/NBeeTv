@@ -14,7 +14,7 @@
 #include "digital_frame.hpp"
 #include "dsp.hpp"
 #include "image_codec.hpp"
-#include "learned_frame.hpp"
+#include "learned_codec.hpp"
 #include "modes.hpp"
 #include "receiver.hpp"
 #include "spectrum.hpp"
@@ -263,8 +263,7 @@ int nbtv_tx_encode_image(nbtv_tx* tx, const uint8_t* rgb, float* samples, int ca
         }
         frame = tx->tx.digital_frame(mode, enc.payload, static_cast<int>(nbtv::ImageFormat::Av1));
     } else if (mode.is_learned()) {
-        const auto& model = tx->tx.model();
-        if (model == nullptr || !nbtv::learned_model_fits(mode, *model)) return -1;
+        if (tx->tx.model_for(mode) == nullptr) return -1;
         std::vector<std::uint8_t> preview;
         tx->remember();
         frame = tx->tx.learned_frame(mode, rgb_span(rgb), preview_rgb != nullptr ? &preview : nullptr);

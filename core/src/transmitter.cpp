@@ -37,17 +37,18 @@ std::vector<float> Transmitter::analog_frame(const Mode& mode, std::span<const s
 
 std::vector<float> Transmitter::learned_frame(const Mode& mode, std::span<const std::uint8_t> rgb, std::vector<std::uint8_t>* preview) {
     assert(mode.is_learned());
-    if (model_ == nullptr) return {};
+    const LearnedCodec* model = models_.find(mode);
+    if (model == nullptr) return {};
     AnalogHeader header;
     header.sequence = sequence_;
     header.callsign = callsign_;
     std::vector<float> values;
-    const std::vector<cf> cells = learned_encode(mode, *model_, header, rgb, preview != nullptr ? &values : nullptr);
+    const std::vector<cf> cells = learned_encode(mode, *model, header, rgb, preview != nullptr ? &values : nullptr);
     if (cells.empty()) return {};
     sequence_ = (sequence_ + 1) & 0xFF;
     if (preview != nullptr) {
         preview->resize(static_cast<std::size_t>(kImageRgbBytes));
-        model_->decode(values, kLearnedMaxSnrDb, *preview);
+        model->decode(values, kLearnedMaxSnrDb, *preview);
     }
     return ofdm_modulate(mode, cells, papr_for(mode));
 }

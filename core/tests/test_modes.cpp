@@ -119,38 +119,61 @@ void test_analog_modes() {
     }
 }
 
-// 學習式模式（實驗中）：幀的安排和類比模式 9 一樣，只是放的是類神經網路產生的實數
-void test_learned_mode() {
-    const Mode* m = find_mode(11);
-    const Mode* analog = find_mode(9);
-    CHECK(m != nullptr);
-    if (m == nullptr) return;
-    CHECK(m->kind == ModeKind::Learned);
-    CHECK(m->is_learned() && !m->is_digital() && !m->is_analog());
-    CHECK(analog->is_analog() && !analog->is_learned());
-    CHECK_EQ(m->payload_symbols, analog->payload_symbols);
-    CHECK_EQ(m->frame_symbols(), 102);
-    CHECK_NEAR(m->frame_seconds(), 2.72, 0.0005);
-    CHECK_EQ(m->data_cells(), analog->data_cells());
-    CHECK_EQ(m->header_cells(), 176);
-    CHECK_EQ(m->analog_values(), 7782);
-    CHECK_EQ(m->learned_values, 7776);       // 72 × 9 × 12，放得進去
-    CHECK(m->learned_values <= m->analog_values());
-    CHECK_EQ(m->interleaver_cells(), m->data_cells());
-    CHECK_EQ(m->payload_bytes(), 0);
-    CHECK_EQ(m->image_bytes(), 0);
-    CHECK_EQ(m->padding_cells(), 0);
-    // 其他模式都沒有這個欄位
-    for (const Mode& other : kModes) CHECK_EQ(other.learned_values > 0, other.is_learned());
+// 學習式模式（實驗中）：幀的安排和某個類比模式一樣，只是放的是類神經網路產生的實數
+struct LearnedRow {
+    int id, analog_id, frame_symbols;
+    double seconds;
+    int analog_values, latent_channels;  // 標頭之外放得下的實數個數；模型的潛在通道數（實數個數 = 通道數 × 9 × 12）
+};
+const LearnedRow kLearnedSpec[] = {
+    {11, 9, 102, 2.720, 7782, 72},
+    {12, 8, 39, 1.040, 2658, 24},
+};
+
+void test_learned_modes() {
+    int learned_count = 0;
+    for (const LearnedRow& row : kLearnedSpec) {
+        const Mode* m = find_mode(row.id);
+        const Mode* analog = find_mode(row.analog_id);
+        CHECK(m != nullptr);
+        if (m == nullptr) continue;
+        ++learned_count;
+        CHECK(m->kind == ModeKind::Learned);
+        CHECK(m->is_learned() && !m->is_digital() && !m->is_analog());
+        CHECK(analog->is_analog() && !analog->is_learned());
+        CHECK_EQ(m->payload_symbols, analog->payload_symbols);
+        CHECK_EQ(m->cell_multiplier, analog->cell_multiplier);
+        CHECK_EQ(m->frame_symbols(), row.frame_symbols);
+        CHECK_NEAR(m->frame_seconds(), row.seconds, 0.0005);
+        CHECK_EQ(m->data_cells(), analog->data_cells());
+        CHECK_EQ(m->header_cells(), 176);
+        CHECK_EQ(m->analog_values(), row.analog_values);
+        CHECK_EQ(m->learned_values, row.latent_channels * 9 * 12);
+        CHECK(m->learned_values <= m->analog_values());             // 放得進去
+        CHECK(m->learned_values + 9 * 12 > m->analog_values());     // 而且再多一個通道就放不下
+        CHECK_EQ(m->interleaver_cells(), m->data_cells());
+        CHECK_EQ(m->payload_bytes(), 0);
+        CHECK_EQ(m->image_bytes(), 0);
+        CHECK_EQ(m->padding_cells(), 0);
+    }
+    // 其他模式都沒有這個欄位；學習式模式的實數個數兩兩不同（發射機、接收機靠它決定哪個模型給哪個模式用）
+    for (const Mode& other : kModes) {
+        CHECK_EQ(other.learned_values > 0, other.is_learned());
+        learned_count -= other.is_learned() ? 1 : 0;
+        for (const Mode& another : kModes) {
+            if (&other != &another && other.is_learned() && another.is_learned()) CHECK(other.learned_values != another.learned_values);
+        }
+    }
+    CHECK_EQ(learned_count, 0);  // 上面的表涵蓋了所有的學習式模式
 }
 
 void test_undefined_ids() {
-    for (int id : {-1, 6, 7, 12, 15, 16}) CHECK(find_mode(id) == nullptr);
+    for (int id : {-1, 6, 7, 13, 15, 16}) CHECK(find_mode(id) == nullptr);
 }
 
 void test_c_api() {
     CHECK(std::strcmp(nbtv_version_string(), "0.1.0") == 0);
-    CHECK_EQ(nbtv_mode_count(), 10);
+    CHECK_EQ(nbtv_mode_count(), 11);
     for (int i = 0; i < nbtv_mode_count(); ++i) {
         nbtv_mode_info a{};
         nbtv_mode_info b{};
@@ -196,7 +219,7 @@ int main() {
     test_pilots();
     test_digital_modes();
     test_analog_modes();
-    test_learned_mode();
+    test_learned_modes();
     test_undefined_ids();
     test_c_api();
     return check::finish("modes");

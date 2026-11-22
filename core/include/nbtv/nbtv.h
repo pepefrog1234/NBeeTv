@@ -48,7 +48,7 @@ typedef enum nbtv_mode_kind {
 
 /* 一個傳輸模式的幀結構。時間與取樣數以數據機取樣率 12 kHz 計。 */
 typedef struct nbtv_mode_info {
-    int id;                /* 空中的模式編號：數位 0–5，類比 8–10，學習式 11 */
+    int id;                /* 空中的模式編號：數位 0–5，類比 8–10，學習式 11–12 */
     nbtv_mode_kind kind;
     int payload_symbols;   /* 每幀的酬載符號數 */
     int frame_symbols;     /* 含開頭的 S0、S1 */
@@ -85,8 +85,9 @@ int nbtv_mode_by_id(int id, nbtv_mode_info *out);
 
 /*
  * 學習式模式（NBTV_MODE_LEARNED）的編解碼是一個類神經網路，權重放在獨立的檔案裡（models/ 底下的 .bin）。
- * 收發兩端必須用同一份權重。外殼把檔案內容讀進記憶體後交給 nbtv_model_load，再設定給發射機與接收機；
- * 同一個模型可以給多個物件用，設定之後就可以 nbtv_model_destroy（物件自己會留著）。
+ * 每個學習式模式各有自己的模型：模型的實數個數（nbtv_model_values）和模式的 learned_values 相同，就是給它用的。
+ * 收發兩端必須用同一份權重。外殼把檔案內容讀進記憶體後交給 nbtv_model_load，再設定給發射機與接收機
+ * （要用幾個學習式模式就設定幾個）；同一個模型可以給多個物件用，設定之後就可以 nbtv_model_destroy（物件自己會留著）。
  * 模型載入後不會再改變，可以同時被不同執行緒上的物件使用。
  */
 typedef struct nbtv_model nbtv_model;
@@ -156,7 +157,10 @@ void nbtv_tx_set_callsign(nbtv_tx *tx, const char *callsign);
 /* 影像編碼器的速度檔，見 nbtv_image_encode。 */
 void nbtv_tx_set_encoder_speed(nbtv_tx *tx, int speed);
 
-/* 學習式模式用的模型；model 是 NULL 表示拿掉。沒有設定模型時，學習式模式編不出幀。 */
+/*
+ * 學習式模式用的模型。可以設定好幾個，每個模式用實數個數和它相同的那一個；個數相同的再設定一次會取代前一個。
+ * model 是 NULL 表示全部拿掉。某個學習式模式沒有模型時，那個模式編不出幀。
+ */
 void nbtv_tx_set_model(nbtv_tx *tx, const nbtv_model *model);
 
 /*
@@ -178,7 +182,7 @@ typedef struct nbtv_tx_frame_info {
 
 /*
  * 把一張畫面做成一幀音訊。samples 的容量至少要 nbtv_tx_frame_samples()；回傳寫入的取樣數，失敗回傳 -1
- * （數位模式沒有編解碼器、畫面壓不進去、學習式模式沒有設定模型或模型不合、容量不足）。幀與幀可以直接相接連續播放。
+ * （數位模式沒有編解碼器、畫面壓不進去、學習式模式沒有設定那個模式用的模型、容量不足）。幀與幀可以直接相接連續播放。
  * 輸出的峰值不超過 ±1.0；音量由外殼自己調整。
  * preview_rgb 不是 NULL 時，填入「沒有雜訊時對方看到的畫面」：數位是壓縮再解開的結果，類比是只留傳送係數的結果，
  * 學習式是編碼後直接解回來的結果（要多花一次解碼的時間）。
@@ -222,8 +226,9 @@ void nbtv_rx_destroy(nbtv_rx *rx);
 void nbtv_rx_reset(nbtv_rx *rx);
 
 /*
- * 學習式模式用的模型；model 是 NULL 表示拿掉。沒有設定模型、或對方用的是另一份權重時，
- * 學習式的幀照樣會回報（呼號、訊雜比都有），但沒有畫面：decoded = 0、model_missing = 1。
+ * 學習式模式用的模型。和發射機一樣可以設定好幾個（每個模式用實數個數和它相同的那一個；個數相同的取代前一個），
+ * model 是 NULL 表示全部拿掉。某個模式沒有模型、或對方用的是另一份權重時，
+ * 那個模式的幀照樣會回報（呼號、訊雜比都有），但沒有畫面：decoded = 0、model_missing = 1。
  */
 void nbtv_rx_set_model(nbtv_rx *rx, const nbtv_model *model);
 

@@ -129,7 +129,7 @@ int main(int argc, char** argv) {
             "  --tone Hz         單頻載波干擾的頻率；--tone-db dB 它相對於訊號的功率（預設 0）\n"
             "  --impulse N       每秒 N 次脈衝雜訊；--impulse-db dB 脈衝期間的雜訊功率（預設 20）；--impulse-ms 持續時間（預設 20）\n"
             "  --image 檔.ppm    類比與學習式模式用的畫面（96×72）\n"
-            "  --model 檔名      學習式模式（模式 11）的權重檔（預設用專案 models/ 裡的）\n"
+            "  --model 檔名      學習式模式的權重檔（預設用專案 models/ 裡給那個模式的）\n"
             "  --learned-mean    學習式：告訴解碼器的訊雜比用各格點雜訊的平均值，不用中位數（比較用）\n"
             "  --learned-plain   學習式：雜訊特別大的格點不壓小（比較用）\n"
             "  --learned-nofloor 學習式：訊雜比低於解碼器認得的下限時不另外處理（比較用）\n"
@@ -177,7 +177,7 @@ int main(int argc, char** argv) {
         }
     }
     if (mode->is_learned()) {
-        const std::string model_path = args.str("model", default_model_path());
+        const std::string model_path = args.str("model", default_model_path(mode->learned_values));
         std::vector<std::uint8_t> bytes;
         std::string error = "讀不到檔案";
         if (read_file(model_path, bytes)) g_model = LearnedCodec::load(bytes, &error);

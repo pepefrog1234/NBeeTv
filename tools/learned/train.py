@@ -1,5 +1,6 @@
 # 訓練影像的聯合編碼模型（結構在 model.py）。資料是 prep.py 切好的 uint8 陣列 [N,72,96,3]（.npy）。
 # 用法：python3 train.py --train data/train.npy --val data/val.npy --latent 72 --out run [--init 舊的權重檔.bin]
+#       --latent 是潛在通道數，決定一張畫面變成幾個實數：72 → 7776（模式 11），24 → 2592（模式 12）。
 # 在 Apple 晶片的 GPU（MPS）上跑；3 萬步約 50 分鐘（M4 Max）。
 #
 # 通道（結構 2）：每張畫面抽一個平均訊雜比；四分之一的畫面是白雜訊，其餘是衰落——每個值各自乘上一個隨機的功率增益
@@ -34,7 +35,7 @@ p.add_argument("--train", required=True)
 p.add_argument("--val", required=True)
 p.add_argument("--latent", type=int, required=True)       # 潛在張量的通道數；實數個數 = latent × 9 × 12
 p.add_argument("--arch", type=int, default=2)             # 模型的結構編號，見 model.py
-p.add_argument("--init", default="")                      # 從這份權重檔（export.py 的 .bin）接著訓練；結構 1 的也可以
+p.add_argument("--init", default="")                      # 從這份權重檔（export.py 的 .bin）接著訓練；結構 1 的、潛在通道數不同的也可以
 p.add_argument("--steps", type=int, default=30000)
 p.add_argument("--batch", type=int, default=64)
 p.add_argument("--lr", type=float, default=2e-4)
@@ -72,18 +73,20 @@ print(f"訓練 {n} 張、驗證 {len(val)} 張；潛在通道 {args.latent}（{a
 if args.init:
     from export import read_weights
     state, latent, _, _ = read_weights(args.init)
-    assert latent == args.latent
     own = model.state_dict()
+    fresh = []
     for name, value in state.items():
         if own[name].shape == value.shape:
             own[name] = value
+        elif latent != args.latent and name in ("enc.head.weight", "enc.head.bias", "dec.inp.weight"):
+            fresh.append(name)                             # 潛在通道數不同：瓶頸兩側的這幾層接不上，留著剛初始化的值從頭學
         elif name == "dec.inp.weight":                     # 結構 1 → 2：多出來的「可靠程度」輸入先接上 0，一開始和舊模型算的一樣
             own[name] = torch.zeros_like(own[name])
             own[name][:, :value.shape[1]] = value
         else:
             raise SystemExit(f"{name} 的形狀接不上")
     model.load_state_dict(own)
-    print(f"從 {args.init} 接著訓練", flush=True)
+    print(f"從 {args.init} 接著訓練" + (f"（潛在通道 {latent} → {args.latent}：{'、'.join(fresh)} 從頭學）" if fresh else ""), flush=True)
 
 params = list(model.parameters())
 print(f"參數 {sum(q.numel() for q in params) / 1e6:.2f} M", flush=True)

@@ -12,6 +12,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -31,6 +32,18 @@ const std::vector<std::uint16_t>& learned_value_order(const Mode& mode);
 
 // 這個模型能不能用在這個模式：實數的個數要相同。
 bool learned_model_fits(const Mode& mode, const LearnedCodec& codec);
+
+// 發射機、接收機手上的一組模型。每個學習式模式用「實數個數和它相同」的那一個，所以每種個數最多留一個。
+class LearnedModels {
+public:
+    // 加進一個模型；已經有實數個數相同的就換成這一個。空指標表示全部拿掉。
+    void set(std::shared_ptr<const LearnedCodec> model);
+    // 這個模式用的模型；沒有的話是空指標。
+    const LearnedCodec* find(const Mode& mode) const;
+
+private:
+    std::vector<std::shared_ptr<const LearnedCodec>> models_;
+};
 
 // 畫面 → mode.data_cells() 個格點，依傳送順序。header 的 gain_code 由這裡填。
 // values 不是空指標時，另外交出編碼器產生的實數（發射端做預覽用）。模型和模式不合時回傳空的。

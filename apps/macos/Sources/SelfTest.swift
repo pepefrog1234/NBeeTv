@@ -137,8 +137,11 @@ enum SelfTest {
         let devices = !arguments.contains("--no-devices")
         let useCamera = devices && !arguments.contains("--no-camera")
         let useAudio = devices && !arguments.contains("--no-audio")
-        report("學習式模式的模型", LearnedModel.isAvailable ? true : nil,
-               LearnedModel.isAvailable ? "識別碼 \(LearnedModel.idText)，一張畫面 \(LearnedModel.values) 個實數" : "app 裡沒有權重檔，模式 11 不能用")
+        // 學習式模式各有一份權重檔；少了哪一份，那個模式就不會列在 Modes 裡
+        let models = Modes.learned.map { "\($0.name)：識別碼 \(LearnedModel.idText(values: $0.learnedValues) ?? "?")、\($0.learnedValues) 個實數" }
+        report("學習式模式的模型", models.count == LearnedModel.resourceNames.count ? true : nil,
+               models.isEmpty ? "app 裡沒有權重檔，學習式模式不能用"
+                   : models.joined(separator: "；") + (models.count < LearnedModel.resourceNames.count ? "；其餘的權重檔不在 app 裡" : ""))
         testCoreLoopback(coffee)
         testFlatPictures()
         testExport(coffee)
@@ -169,7 +172,7 @@ enum SelfTest {
     // MARK: 1. 核心
 
     private static func testCoreLoopback(_ image: Data) {
-        for modeID in [5, 9, 11] {  // 模式 11 要 app 裡有權重檔才會列在 Modes 裡
+        for modeID in [5, 9, 11, 12] {  // 模式 11、12 要 app 裡有權重檔才會列在 Modes 裡
             guard let mode = Modes.find(modeID), mode.isDigital ? NBTV.hasImageCodec : true else { continue }
             let tx = CoreTransmitter()
             tx.setMode(modeID)
@@ -260,7 +263,7 @@ enum SelfTest {
     private static func testExport(_ image: Data) {
         var details: [String] = []
         var ok = true
-        for modeID in [1, 9, 11] {
+        for modeID in [1, 9, 11, 12] {
             guard let mode = Modes.find(modeID), mode.isDigital ? NBTV.hasImageCodec : true else { continue }
             let tx = CoreTransmitter()
             tx.setMode(modeID)

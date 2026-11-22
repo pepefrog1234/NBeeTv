@@ -284,8 +284,27 @@ void test_discard_last() {
     }
 }
 
-// 學習式模式（模式 11）：載入模型、設定給發射機與接收機、走一趟迴路
-void test_learned_mode() {
+// 專案 models/ 底下的權重檔；找不到時回傳 NULL
+nbtv_model* load_model(const char* name, bool* found) {
+    std::vector<std::uint8_t> file;
+    const std::string path = std::string(NBTV_MODEL_DIR) + "/" + name + ".bin";
+    if (std::FILE* f = std::fopen(path.c_str(), "rb")) {
+        std::uint8_t chunk[65536];
+        for (std::size_t n = 0; (n = std::fread(chunk, 1, sizeof chunk, f)) > 0;) file.insert(file.end(), chunk, chunk + n);
+        std::fclose(f);
+    }
+    *found = !file.empty();
+    if (file.empty()) {
+        std::printf("  找不到權重檔 %s，略過用到它的測試\n", path.c_str());
+        return nullptr;
+    }
+    nbtv_model* model = nbtv_model_load(file.data(), file.size());
+    CHECK(model != nullptr);
+    return model;
+}
+
+// 學習式模式：載入模型、設定給發射機與接收機、走一趟迴路。min_psnr 是「貓」那張圖編了再解回來的下限。
+void test_learned_mode(int mode_id, const char* weights, double min_psnr) {
     // 沒有模型、不是模型
     CHECK(nbtv_model_load(nullptr, 0) == nullptr);
     const std::uint8_t junk[64] = {};
@@ -297,25 +316,14 @@ void test_learned_mode() {
     nbtv_rx_set_model(nullptr, nullptr);
 
     nbtv_mode_info mode{};
-    CHECK_EQ(nbtv_mode_by_id(11, &mode), 0);
+    CHECK_EQ(nbtv_mode_by_id(mode_id, &mode), 0);
     CHECK(mode.kind == NBTV_MODE_LEARNED);
-    CHECK_EQ(mode.learned_values, 7776);
+    CHECK(mode.learned_values > 0 && mode.learned_values <= mode.analog_values);
     CHECK_EQ(mode.analog_coefficients, 0);
     CHECK_EQ(mode.image_bytes, 0);
 
-    std::vector<std::uint8_t> file;
-    const std::string path = std::string(NBTV_MODEL_DIR) + "/learned_7776_v2.bin";
-    if (std::FILE* f = std::fopen(path.c_str(), "rb")) {
-        std::uint8_t chunk[65536];
-        for (std::size_t n = 0; (n = std::fread(chunk, 1, sizeof chunk, f)) > 0;) file.insert(file.end(), chunk, chunk + n);
-        std::fclose(f);
-    }
-    if (file.empty()) {
-        std::printf("  找不到權重檔 %s，略過學習式模式的迴路\n", path.c_str());
-        return;
-    }
-    nbtv_model* model = nbtv_model_load(file.data(), file.size());
-    CHECK(model != nullptr);
+    bool found = false;
+    nbtv_model* model = load_model(weights, &found);
     if (model == nullptr) return;
     CHECK_EQ(nbtv_model_values(model), mode.learned_values);
     CHECK(nbtv_model_id(model) != 0);
@@ -324,7 +332,7 @@ void test_learned_mode() {
     const int rate = 48000;
     nbtv_tx* tx = nbtv_tx_create(rate);
     nbtv_tx_set_callsign(tx, "n0call");
-    CHECK_EQ(nbtv_tx_set_mode(tx, 11), 0);
+    CHECK_EQ(nbtv_tx_set_mode(tx, mode_id), 0);
     const int frame_samples = nbtv_tx_frame_samples(tx);
     CHECK_EQ(frame_samples, mode.frame_samples * 4);
     std::vector<float> frame(static_cast<std::size_t>(frame_samples));
@@ -344,13 +352,13 @@ void test_learned_mode() {
     std::vector<float> audio(static_cast<std::size_t>(rate / 4), 0.0f);
     for (int i = 0; i < 2; ++i) {
         CHECK_EQ(nbtv_tx_encode_image(tx, rgb.data(), frame.data(), frame_samples, preview.data(), &info), frame_samples);
-        CHECK_EQ(info.mode_id, 11);
+        CHECK_EQ(info.mode_id, mode_id);
         CHECK_EQ(info.sequence, i);
         CHECK_EQ(info.image_bytes, 0);
         CHECK_EQ(info.coefficients, 0);
         audio.insert(audio.end(), frame.begin(), frame.end());
     }
-    CHECK(test_images::psnr(preview, rgb) > 27.5);  // 預覽是編碼後直接解回來的畫面
+    CHECK(test_images::psnr(preview, rgb) > min_psnr);  // 預覽是編碼後直接解回來的畫面
     // 多編一幀再取消：幀序號回到 2
     CHECK_EQ(nbtv_tx_encode_image(tx, rgb.data(), frame.data(), frame_samples, nullptr, &info), frame_samples);
     CHECK_EQ(nbtv_tx_discard_last(tx), 0);
@@ -372,7 +380,7 @@ void test_learned_mode() {
     double quality = 0.0;
     while (nbtv_rx_poll_frame(rx, &f)) {
         CHECK(f.kind == NBTV_MODE_LEARNED);
-        CHECK_EQ(f.mode_id, 11);
+        CHECK_EQ(f.mode_id, mode_id);
         CHECK_EQ(f.decoded, 1);
         CHECK_EQ(f.has_image, 1);
         CHECK_EQ(f.model_missing, 0);
@@ -381,11 +389,11 @@ void test_learned_mode() {
         CHECK_EQ(f.sequence, n);
         CHECK_EQ(f.image_bytes, 0);
         quality = test_images::psnr(std::vector<std::uint8_t>(f.rgb, f.rgb + NBTV_IMAGE_RGB_BYTES), rgb);
-        CHECK(quality > 27.5);
+        CHECK(quality > min_psnr);
         ++n;
     }
     CHECK_EQ(n, 2);
-    std::printf("  C API 迴路：%d Hz、模式 11，%d 幀，收到的畫面對原圖 PSNR %.1f dB\n", rate, n, quality);
+    std::printf("  C API 迴路：%d Hz、模式 %d，%d 幀，收到的畫面對原圖 PSNR %.1f dB\n", rate, mode_id, n, quality);
     // 沒有模型的接收機：收得到幀與呼號，但沒有畫面
     n = 0;
     while (nbtv_rx_poll_frame(bare, &f)) {
@@ -425,6 +433,79 @@ void test_learned_mode() {
     nbtv_tx_destroy(tx);
 }
 
+// 兩個學習式模式各有自己的模型：發射機、接收機都設定兩個，一次發射裡換模式，各用各的模型
+void test_learned_two_models() {
+    bool found[2] = {false, false};
+    nbtv_model* models[2] = {load_model("learned_7776_v2", &found[0]), load_model("learned_2592_v2", &found[1])};
+    if (models[0] == nullptr || models[1] == nullptr) {
+        for (nbtv_model* m : models) nbtv_model_destroy(m);
+        return;
+    }
+    CHECK(nbtv_model_values(models[0]) != nbtv_model_values(models[1]));
+    const int rate = 12000;
+    nbtv_tx* tx = nbtv_tx_create(rate);
+    nbtv_rx* rx = nbtv_rx_create(rate);
+    nbtv_rx* partial = nbtv_rx_create(rate);  // 這一個只有模式 12 的模型
+    for (nbtv_model* m : models) {
+        nbtv_tx_set_model(tx, m);
+        nbtv_rx_set_model(rx, m);
+    }
+    nbtv_rx_set_model(partial, models[1]);
+    nbtv_rx_set_model(partial, models[1]);  // 同一個再設定一次沒有影響
+    for (nbtv_model* m : models) nbtv_model_destroy(m);
+
+    const std::vector<std::uint8_t> rgb = test_images::load("cat");
+    const int ids[] = {12, 11, 12};
+    std::vector<float> audio(static_cast<std::size_t>(rate / 4), 0.0f);
+    for (int id : ids) {
+        CHECK_EQ(nbtv_tx_set_mode(tx, id), 0);
+        std::vector<float> frame(static_cast<std::size_t>(nbtv_tx_frame_samples(tx)));
+        nbtv_tx_frame_info info{};
+        CHECK_EQ(nbtv_tx_encode_image(tx, rgb.data(), frame.data(), static_cast<int>(frame.size()), nullptr, &info),
+                 static_cast<int>(frame.size()));
+        CHECK_EQ(info.mode_id, id);
+        audio.insert(audio.end(), frame.begin(), frame.end());
+    }
+    audio.insert(audio.end(), static_cast<std::size_t>(rate / 2), 0.0f);
+    for (nbtv_rx* r : {rx, partial}) nbtv_rx_push(r, audio.data(), static_cast<int>(audio.size()));
+
+    nbtv_rx_frame f;
+    int n = 0;
+    while (nbtv_rx_poll_frame(rx, &f)) {
+        if (n < 3) CHECK_EQ(f.mode_id, ids[n]);
+        CHECK(f.kind == NBTV_MODE_LEARNED);
+        CHECK_EQ(f.decoded, 1);
+        CHECK_EQ(f.has_image, 1);
+        CHECK_EQ(f.model_missing, 0);
+        CHECK_EQ(f.sequence, n);
+        // 用錯模型的話解出來的是雜訊（10 dB 以下）
+        CHECK(test_images::psnr(std::vector<std::uint8_t>(f.rgb, f.rgb + NBTV_IMAGE_RGB_BYTES), rgb) > 20.0);
+        ++n;
+    }
+    CHECK_EQ(n, 3);
+    n = 0;
+    while (nbtv_rx_poll_frame(partial, &f)) {
+        if (n < 3) {
+            CHECK_EQ(f.mode_id, ids[n]);
+            CHECK_EQ(f.decoded, ids[n] == 12 ? 1 : 0);
+            CHECK_EQ(f.model_missing, ids[n] == 12 ? 0 : 1);
+            CHECK_EQ(f.header_ok, 1);
+        }
+        ++n;
+    }
+    CHECK_EQ(n, 3);
+    // 全部拿掉之後，兩個模式都編不出幀
+    nbtv_tx_set_model(tx, nullptr);
+    std::vector<float> frame(static_cast<std::size_t>(rate * 3));
+    for (int id : {11, 12}) {
+        CHECK_EQ(nbtv_tx_set_mode(tx, id), 0);
+        CHECK_EQ(nbtv_tx_encode_image(tx, rgb.data(), frame.data(), static_cast<int>(frame.size()), nullptr, nullptr), -1);
+    }
+    nbtv_rx_destroy(partial);
+    nbtv_rx_destroy(rx);
+    nbtv_tx_destroy(tx);
+}
+
 }  // namespace
 
 int main() {
@@ -435,7 +516,9 @@ int main() {
     loopback(48000, 9, "rocket");
     loopback(12000, 8, "coffee");
     test_payload_path();
-    test_learned_mode();
+    test_learned_mode(11, "learned_7776_v2", 27.5);
+    test_learned_mode(12, "learned_2592_v2", 23.5);
+    test_learned_two_models();
     test_spectrum();
     return check::finish("c_api");
 }

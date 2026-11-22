@@ -14,7 +14,7 @@
 
 #include "chanest.hpp"
 #include "dsp.hpp"
-#include "learned_codec.hpp"
+#include "learned_frame.hpp"
 #include "modes.hpp"
 #include "types.hpp"
 
@@ -62,6 +62,8 @@ struct RxTuning {
     int detect_last = 72;
     // 分數的定義見 check_preamble。只有雜訊時，45 個假設（9 個模式 × 5 個整數頻偏）裡最大的分數
     // 中位數約 2.2、約 2% 超過 3.0；−3 dB 的訊號中位數約 5.9、−5 dB 約 4.3。
+    // （這是 9 個模式時量的。現在是 11 個模式、55 個假設，雜訊超過門檻的機會略多一點，靠後面的導頻驗證把關：
+    // 加到 11 個模式之後，四小時的純雜訊沒有一次進入同步。）
     double acquire_score = 3.0;   // 捕獲的門檻（通過後還要經過導頻驗證）
     // 追蹤時確認下一幀前導符號的門檻（只檢查目前的模式）。只在上一幀解出來時使用；
     // 上一幀沒解出來的話改用 acquire_score，而且同樣要經過導頻驗證。
@@ -85,8 +87,10 @@ public:
 
     RxTuning& tuning() { return tuning_; }
 
-    // 學習式模式用的模型。沒有設定時，學習式的幀只回報「收到一幀，但沒有畫面」。reset() 不會清掉它。
-    void set_model(std::shared_ptr<const LearnedCodec> model) { model_ = std::move(model); }
+    // 學習式模式用的模型。每個模式用「實數個數和它相同」的那一個，所以要收幾個學習式模式就設定幾個；
+    // 個數相同的再設定一次會取代前一個，傳空指標表示全部拿掉。某個模式沒有模型時，它的幀只回報
+    // 「收到一幀，但沒有畫面」。reset() 不會清掉模型。
+    void set_model(std::shared_ptr<const LearnedCodec> model) { models_.set(std::move(model)); }
 
     void reset();
     void push(std::span<const float> samples);  // 12 kHz
@@ -140,7 +144,7 @@ private:
     void trim();
 
     RxTuning tuning_;
-    std::shared_ptr<const LearnedCodec> model_;
+    LearnedModels models_;
     AnalyticFilter analytic_;
     ChannelEstimator chanest_;
     std::vector<cf> buf_;

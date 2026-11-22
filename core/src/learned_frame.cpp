@@ -42,6 +42,27 @@ bool learned_model_fits(const Mode& mode, const LearnedCodec& codec) {
     return mode.is_learned() && codec.value_count() == mode.learned_values;
 }
 
+void LearnedModels::set(std::shared_ptr<const LearnedCodec> model) {
+    if (model == nullptr) {
+        models_.clear();
+        return;
+    }
+    for (std::shared_ptr<const LearnedCodec>& held : models_) {
+        if (held->value_count() == model->value_count()) {
+            held = std::move(model);
+            return;
+        }
+    }
+    models_.push_back(std::move(model));
+}
+
+const LearnedCodec* LearnedModels::find(const Mode& mode) const {
+    for (const std::shared_ptr<const LearnedCodec>& held : models_) {
+        if (learned_model_fits(mode, *held)) return held.get();
+    }
+    return nullptr;
+}
+
 std::vector<cf> learned_encode(const Mode& mode, const LearnedCodec& codec, const AnalogHeader& header,
                                std::span<const std::uint8_t> rgb, std::vector<float>* values) {
     if (!learned_model_fits(mode, codec)) return {};

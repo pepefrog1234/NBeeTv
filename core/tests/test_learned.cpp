@@ -1,10 +1,12 @@
-// 學習式影像編碼：權重檔的解析、C++ 的推論和 PyTorch 算出來的是否一致，以及模式 11 的幀與完整的收發鏈。
-// 參考答案（data/learned_7776_v2_ref.bin）由 tools/learned/export.py 產生。
+// 學習式影像編碼：權重檔的解析、C++ 的推論和 PyTorch 算出來的是否一致，以及模式 11、12 的幀與完整的收發鏈。
+// 每個模式各有一份權重（models/）與一份參考答案（data/…_ref.bin，由 tools/learned/export.py 產生）。
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <string>
@@ -27,7 +29,27 @@ using namespace nbtv;
 
 namespace {
 
-constexpr std::uint32_t kModelId = 0x90DE77EDu;  // models/learned_7776_v2.bin
+// 一個學習式模式和它的權重。對照的數字除了註明的以外，都是 export.py 產生參考答案時印出來的（PyTorch，核心的三張測試圖）；
+// 換了權重要一起更新。
+struct ModelCase {
+    int mode_id;
+    const char* name;        // models/<name>.bin 與 data/<name>_ref.bin
+    std::uint32_t model_id;  // 權重檔的識別碼
+    double clean[3];         // 不加雜訊、訊雜比輸入 30 dB 時三張圖的 PSNR
+    double awgn10;           // 加 10 dB 白雜訊時三張圖的平均
+    // 以下是 C++ 這邊量到的數字留一點餘裕之後的門檻（都是貓那一張，或黑白剪影）
+    double link_awgn10;      // 完整的收發鏈，白雜訊 10 dB（3 kHz 雜訊頻寬）：平均值，容許 ±0.8 dB
+    double link_poor15;      // 完整的收發鏈，差通道 15 dB：下限
+    double faded;            // 一成的格點在衰落谷底、其餘 15 dB：下限
+    double silhouette;       // 黑白剪影過差通道（0、2、5 dB）：平均的下限
+    double flipped;          // 同上：純色的地方變成另一色的比例（最差的一張）的上限
+};
+const ModelCase kCases[] = {
+    // 量到的：收發鏈 27.5、27.4 dB，衰落谷底 26.7 dB，剪影 28.9 dB、0.0%
+    {11, "learned_7776_v2", 0x90DE77EDu, {27.778, 28.757, 29.051}, 27.270, 27.5, 25.5, 25.0, 27.0, 0.01},
+    // 量到的：收發鏈 23.6、23.8 dB，衰落谷底 23.1 dB，剪影 24.1 dB、1.3%
+    {12, "learned_2592_v2", 0xBD805526u, {23.888, 25.168, 24.806}, 23.570, 23.6, 22.0, 21.5, 22.0, 0.025},
+};
 
 std::vector<std::uint8_t> read_file(const std::string& path) {
     std::vector<std::uint8_t> bytes;
@@ -54,14 +76,27 @@ double ms_since(std::chrono::steady_clock::time_point t0) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 }
 
-void test_loader(const std::vector<std::uint8_t>& file) {
+// 「另一份權重」：改掉一個權重（第一個張量的資料從位移 66 開始），識別碼就跟著變。
+// 幀的標頭只帶識別碼的最低 8 位元；剛好相同的話換一個位置再試。
+std::shared_ptr<const LearnedCodec> altered_model(const std::vector<std::uint8_t>& file, const LearnedCodec& model) {
+    for (std::size_t at = 66; at < 200; at += 2) {
+        std::vector<std::uint8_t> altered = file;
+        altered[at] ^= 0x01;
+        fix_crc(altered);
+        std::shared_ptr<const LearnedCodec> candidate = LearnedCodec::load(altered);
+        if (candidate != nullptr && (candidate->model_id() & 0xFFu) != (model.model_id() & 0xFFu)) return candidate;
+    }
+    return nullptr;
+}
+
+void test_loader(const ModelCase& model, const std::vector<std::uint8_t>& file) {
     std::string error;
     const auto codec = LearnedCodec::load(file, &error);
     CHECK(codec != nullptr);
     CHECK(error.empty());
     if (codec == nullptr) return;
-    CHECK_EQ(codec->value_count(), 7776);
-    CHECK_EQ(codec->model_id(), kModelId);
+    CHECK_EQ(codec->value_count(), find_mode(model.mode_id)->learned_values);
+    CHECK_EQ(codec->model_id(), model.model_id);
     CHECK_EQ(codec->architecture(), 2);
     CHECK_NEAR(codec->min_snr_db(), -6.0, 1e-6);
 
@@ -203,10 +238,9 @@ void test_against_pytorch(const LearnedCodec& codec, const std::vector<std::uint
     std::printf("  編碼每張 %.0f ms、解碼每張 %.0f ms（單執行緒）\n", encode_ms / 3.0, decode_ms / 6.0);
 }
 
-void test_round_trip(const LearnedCodec& codec) {
-    // 自己編、自己解。對照 export.py 印出來的 PyTorch 數字（三張測試圖）：
-    //   不加雜訊、訊雜比輸入 30 dB：27.778、28.757、29.051 dB；加 10 dB 白雜訊平均 27.270 dB
-    const double clean_expected[3] = {27.778, 28.757, 29.051};
+void test_round_trip(const ModelCase& model, const LearnedCodec& codec) {
+    // 自己編、自己解，對照 export.py 印出來的 PyTorch 數字
+    const double* clean_expected = model.clean;
     const std::size_t n = static_cast<std::size_t>(codec.value_count());
     std::vector<float> values(n), noisy(n);
     std::vector<std::uint8_t> out(static_cast<std::size_t>(kImageRgbBytes));
@@ -226,7 +260,7 @@ void test_round_trip(const LearnedCodec& codec) {
             ++noisy_count;
         }
     }
-    CHECK_NEAR(noisy_total / noisy_count, 27.270, 0.3);
+    CHECK_NEAR(noisy_total / noisy_count, model.awgn10, 0.3);
 
     // 訊雜比超出範圍或不是數值：夾到範圍內，結果和範圍的端點相同
     std::vector<std::uint8_t> a(out.size()), b(out.size());
@@ -257,12 +291,13 @@ void test_round_trip(const LearnedCodec& codec) {
     CHECK(!codec.decode(values, 10.0f, std::span<std::uint8_t>(out).first(100)));
 }
 
-// ---------------------------------------------------------------- 模式 11：一幀的資料格
+// ---------------------------------------------------------------- 一幀的資料格
 
-void test_frame(const LearnedCodec& codec) {
-    const Mode& mode = *find_mode(11);
+void test_frame(const ModelCase& model, const LearnedCodec& codec) {
+    const Mode& mode = *find_mode(model.mode_id);
     CHECK(learned_model_fits(mode, codec));
     CHECK(!learned_model_fits(*find_mode(9), codec));
+    for (const Mode& other : kModes) CHECK_EQ(learned_model_fits(other, codec), other.id == mode.id);  // 只合自己的模式
     const auto rgb = test_images::load("cat");
     AnalogHeader header;
     header.sequence = 200;
@@ -272,15 +307,15 @@ void test_frame(const LearnedCodec& codec) {
     CHECK_EQ(static_cast<int>(cells.size()), mode.data_cells());
     CHECK_EQ(static_cast<int>(values.size()), mode.learned_values);
     CHECK(learned_encode(*find_mode(9), codec, header, rgb).empty());  // 不是學習式的模式
-    // 格點的平均功率是 1，和數位模式的資料格一樣（只有用不到的 3 格是 0）
+    // 用到的格點平均功率是 1，和數位模式的資料格一樣；用不到的格點是 0（模式 11 有 3 格、模式 12 有 33 格）
     double power = 0.0;
     int zeros = 0;
     for (const cf& c : cells) {
         power += std::norm(c);
         zeros += c == cf(0, 0) ? 1 : 0;
     }
-    CHECK_NEAR(power / static_cast<double>(cells.size()), 1.0, 0.01);
     CHECK_EQ(zeros, (mode.analog_values() - mode.learned_values) / 2);
+    CHECK_NEAR(power / static_cast<double>(static_cast<int>(cells.size()) - zeros), 1.0, 0.01);
 
     // 幾乎沒有雜訊：標頭與實數都原樣取回
     const std::vector<float> quiet(cells.size(), 1e-4f);
@@ -308,23 +343,29 @@ void test_frame(const LearnedCodec& codec) {
     std::vector<int> seen(order.size(), 0);
     for (std::uint16_t t : order) ++seen[t];
     CHECK(std::all_of(seen.begin(), seen.end(), [](int c) { return c == 1; }));
-    // 打散的目的：一片衰落（這裡是 12 個載波 × 40 個符號，佔一成）抹掉的值，要平均分到畫面的每個位置，
-    // 不能集中在某幾個位置上。照原來的順序放的話，最慘的位置會少掉 28% 的通道、有些位置完全不受影響。
+    // 打散的目的：一片衰落（這裡是 12 個載波 × 四成的符號，佔一成）抹掉的值，要平均分到畫面的每個位置，
+    // 不能集中在某幾個位置上。照原來的順序放的話（模式 11），最慘的位置會少掉 28% 的通道、有些位置完全不受影響。
     {
         const std::vector<CellPos> positions = data_cell_positions(mode.payload_symbols);
+        const int first_symbol = mode.payload_symbols / 5, last_symbol = first_symbol + 2 * mode.payload_symbols / 5;
+        const double channels = mode.learned_values / 108.0;  // 每個位置有幾個通道：72 或 24
         std::vector<int> lost(9 * 12, 0);
         int total = 0;
         for (int k = 0; k < mode.learned_values; ++k) {
             const CellPos& at = positions[static_cast<std::size_t>(mode.interleaved_position(kAnalogHeaderCells + k / 2))];
             const int carrier = at.bin - kFirstBin;
-            if (carrier < 30 || carrier >= 42 || at.symbol < 20 || at.symbol >= 60) continue;
+            if (carrier < 30 || carrier >= 42 || at.symbol < first_symbol || at.symbol >= last_symbol) continue;
             ++lost[order[static_cast<std::size_t>(k)] % 108];  // 編碼器的輸出是 [通道][列][行]
             ++total;
         }
-        const double mean = static_cast<double>(total) / (108.0 * 72.0);
+        const double mean = static_cast<double>(total) / mode.learned_values;
         CHECK_NEAR(mean, 0.10, 0.02);
-        CHECK(*std::max_element(lost.begin(), lost.end()) / 72.0 < mean + 0.11);  // 72 個裡抽一成，三個標準差內
-        CHECK(*std::min_element(lost.begin(), lost.end()) / 72.0 > mean - 0.11);
+        // 每個位置的通道裡各抽一成：和平均的差距在三個標準差多一點之內（72 個通道是 ±0.11，24 個是 ±0.19）
+        const double spread = 3.1 * std::sqrt(mean * (1.0 - mean) / channels);
+        const double most = *std::max_element(lost.begin(), lost.end()) / channels, least = *std::min_element(lost.begin(), lost.end()) / channels;
+        std::printf("  一片衰落抹掉 %.1f%% 的值：各個位置少掉的通道在 %.1f%% 到 %.1f%% 之間\n", 100.0 * mean, 100.0 * least, 100.0 * most);
+        CHECK(most < mean + spread);
+        CHECK(least > mean - spread);
     }
 
     // 各格點的雜訊一樣大時，接收端的處理不起作用，結果和直接解碼相同
@@ -359,15 +400,15 @@ void test_frame(const LearnedCodec& codec) {
     const double with = test_images::psnr(a, rgb), without = test_images::psnr(b, rgb);
     std::printf("  一成的格點在衰落谷底：壓小 %.1f dB、不壓小 %.1f dB、用平均訊雜比 %.1f dB\n", with, without, test_images::psnr(c, rgb));
     CHECK(with > without + 5.0);
-    CHECK(with > 25.0);
+    CHECK(with > model.faded);
 }
 
-// ---------------------------------------------------------------- 模式 11：完整的收發鏈
+// ---------------------------------------------------------------- 完整的收發鏈
 
 // 發射 count 幀（同一張畫面）→ 通道 → 接收機。兩邊的模型各自指定，可以是空的。
-std::vector<RxFrame> learned_link(std::shared_ptr<const LearnedCodec> tx_model, std::shared_ptr<const LearnedCodec> rx_model,
-                                  std::span<const std::uint8_t> rgb, int count, const sim::ChannelParams& params) {
-    const Mode& mode = *find_mode(11);
+std::vector<RxFrame> learned_link(const Mode& mode, std::shared_ptr<const LearnedCodec> tx_model,
+                                  std::shared_ptr<const LearnedCodec> rx_model, std::span<const std::uint8_t> rgb, int count,
+                                  const sim::ChannelParams& params) {
     Transmitter tx;
     tx.set_callsign("N0CALL");
     tx.set_model(std::move(tx_model));
@@ -387,8 +428,8 @@ std::vector<RxFrame> learned_link(std::shared_ptr<const LearnedCodec> tx_model, 
     return link_util::run_receiver(rx, received);
 }
 
-void test_link(const std::shared_ptr<const LearnedCodec>& model, const std::vector<std::uint8_t>& file) {
-    const Mode& mode = *find_mode(11);
+void test_link(const ModelCase& expected, const std::shared_ptr<const LearnedCodec>& model, const std::vector<std::uint8_t>& file) {
+    const Mode& mode = *find_mode(expected.mode_id);
     const auto rgb = test_images::load("cat");
 
     // 發射端沒有模型：編不出幀，幀序號不動
@@ -405,7 +446,7 @@ void test_link(const std::shared_ptr<const LearnedCodec>& model, const std::vect
         const std::vector<float> frame = tx.learned_frame(mode, rgb, &preview);
         CHECK_EQ(static_cast<int>(frame.size()), mode.frame_samples());
         CHECK_EQ(tx.sequence(), 1);
-        CHECK_NEAR(test_images::psnr(preview, rgb), 29.051, 0.02);
+        CHECK_NEAR(test_images::psnr(preview, rgb), expected.clean[2], 0.02);
         float peak = 0.0f;
         for (float v : frame) peak = std::max(peak, std::fabs(v));
         CHECK(peak <= 1.0f);
@@ -423,64 +464,56 @@ void test_link(const std::shared_ptr<const LearnedCodec>& model, const std::vect
     };
     int pictures = 0;
 
-    // 不加雜訊：每一幀都收到，畫質和不經過數據機時幾乎一樣（29.1 dB）
+    // 不加雜訊：每一幀都收到，畫質和不經過數據機時幾乎一樣
     sim::ChannelParams clean;
     clean.add_noise = false;
-    std::vector<RxFrame> frames = learned_link(model, model, rgb, 2, clean);
+    std::vector<RxFrame> frames = learned_link(mode, model, model, rgb, 2, clean);
     CHECK_EQ(static_cast<int>(frames.size()), 2);
     for (std::size_t i = 0; i < frames.size(); ++i) {
         const RxFrame& f = frames[i];
         CHECK(f.decoded && f.header_ok && f.is_learned && !f.is_digital && !f.model_missing);
-        CHECK_EQ(f.mode_id, 11);
+        CHECK_EQ(f.mode_id, mode.id);
         CHECK(f.callsign == "N0CALL");
         CHECK_EQ(f.sequence, static_cast<int>(i));
     }
     const double clean_psnr = mean_psnr(frames, &pictures);
-    CHECK(clean_psnr > 28.5);
+    CHECK(clean_psnr > expected.clean[2] - 0.6);
 
     // 白雜訊 10 dB（3 kHz 雜訊頻寬）
     sim::ChannelParams noisy;
     noisy.snr_db = 10.0;
     noisy.seed = 3;
-    frames = learned_link(model, model, rgb, 3, noisy);
+    frames = learned_link(mode, model, model, rgb, 3, noisy);
     const double noisy_psnr = mean_psnr(frames, &pictures);
     CHECK_EQ(pictures, 3);
-    CHECK_NEAR(noisy_psnr, 27.5, 0.8);
+    CHECK_NEAR(noisy_psnr, expected.link_awgn10, 0.8);
 
     // 衰落：差通道（2 ms／1 Hz）、15 dB
     sim::ChannelParams poor;
     CHECK(sim::channel_preset("poor", poor));
     poor.snr_db = 15.0;
     poor.seed = 11;
-    frames = learned_link(model, model, rgb, 4, poor);
+    frames = learned_link(mode, model, model, rgb, 4, poor);
     const double poor_psnr = mean_psnr(frames, &pictures);
     CHECK(pictures >= 3);
-    CHECK(poor_psnr > 25.5);
-    std::printf("  模式 11 的收發鏈（貓）：不加雜訊 %.1f dB、白雜訊 10 dB 時 %.1f dB、差通道 15 dB 時 %.1f dB（%d 張）\n", clean_psnr,
-                noisy_psnr, poor_psnr, pictures);
+    CHECK(poor_psnr > expected.link_poor15);
+    std::printf("  模式 %d 的收發鏈（貓）：不加雜訊 %.1f dB、白雜訊 10 dB 時 %.1f dB、差通道 15 dB 時 %.1f dB（%d 張）\n", mode.id,
+                clean_psnr, noisy_psnr, poor_psnr, pictures);
 
     // 接收端沒有模型：幀收得到、標頭也解得出來，只是沒有畫面
-    frames = learned_link(model, nullptr, rgb, 2, clean);
+    frames = learned_link(mode, model, nullptr, rgb, 2, clean);
     CHECK_EQ(static_cast<int>(frames.size()), 2);
     for (const RxFrame& f : frames) CHECK(!f.decoded && f.model_missing && f.header_ok && f.rgb.empty() && f.callsign == "N0CALL");
 
-    // 兩邊的權重不同：改掉一個權重（第一個張量的資料從位移 66 開始），識別碼就跟著變
-    std::shared_ptr<const LearnedCodec> other;
-    for (std::size_t at = 66; at < 200 && other == nullptr; at += 2) {
-        std::vector<std::uint8_t> altered = file;
-        altered[at] ^= 0x01;
-        fix_crc(altered);
-        std::shared_ptr<const LearnedCodec> candidate = LearnedCodec::load(altered);
-        // 標頭只帶識別碼的最低 8 位元；剛好相同的話換一個位置再試
-        if (candidate != nullptr && (candidate->model_id() & 0xFFu) != (model->model_id() & 0xFFu)) other = std::move(candidate);
-    }
+    // 兩邊的權重不同
+    const std::shared_ptr<const LearnedCodec> other = altered_model(file, *model);
     CHECK(other != nullptr);
     if (other != nullptr) {
-        frames = learned_link(model, other, rgb, 2, clean);
+        frames = learned_link(mode, model, other, rgb, 2, clean);
         CHECK_EQ(static_cast<int>(frames.size()), 2);
         for (const RxFrame& f : frames) CHECK(!f.decoded && f.model_missing && f.header_ok && f.rgb.empty());
         // 兩邊都換成另一份，就又解得出來
-        frames = learned_link(other, other, rgb, 1, clean);
+        frames = learned_link(mode, other, other, rgb, 1, clean);
         CHECK(frames.size() == 1 && frames[0].decoded && !frames[0].model_missing);
     }
 }
@@ -527,8 +560,8 @@ double flipped_fraction(const std::vector<std::uint8_t>& original, const std::ve
 
 // 使用者實測時看到的情形：黑白的影片在訊號差、有衰落時，畫面上冒出帶點陣的黑塊。
 // 第一版的模型訓練時每個值的雜訊一樣大，沒見過「有一部分的值等於沒收到」；第二版訓練時加入衰落，並把各個值的可靠程度交給解碼器。
-void test_silhouette_fading(const std::shared_ptr<const LearnedCodec>& model) {
-    const Mode& mode = *find_mode(11);
+void test_silhouette_fading(const ModelCase& expected, const std::shared_ptr<const LearnedCodec>& model) {
+    const Mode& mode = *find_mode(expected.mode_id);
     sim::ChannelParams poor;
     CHECK(sim::channel_preset("poor", poor));
     double total = 0.0, worst_flip = 0.0;
@@ -564,31 +597,129 @@ void test_silhouette_fading(const std::shared_ptr<const LearnedCodec>& model) {
         }
     }
     const double mean = pictures > 0 ? total / pictures : 0.0;
-    std::printf("  黑白剪影過差通道（0、2、5 dB）：%d 幀收到 %d 張，平均 %.1f dB；純色的地方最多有 %.1f%% 變成另一色\n", sent, pictures,
-                mean, 100.0 * worst_flip);
-    // 第一版的權重（結構 1，同樣的幀）在這裡是平均 25.5 dB、純色的地方最多有 2.9% 變成另一色；第二版是 28.9 dB、0%。
+    std::printf("  模式 %d，黑白剪影過差通道（0、2、5 dB）：%d 幀收到 %d 張，平均 %.1f dB；純色的地方最多有 %.1f%% 變成另一色\n", mode.id,
+                sent, pictures, mean, 100.0 * worst_flip);
+    // 模式 11：第一版的權重（結構 1，同樣的幀）在這裡是平均 25.5 dB、純色的地方最多有 2.9% 變成另一色；第二版是 28.9 dB、0%。
+    // 模式 12：送的值只有三分之一，衰落很深的幀（量到的訊雜比 −1 dB 上下）邊緣會糊在一起，最差的一張有 1.3% 變色；
+    // 平均 24.1 dB。同樣的畫面與通道，類比模式 8 是平均 15.8 dB、最差的一張 3.6%。
     CHECK(pictures >= sent * 3 / 4);
-    CHECK(mean > 27.0);
-    CHECK(worst_flip < 0.01);
+    CHECK(mean > expected.silhouette);
+    CHECK(worst_flip < expected.flipped);
+}
+
+// ---------------------------------------------------------------- 兩個模型同時掛著
+
+// 發射機與接收機可以掛好幾個模型：每個學習式模式用實數個數和它相同的那一個，一次發射裡換模式也接得上。
+// models、files 依 kCases 的順序（模式 11、模式 12）。
+void test_two_models(const std::vector<std::shared_ptr<const LearnedCodec>>& models, const std::vector<std::vector<std::uint8_t>>& files) {
+    const auto rgb = test_images::load("cat");
+    const Mode& long_mode = *find_mode(kCases[0].mode_id);
+    const Mode& short_mode = *find_mode(kCases[1].mode_id);
+
+    // 一組模型：每種實數個數留一個，後來的取代先前的；空指標清掉全部
+    {
+        LearnedModels set;
+        CHECK(set.find(long_mode) == nullptr && set.find(short_mode) == nullptr);
+        set.set(models[0]);
+        CHECK(set.find(long_mode) == models[0].get() && set.find(short_mode) == nullptr);
+        CHECK(set.find(*find_mode(9)) == nullptr && set.find(*find_mode(1)) == nullptr);  // 不是學習式的模式
+        set.set(models[1]);
+        CHECK(set.find(long_mode) == models[0].get() && set.find(short_mode) == models[1].get());
+        const std::shared_ptr<const LearnedCodec> other = altered_model(files[0], *models[0]);
+        CHECK(other != nullptr);
+        set.set(other);  // 實數個數和第一個相同：取代它，另一個不動
+        CHECK(set.find(long_mode) == other.get() && set.find(short_mode) == models[1].get());
+        set.set(nullptr);
+        CHECK(set.find(long_mode) == nullptr && set.find(short_mode) == nullptr);
+    }
+
+    // 一次發射裡兩個模式交替，幀與幀直接相接
+    Transmitter tx;
+    tx.set_callsign("N0CALL");
+    for (const auto& model : models) tx.set_model(model);
+    CHECK(tx.model_for(long_mode) == models[0].get() && tx.model_for(short_mode) == models[1].get());
+    const Mode* const sent[] = {&long_mode, &short_mode, &short_mode, &long_mode};
+    std::vector<float> signal;
+    for (const Mode* mode : sent) {
+        const std::vector<float> frame = tx.learned_frame(*mode, rgb);
+        CHECK_EQ(static_cast<int>(frame.size()), mode->frame_samples());
+        signal.insert(signal.end(), frame.begin(), frame.end());
+    }
+    std::vector<float> audio(3000, 0.0f);
+    audio.insert(audio.end(), signal.begin(), signal.end());
+    audio.insert(audio.end(), 6000, 0.0f);
+    sim::ChannelParams clean;
+    clean.add_noise = false;
+    sim::Channel channel(clean, link_util::mean_power(signal));
+    std::vector<float> received;
+    channel.process(audio, received);
+    auto receive = [&](std::initializer_list<std::size_t> which) {
+        Receiver rx;
+        for (std::size_t i : which) rx.set_model(models[i]);
+        return link_util::run_receiver(rx, received);
+    };
+
+    // 接收端兩個模型都有：四幀都有畫面，各用各的模型解
+    std::vector<RxFrame> frames = receive({0, 1});
+    CHECK_EQ(static_cast<int>(frames.size()), 4);
+    for (std::size_t i = 0; i < frames.size() && i < std::size(sent); ++i) {
+        const RxFrame& f = frames[i];
+        const ModelCase& expected = kCases[sent[i] == &long_mode ? 0 : 1];
+        CHECK(f.decoded && f.header_ok && f.is_learned && !f.model_missing);
+        CHECK_EQ(f.mode_id, sent[i]->id);
+        CHECK_EQ(f.sequence, static_cast<int>(i));
+        if (f.decoded) CHECK(test_images::psnr(f.rgb, rgb) > expected.clean[2] - 0.6);
+    }
+    // 接收端只有其中一個：另一個模式的幀照樣收得到、標頭也解得出來，只是沒有畫面
+    for (std::size_t only = 0; only < 2; ++only) {
+        frames = receive({only});
+        CHECK_EQ(static_cast<int>(frames.size()), 4);
+        for (std::size_t i = 0; i < frames.size() && i < std::size(sent); ++i) {
+            const RxFrame& f = frames[i];
+            const bool mine = sent[i]->learned_values == models[only]->value_count();
+            CHECK(f.header_ok && f.mode_id == sent[i]->id);
+            CHECK_EQ(f.decoded, mine);
+            CHECK_EQ(f.model_missing, !mine);
+        }
+    }
+    // 發射端只有其中一個：另一個模式編不出幀，幀序號不動；全部拿掉之後都編不出來
+    {
+        Transmitter one;
+        one.set_model(models[1]);
+        CHECK(one.learned_frame(long_mode, rgb).empty());
+        CHECK_EQ(one.sequence(), 0);
+        CHECK(!one.learned_frame(short_mode, rgb).empty());
+        CHECK_EQ(one.sequence(), 1);
+        one.set_model(nullptr);
+        CHECK(one.learned_frame(short_mode, rgb).empty());
+        CHECK_EQ(one.sequence(), 1);
+    }
 }
 
 }  // namespace
 
 int main() {
-    const std::string model_path = std::string(NBTV_MODEL_DIR) + "/learned_7776_v2.bin";
-    const std::vector<std::uint8_t> file = read_file(model_path);
-    if (file.empty()) {
-        std::printf("  找不到權重檔 %s，略過學習式編碼的測試\n", model_path.c_str());
-        return check::finish("learned");
+    std::vector<std::shared_ptr<const LearnedCodec>> models;
+    std::vector<std::vector<std::uint8_t>> files;
+    for (const ModelCase& model : kCases) {
+        const std::string model_path = std::string(NBTV_MODEL_DIR) + "/" + model.name + ".bin";
+        std::vector<std::uint8_t> file = read_file(model_path);
+        if (file.empty()) {
+            std::printf("  找不到權重檔 %s，略過模式 %d 的測試\n", model_path.c_str(), model.mode_id);
+            continue;
+        }
+        std::printf("  模式 %d（%s）\n", model.mode_id, model.name);
+        test_loader(model, file);
+        const std::shared_ptr<const LearnedCodec> codec = LearnedCodec::load(file);
+        if (codec == nullptr) continue;
+        test_against_pytorch(*codec, read_file(std::string(NBTV_TEST_DATA_DIR) + "/" + model.name + "_ref.bin"));
+        test_round_trip(model, *codec);
+        test_frame(model, *codec);
+        test_link(model, codec, file);
+        test_silhouette_fading(model, codec);
+        models.push_back(codec);
+        files.push_back(std::move(file));
     }
-    test_loader(file);
-    const std::shared_ptr<const LearnedCodec> codec = LearnedCodec::load(file);
-    if (codec != nullptr) {
-        test_against_pytorch(*codec, read_file(std::string(NBTV_TEST_DATA_DIR) + "/learned_7776_v2_ref.bin"));
-        test_round_trip(*codec);
-        test_frame(*codec);
-        test_link(codec, file);
-        test_silhouette_fading(codec);
-    }
+    if (models.size() == std::size(kCases)) test_two_models(models, files);
     return check::finish("learned");
 }

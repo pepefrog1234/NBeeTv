@@ -1,5 +1,5 @@
 // nbtv-learned：用學習式影像編碼把 96×72 的 PPM 編成通道值、加白雜訊、再解回來，印出畫質與花的時間。
-// 不經過數據機，只看「畫面 ↔ 通道值」這一段（等於理想的等化）；走完整收發鏈的是模式 11，用 nbtv-tx、nbtv-rx、nbtv-sim。
+// 不經過數據機，只看「畫面 ↔ 通道值」這一段（等於理想的等化）；走完整收發鏈的是模式 11 與 12，用 nbtv-tx、nbtv-rx、nbtv-sim。
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -9,6 +9,7 @@
 #include "args.hpp"
 #include "learned_codec.hpp"
 #include "model_file.hpp"
+#include "modes.hpp"
 #include "ppm.hpp"
 #include "rng.hpp"
 #include "types.hpp"
@@ -39,16 +40,21 @@ int main(int argc, char** argv) {
     if (args.positional.empty() || args.has("help")) {
         std::printf(
             "用法：nbtv-learned [選項] 影像.ppm [影像2.ppm …]\n"
-            "  --model 檔名    權重檔（預設 %s）\n"
+            "  --mode N        用哪個學習式模式的模型：11（2.72 秒）或 12（1.04 秒），預設 11\n"
+            "  --model 檔名    直接指定權重檔（預設是專案 models/ 裡給那個模式的）\n"
             "  --snr dB        加白雜訊的格點訊雜比；不給就不加雜訊\n"
             "  --seed N        雜訊的亂數種子（預設 1）\n"
             "  --out 檔名      解出來的畫面（PPM；只給一張影像時可用）\n"
             "  --values 檔名   編出來的通道值，float32、小端序（只給一張影像時可用）\n"
-            "影像必須是 96×72 的二進位 PPM，例如：ffmpeg -i 照片.jpg -vf scale=96:72 -pix_fmt rgb24 影像.ppm\n",
-            default_model_path().c_str());
+            "影像必須是 96×72 的二進位 PPM，例如：ffmpeg -i 照片.jpg -vf scale=96:72 -pix_fmt rgb24 影像.ppm\n");
         return args.has("help") ? 0 : 2;
     }
-    const std::string model_path = args.str("model", default_model_path());
+    const Mode* mode = find_mode(args.integer("mode", 11));
+    if (mode == nullptr || !mode->is_learned()) {
+        std::fprintf(stderr, "--mode 要是學習式模式的編號\n");
+        return 2;
+    }
+    const std::string model_path = args.str("model", default_model_path(mode->learned_values));
     std::vector<std::uint8_t> file;
     if (!read_file(model_path, file)) {
         std::fprintf(stderr, "讀不到權重檔 %s\n", model_path.c_str());

@@ -802,8 +802,9 @@ void Receiver::process_frame() {
         }
         // 和類比一樣，畫面本身不靠標頭；但只有確定這是一整幀才當成畫面（見下面類比的說明）。
         const bool whole = l.header_ok || (confirmed_ && (previous_ok || !tentative()) && intact);
-        // 沒有模型，或標頭說對方用的是另一份權重：解出來只會是雜訊，不交出畫面，只回報收到了一幀
-        const bool usable = model_ != nullptr && learned_model_fits(mode, *model_) && learned_model_matches(l, *model_);
+        // 沒有這個模式用的模型，或標頭說對方用的是另一份權重：解出來只會是雜訊，不交出畫面，只回報收到了一幀
+        const LearnedCodec* model = models_.find(mode);
+        const bool usable = model != nullptr && learned_model_matches(l, *model);
         frame.model_missing = whole && !usable;
         frame.decoded = whole && usable;
         if (frame.decoded) {
@@ -812,7 +813,7 @@ void Receiver::process_frame() {
             options.median_snr = tuning_.learned_median_snr;
             options.attenuate = tuning_.learned_attenuate;
             options.floor = tuning_.learned_floor;
-            const float told = learned_picture(*model_, l, options, frame.rgb);
+            const float told = learned_picture(*model, l, options, frame.rgb);
             if (trace_) std::fprintf(stderr, "[rx]   學習式：告訴解碼器的訊雜比 %.1f dB\n", told);
         }
         emit = whole || (confirmed_ && intact);

@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-#include "learned_codec.hpp"
+#include "learned_frame.hpp"
 #include "modes.hpp"
 
 namespace nbtv {
@@ -30,12 +30,14 @@ public:
     // 類比：rgb 是 96×72×3 的畫面。preview 不是空指標時，填入沒有雜訊時對方看到的畫面。
     std::vector<float> analog_frame(const Mode& mode, std::span<const std::uint8_t> rgb, std::vector<std::uint8_t>* preview = nullptr);
 
-    // 學習式模式用的模型。可以和接收機共用同一份；傳空指標表示拿掉。
-    void set_model(std::shared_ptr<const LearnedCodec> model) { model_ = std::move(model); }
-    const std::shared_ptr<const LearnedCodec>& model() const { return model_; }
+    // 學習式模式用的模型。每個模式用「實數個數和它相同」的那一個，所以要用幾個學習式模式就設定幾個；
+    // 個數相同的再設定一次會取代前一個。可以和接收機共用同一份；傳空指標表示全部拿掉。
+    void set_model(std::shared_ptr<const LearnedCodec> model) { models_.set(std::move(model)); }
+    // 這個模式會用的模型；沒有的話是空指標。
+    const LearnedCodec* model_for(const Mode& mode) const { return models_.find(mode); }
 
     // 學習式：rgb 是 96×72×3 的畫面。preview 不是空指標時，填入沒有雜訊時對方看到的畫面（要多跑一次解碼器）。
-    // 沒有模型、或模型和模式不合時回傳空的，幀序號不變。
+    // 沒有這個模式用的模型時回傳空的，幀序號不變。
     std::vector<float> learned_frame(const Mode& mode, std::span<const std::uint8_t> rgb, std::vector<std::uint8_t>* preview = nullptr);
 
 private:
@@ -44,7 +46,7 @@ private:
     std::string callsign_;
     float papr_db_ = 0.0f;
     int sequence_ = 0;
-    std::shared_ptr<const LearnedCodec> model_;
+    LearnedModels models_;
 };
 
 }  // namespace nbtv

@@ -60,7 +60,7 @@ struct Mode {
     }
 };
 
-inline constexpr std::array<Mode, 10> kModes{{
+inline constexpr std::array<Mode, 11> kModes{{
     // id  種類                酬載符號  乘數  位元/格  碼率    K
     {0, ModeKind::Digital, 200, 2503, 2, 1, 4, 3240},
     {1, ModeKind::Digital, 200, 2503, 2, 1, 2, 7200},
@@ -72,8 +72,10 @@ inline constexpr std::array<Mode, 10> kModes{{
     {8, ModeKind::Analog, 37, 464, 0, 0, 0, 0},
     {9, ModeKind::Analog, 100, 1255, 0, 0, 0, 0},
     {10, ModeKind::Analog, 200, 2509, 0, 0, 0, 0},
-    // 學習式（實驗中）：幀的安排和模式 9 相同，只是實數由類神經網路產生（見 learned_frame.hpp）。
+    // 學習式（實驗中）：幀的安排和類比相同（11 比照模式 9，12 比照模式 8），只是實數由類神經網路產生
+    // （見 learned_frame.hpp）。每個模式各有自己的模型，實數的個數是「潛在通道數 × 9 × 12」：72 與 24 個通道。
     {11, ModeKind::Learned, 100, 1255, 0, 0, 0, 0, 7776},
+    {12, ModeKind::Learned, 37, 464, 0, 0, 0, 0, 2592},
 }};
 
 constexpr const Mode* find_mode(int id) {

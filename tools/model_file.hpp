@@ -8,8 +8,11 @@
 
 namespace nbtv::tools {
 
-// 沒有用 --model 指定時用的權重檔（專案的 models/ 底下）
-inline std::string default_model_path() { return std::string(NBTV_MODEL_DIR) + "/learned_7776_v2.bin"; }
+// 沒有用 --model 指定時用的權重檔（專案的 models/ 底下）。每個學習式模式各一份，檔名帶著它的實數個數
+// （模式的 learned_values）：模式 11 是 learned_7776_v2.bin，模式 12 是 learned_2592_v2.bin。
+inline std::string default_model_path(int values) {
+    return std::string(NBTV_MODEL_DIR) + "/learned_" + std::to_string(values) + "_v2.bin";
+}
 
 inline bool read_file(const std::string& path, std::vector<std::uint8_t>& bytes) {
     std::FILE* f = std::fopen(path.c_str(), "rb");
