@@ -1,13 +1,11 @@
-// nbtv-rx：解 WAV 檔裡的訊號，把收到的畫面存成 PPM（數位模式另存標準的 .avif）。
+// nbtv-rx：解 WAV 檔裡的訊號，把收到的畫面存成 PPM。
 #include <cstdio>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "args.hpp"
-#include "av1_payload.hpp"
 #include "dsp.hpp"
-#include "image_codec.hpp"
 #include "learned_codec.hpp"
 #include "model_file.hpp"
 #include "modes.hpp"
@@ -24,8 +22,8 @@ int main(int argc, char** argv) {
         std::printf(
             "用法：nbtv-rx [選項] 錄音.wav\n"
             "  --out-dir 目錄   收到的畫面存到這裡（預設不存檔，只列出結果）\n"
-            "  --model 檔名     學習式模式的權重檔，取代專案 models/ 裡給同一個模式的那一份\n"
-            "                   （沒有給的話每個學習式模式都用 models/ 裡的，找不到就不解那個模式的畫面）\n"
+            "  --model 檔名     權重檔，取代專案 models/ 裡給同一個模式的那一份\n"
+            "                   （沒有給的話每個模式都用 models/ 裡的，找不到就不解那個模式的畫面）\n"
             "  --trace          印出同步與解碼的過程\n"
             "WAV 的取樣率必須是 12000 或 48000。\n");
         return args.has("help") ? 0 : 2;
@@ -47,7 +45,7 @@ int main(int argc, char** argv) {
     const std::string dir = args.str("out-dir", "");
     Receiver rx;
     rx.set_trace(args.has("trace"));
-    // 每個學習式模式各一份模型：先載入專案 models/ 裡的，--model 指定的那一份再取代實數個數與寬度都相同的
+    // 每個模式各一份模型：先載入專案 models/ 裡的，--model 指定的那一份再取代實數個數與寬度都相同的
     auto load_model = [&](const std::string& path, bool required) {
         std::vector<std::uint8_t> bytes;
         std::string error = "讀不到檔案";
@@ -58,9 +56,7 @@ int main(int argc, char** argv) {
         else if (required || !bytes.empty()) std::fprintf(stderr, "%s：%s\n", path.c_str(), error.c_str());
         return loaded || !required;
     };
-    for (const Mode& m : kModes) {
-        if (m.is_learned()) load_model(default_model_path(m.id), false);
-    }
+    for (const Mode& m : kModes) load_model(default_model_path(m.id), false);
     if (args.has("model") && !load_model(args.str("model", ""), true)) return 1;
     int index = 0, good = 0;
     auto drain = [&] {
@@ -68,26 +64,9 @@ int main(int argc, char** argv) {
         while (rx.poll(f)) {
             const double at = static_cast<double>(f.start_sample) / kSampleRate;
             std::printf("%7.2f 秒  模式 %2d  %s  呼號 %-9s 序號 %3d  訊雜比 %5.1f dB  頻偏 %+6.1f Hz", at, f.mode_id,
-                        f.decoded ? "成功" : "失敗", f.header_ok ? f.callsign.c_str() : "?", f.sequence, f.snr_db, f.freq_offset_hz);
-            std::vector<std::uint8_t> rgb;
-            if (f.decoded && f.is_digital) {
-                const std::size_t n = av1_payload_length(f.image_data);
-                std::printf("  影像 %zu 位元組", n);
-                rgb.resize(kImageRgbBytes);
-                if (!image_decode(f.image_data, rgb)) rgb.clear();
-                if (!dir.empty()) {
-                    const auto file = avif_from_payload(f.image_data);
-                    const std::string path = dir + "/frame_" + std::to_string(index) + ".avif";
-                    if (FILE* out = std::fopen(path.c_str(), "wb")) {
-                        std::fwrite(file.data(), 1, file.size(), out);
-                        std::fclose(out);
-                    }
-                }
-            } else if (f.decoded) {
-                rgb = f.rgb;
-            }
+                        f.decoded ? "有畫面" : "沒畫面", f.header_ok ? f.callsign.c_str() : "?", f.sequence, f.snr_db, f.freq_offset_hz);
             if (f.model_missing) std::printf("  沒有模型，或權重和對方的不同");
-            if (!dir.empty() && !rgb.empty()) write_ppm(dir + "/frame_" + std::to_string(index) + ".ppm", rgb, kImageWidth, kImageHeight);
+            if (!dir.empty() && f.decoded) write_ppm(dir + "/frame_" + std::to_string(index) + ".ppm", f.rgb, kImageWidth, kImageHeight);
             std::printf("\n");
             good += f.decoded ? 1 : 0;
             ++index;
@@ -97,6 +76,6 @@ int main(int argc, char** argv) {
         rx.push(std::span<const float>(audio).subspan(pos, std::min<std::size_t>(1200, audio.size() - pos)));
         drain();
     }
-    std::printf("共 %d 幀，解出 %d 幀\n", index, good);
+    std::printf("共 %d 幀，%d 幀有畫面\n", index, good);
     return 0;
 }

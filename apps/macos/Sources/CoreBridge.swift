@@ -8,32 +8,19 @@ enum NBTV {
     static let imageWidth = 96
     static let imageHeight = 72
     static let rgbBytes = imageWidth * imageHeight * 3   // 20736
-    static let maxImageBytes = 1473
     static let spectrumBins = 257                        // 0–3000 Hz
     static let spectrumMaxHz = 3000.0
-    static let avifOverhead = 277
     static let sampleRate = 48000                        // 外殼與核心之間一律用 48 kHz
-    static let totalCoefficients = 20736                 // 類比模式三個平面的係數總數
     static let bandLowHz = 352.0                         // 訊號頻帶
     static let bandHighHz = 2648.0
 
     static var version: String { String(cString: nbtv_version_string()) }
-    static var hasImageCodec: Bool { nbtv_has_image_codec() != 0 }
 
     /// 把輸入整理成可以傳送的呼號（轉大寫、去掉不能用的字元、最多 9 個字元）。
     static func normalizeCallsign(_ text: String) -> String {
         var buffer = [CChar](repeating: 0, count: 16)
         _ = nbtv_callsign_normalize(text, &buffer)
         return String(cString: buffer)
-    }
-
-    /// 影像酬載 → 標準的 .avif 檔。
-    static func avifFile(fromPayload payload: Data) -> Data? {
-        var out = [UInt8](repeating: 0, count: payload.count + avifOverhead)
-        let n = payload.withUnsafeBytes { src in
-            nbtv_avif_from_payload(src.bindMemory(to: UInt8.self).baseAddress, Int32(payload.count), &out, Int32(out.count))
-        }
-        return n > 0 ? Data(out[0..<Int(n)]) : nil
     }
 
     /// 96×72×3 的 RGB → CGImage。
@@ -46,7 +33,7 @@ enum NBTV {
     }
 }
 
-/// 學習式模式（模式 11 到 14，實驗中）用的模型：每個模式各一份權重，放在 app 的 Resources 裡，第一次用到時載入
+/// 各個模式用的模型（畫面的編解碼是類神經網路）：每個模式各一份權重，放在 app 的 Resources 裡，第一次用到時載入
 /// （小的約 0.1 秒，加寬的約 0.35 秒），之後所有的發射機、接收機共用；核心載入之後不會再改動它們，所以可以同時在不同的佇列上使用。
 enum LearnedModel {
     /// Resources 裡的權重檔（不含副檔名）。檔名就是模型的名稱：「訓練完成的年月日-當天第幾個完成的」。
@@ -78,141 +65,82 @@ enum LearnedModel {
 
 /// 一個傳輸模式，資料取自 nbtv_mode_at()。
 struct ModeInfo: Identifiable, Hashable {
-    enum Kind { case digital, analog, learned }
-
     let id: Int
-    let kind: Kind
     let frameSeconds: Double
     let frameSymbols: Int
     let payloadSymbols: Int
-    let bitsPerCell: Int
-    let rateNum: Int
-    let rateDen: Int
-    let imageBytes: Int
-    let analogCoefficients: Int
-    let learnedValues: Int
-    let learnedWidth: Int  // 學習式：模型第一層的通道數
-    var modelName = ""  // 學習式：用的模型的名稱（訓練完成的年月日-當天第幾個），例如「261123-1」
-    var quality = ""  // 類比與學習式：粗略／中等／細緻，依每幀的長短；比最短的類比模式還短的學習式模式是「快速」
-    var largeModel = false  // 學習式：用的是加寬的大型網路（運算量約四倍）
+    let learnedValues: Int  // 一張畫面變成幾個實數
+    let learnedWidth: Int   // 模型第一層的通道數
+    var modelName = ""      // 用的模型的名稱（訓練完成的年月日-當天第幾個），例如「261123-1」
+    var quality = ""        // 快速／粗略／中等／細緻，依每幀的長短
+    var largeModel = false  // 用的是加寬的大型網路（運算量約四倍）
 
-    var isDigital: Bool { kind == .digital }
-    var isLearned: Bool { kind == .learned }
+    /// 「模式 11」
+    var name: String { "模式 \(id)" }
 
-    /// 「數位 1」「類比 9」「學習式 11」
-    var name: String {
-        switch kind {
-        case .digital: return "數位 \(id)"
-        case .analog: return "類比 \(id)"
-        case .learned: return "學習式 \(id)"
-        }
-    }
+    /// 「中等」
+    var detail: String { quality }
 
-    /// 「QPSK 1/2」或「中等」
-    var detail: String {
-        switch kind {
-        case .digital:
-            let modulation = bitsPerCell == 2 ? "QPSK" : "\(1 << bitsPerCell)QAM"
-            return "\(modulation) \(rateNum)/\(rateDen)"
-        case .analog, .learned: return quality
-        }
-    }
-
-    /// 「數位 1 · QPSK 1/2」
+    /// 「模式 11 · 中等」
     var label: String { detail.isEmpty ? name : "\(name) · \(detail)" }
 
-    /// 「5.39 秒」
+    /// 「2.72 秒」
     var secondsText: String { String(format: "%.2f 秒", frameSeconds) }
 
-    /// 「888 位元組」、「35% 係數」、「類神經網路」或「大型網路」
-    var contentText: String {
-        switch kind {
-        case .digital: return "\(imageBytes) 位元組"
-        case .analog:
-            let percent = Int((Double(analogCoefficients) / Double(NBTV.totalCoefficients) * 100).rounded())
-            return "\(percent)% 係數"
-        case .learned: return largeModel ? "大型網路" : "類神經網路"
-        }
-    }
+    /// 「類神經網路」或「大型網路」
+    var contentText: String { largeModel ? "大型網路" : "類神經網路" }
 
     /// 右側欄模式鈕下面的說明
     var summary: String {
-        switch kind {
-        case .digital: return "每張 \(secondsText) · 影像上限 \(imageBytes) 位元組"
-        case .analog: return "每張 \(secondsText) · 傳 \(contentText)"
-        case .learned:
-            return "每張 \(secondsText) · \(largeModel ? "大型的類神經網路" : "類神經網路")編碼，實驗中"
-                + (modelName.isEmpty ? "" : " · 模型 \(modelName)")
-        }
+        "每張 \(secondsText) · \(largeModel ? "大型的類神經網路" : "類神經網路")編碼，實驗中" + (modelName.isEmpty ? "" : " · 模型 \(modelName)")
+    }
+
+    /// 依每幀的酬載符號數取的名字：愈長的幀放得下愈多的值，畫面愈細，但每張也愈久。
+    /// 目前的模式是 23（快速）、37（粗略）、100（中等）個符號。
+    static func qualityName(payloadSymbols: Int) -> String {
+        payloadSymbols < 30 ? "快速" : payloadSymbols < 60 ? "粗略" : payloadSymbols < 150 ? "中等" : "細緻"
     }
 }
 
 enum Modes {
+    /// app 裡有模型的模式，依核心模式表的順序。少了哪一份權重檔，那個模式就不在裡面（選單不列、也不能發射）。
     static let all: [ModeInfo] = {
         var list: [ModeInfo] = []
         var info = nbtv_mode_info()
         for index in 0..<nbtv_mode_count() where nbtv_mode_at(index, &info) == 0 {
-            let kind: ModeInfo.Kind
-            if info.kind == NBTV_MODE_DIGITAL {
-                kind = .digital
-            } else if info.kind == NBTV_MODE_ANALOG {
-                kind = .analog
-            } else if info.kind == NBTV_MODE_LEARNED {
-                // 學習式模式要有它的模型才能用；app 裡沒有那一份權重檔的話就不列出來
-                guard LearnedModel.handle(values: Int(info.learned_values), width: Int(info.learned_width)) != nil else { continue }
-                kind = .learned
-            } else {
-                continue  // 這一版不認得的種類
-            }
-            list.append(ModeInfo(id: Int(info.id), kind: kind, frameSeconds: info.frame_seconds,
-                                 frameSymbols: Int(info.frame_symbols), payloadSymbols: Int(info.payload_symbols),
-                                 bitsPerCell: Int(info.bits_per_cell), rateNum: Int(info.code_rate_num), rateDen: Int(info.code_rate_den),
-                                 imageBytes: Int(info.image_bytes), analogCoefficients: Int(info.analog_coefficients),
-                                 learnedValues: Int(info.learned_values), learnedWidth: Int(info.learned_width)))
+            let values = Int(info.learned_values), width = Int(info.learned_width)
+            guard LearnedModel.handle(values: values, width: width) != nil else { continue }
+            list.append(ModeInfo(id: Int(info.id), frameSeconds: info.frame_seconds, frameSymbols: Int(info.frame_symbols),
+                                 payloadSymbols: Int(info.payload_symbols), learnedValues: values, learnedWidth: width,
+                                 modelName: LearnedModel.name(values: values, width: width) ?? "",
+                                 quality: ModeInfo.qualityName(payloadSymbols: Int(info.payload_symbols))))
         }
-        // 類比模式依每幀的長短命名；學習式模式的幀比照類比，和哪個類比模式一樣長就用它的名字
-        let names = ["粗略", "中等", "細緻"]
-        let analogLengths = list.filter { $0.kind == .analog }.map(\.payloadSymbols).sorted()
-        for i in list.indices where list[i].kind != .digital {
-            if let rank = analogLengths.firstIndex(of: list[i].payloadSymbols), analogLengths.count == names.count {
-                list[i].quality = names[rank]
-            } else if list[i].kind == .learned, let shortest = analogLengths.first, list[i].payloadSymbols < shortest {
-                list[i].quality = "快速"  // 模式 14：每張 0.67 秒，沒有一樣長的類比模式
-            }
-        }
-        // 學習式模式：記下用的是哪個模型；模型比其他學習式模式寬的標成「大型」（模式 13、14）
-        let narrowest = list.filter { $0.kind == .learned }.map(\.learnedWidth).min() ?? 0
-        for i in list.indices where list[i].kind == .learned {
-            list[i].largeModel = list[i].learnedWidth > narrowest
-            list[i].modelName = LearnedModel.name(values: list[i].learnedValues, width: list[i].learnedWidth) ?? ""
-        }
+        // 模型比其他模式寬的標成「大型」（模式 13、14）
+        let narrowest = list.map(\.learnedWidth).min() ?? 0
+        for i in list.indices { list[i].largeModel = list[i].learnedWidth > narrowest }
         return list
     }()
 
-    static var digital: [ModeInfo] { all.filter(\.isDigital) }
-    static var analog: [ModeInfo] { all.filter { $0.kind == .analog } }
-    /// 依每幀的長短排，和類比那一組一樣由快到慢；一樣長的，模型小的在前（模式編號是 14、12、11、13）
-    static var learned: [ModeInfo] {
-        all.filter(\.isLearned).sorted { ($0.payloadSymbols, $0.learnedWidth, $0.id) < ($1.payloadSymbols, $1.learnedWidth, $1.id) }
+    /// 選單的順序：依每幀的長短由快到慢；一樣長的，模型小的在前（模式編號是 14、12、11、13）
+    static let menuOrder: [ModeInfo] = all.sorted {
+        ($0.payloadSymbols, $0.learnedWidth, $0.id) < ($1.payloadSymbols, $1.learnedWidth, $1.id)
     }
     static func find(_ id: Int) -> ModeInfo? { all.first { $0.id == id } }
-    static let defaultID = 1
+    /// 沒有選過（或原本選的模式已經不存在）時用的模式：模式 11；app 裡沒有它的模型的話，用手上有的第一個。
+    static let defaultID: Int = find(11)?.id ?? all.first?.id ?? 11
 }
 
-/// 接收機解出來的一幀。
+/// 接收機交出來的一幀。
 struct DecodedFrame {
     let modeID: Int
-    let isDigital: Bool
-    let isLearned: Bool
-    let decoded: Bool
-    let modelMissing: Bool  // 學習式：收到了一幀，但權重和對方的不同（或 app 裡沒有權重檔），所以沒有畫面
+    let decoded: Bool       // 有畫面
+    let modelMissing: Bool  // 收到了一幀，但權重和對方的不同（或 app 裡沒有那個模式的權重檔），所以沒有畫面
     let headerOK: Bool
     let callsign: String
     let sequence: Int
     let snrDb: Double
     let offsetHz: Double
-    let rgb: Data?       // 有畫面時是 96×72×3
-    let payload: Data?   // 數位：影像酬載（AV1 資料）
+    let rgb: Data?          // 有畫面時是 96×72×3
 }
 
 final class CoreReceiver {
@@ -245,21 +173,17 @@ final class CoreReceiver {
 
     func pollFrame() -> DecodedFrame? {
         guard nbtv_rx_poll_frame(handle, frame) == 1 else { return nil }
-        let hasImage = frame.pointee.has_image != 0
-        let imageBytes = Int(frame.pointee.image_bytes)
+        let decoded = frame.pointee.decoded != 0
         return DecodedFrame(
             modeID: Int(frame.pointee.mode_id),
-            isDigital: frame.pointee.kind == NBTV_MODE_DIGITAL,
-            isLearned: frame.pointee.kind == NBTV_MODE_LEARNED,
-            decoded: frame.pointee.decoded != 0,
+            decoded: decoded,
             modelMissing: frame.pointee.model_missing != 0,
             headerOK: frame.pointee.header_ok != 0,
             callsign: String(cString: nbtv_shim_frame_callsign(frame)),
             sequence: Int(frame.pointee.sequence),
             snrDb: Double(frame.pointee.snr_db),
             offsetHz: Double(frame.pointee.freq_offset_hz),
-            rgb: hasImage ? Data(bytes: nbtv_shim_frame_rgb(frame), count: NBTV.rgbBytes) : nil,
-            payload: imageBytes > 0 ? Data(bytes: nbtv_shim_frame_image_data(frame), count: imageBytes) : nil)
+            rgb: decoded ? Data(bytes: nbtv_shim_frame_rgb(frame), count: NBTV.rgbBytes) : nil)
     }
 }
 
@@ -269,8 +193,6 @@ struct EncodedFrame {
     let preview: Data      // 沒有雜訊時對方看到的畫面，96×72×3
     let modeID: Int
     let sequence: Int
-    let imageBytes: Int    // 數位：壓縮後的位元組數
-    let coefficients: Int  // 類比：傳送的係數個數
 }
 
 final class CoreTransmitter {
@@ -288,10 +210,8 @@ final class CoreTransmitter {
     func setMode(_ id: Int) -> Bool { nbtv_tx_set_mode(handle, Int32(id)) == 0 }
     func setCallsign(_ callsign: String) { nbtv_tx_set_callsign(handle, callsign) }
     var frameSamples: Int { Int(nbtv_tx_frame_samples(handle)) }
-    /// 影像編碼器的速度檔 0（最慢、畫質最好）到 10；負值是核心的預設值。
-    func setEncoderSpeed(_ speed: Int) { nbtv_tx_set_encoder_speed(handle, Int32(speed)) }
 
-    /// 把一張 96×72 的畫面做成一幀音訊。失敗（例如畫面壓不進去、學習式模式沒有模型）回傳 nil。
+    /// 把一張 96×72 的畫面做成一幀音訊。失敗（目前的模式沒有模型）回傳 nil。
     func encode(rgb: Data) -> EncodedFrame? {
         guard rgb.count == NBTV.rgbBytes else { return nil }
         let count = frameSamples
@@ -302,8 +222,7 @@ final class CoreTransmitter {
             nbtv_tx_encode_image(handle, src.bindMemory(to: UInt8.self).baseAddress, &samples, Int32(count), &preview, &info)
         }
         guard Int(written) == count else { return nil }
-        return EncodedFrame(samples: samples, preview: Data(preview), modeID: Int(info.mode_id), sequence: Int(info.sequence),
-                            imageBytes: Int(info.image_bytes), coefficients: Int(info.coefficients))
+        return EncodedFrame(samples: samples, preview: Data(preview), modeID: Int(info.mode_id), sequence: Int(info.sequence))
     }
 
     /// 取消最近編好、但決定不送的那一幀：發射機回到編它之前的狀態（幀序號、重取樣濾波器）。

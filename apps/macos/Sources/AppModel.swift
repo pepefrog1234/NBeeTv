@@ -62,8 +62,6 @@ final class AppModel: ObservableObject {
     struct ReceivedFrame: Identifiable {
         let id = UUID()
         let image: CGImage
-        let payload: Data?   // 數位：影像酬載，存檔時還原成 .avif
-        let isDigital: Bool
         let modeID: Int
         let callsign: String
         let sequence: Int    // 幀序號；不知道時是 -1
@@ -97,7 +95,6 @@ final class AppModel: ObservableObject {
     @Published var txFrameNumber = 0
     @Published var txFrameProgress = 0.0
     @Published var txPreview: CGImage?
-    @Published var txBytes: Int?
 
     // 發射來源
     @Published var sourcePreview: CGImage?
@@ -141,7 +138,6 @@ final class AppModel: ObservableObject {
     private struct TransmitDisplay {
         let number: Int
         let preview: CGImage?
-        let bytes: Int?
         let progress: Double
         let sent: Int
         let elapsed: Double
@@ -163,7 +159,6 @@ final class AppModel: ObservableObject {
         let end: Int64
         let samples: [Float]
         let preview: CGImage?
-        let bytes: Int?
         let number: Int
     }
     private let transmitter = CoreTransmitter()  // 只在 txQueue 上使用
@@ -187,7 +182,7 @@ final class AppModel: ObservableObject {
     static let prepareLeadSeconds = 0.6  // 目前這張剩多久時開始準備下一張（至少）
     /// 最近準備一張（取畫面＋編碼）花了多久；偶爾特別慢的一次會讓它維持高一陣子。
     private var txPrepareSeconds = 0.0
-    /// 目前這張剩多久時開始準備下一張。數位模式的影像編碼在慢的機器上可能要大半秒，
+    /// 目前這張剩多久時開始準備下一張。大型網路的編碼加預覽在慢的機器上可能要大半秒，
     /// 所以照實際花的時間提早，下一張才趕得及在目前這張播完之前排進去。
     private var prepareLead: Double { max(AppModel.prepareLeadSeconds, txPrepareSeconds * 1.5 + 0.25) }
     /// 「最近收到」最多留幾張（都在記憶體裡，一張約 23 KB）；超過就丟掉最舊的。
@@ -201,10 +196,6 @@ final class AppModel: ObservableObject {
         // 設定改了，用到設定的畫面也要重畫
         settings.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }.store(in: &cancellables)
         guard live, let engine else { return }
-        // 除錯用：指定影像編碼器的速度檔（預設由核心決定），用來在快的機器上模擬編碼很慢的情形
-        if let speed = ProcessInfo.processInfo.environment["NBTV_DEBUG_ENCODER_SPEED"].flatMap({ Int($0) }) {
-            txQueue.async { self.transmitter.setEncoderSpeed(speed) }
-        }
 
         engine.onRxUpdate = { [weak self] update in self?.queuedUpdates.append(update) }
         engine.onMonitorRows = { [weak self] rows in self?.queuedMonitorRows += rows }
@@ -366,13 +357,13 @@ final class AppModel: ObservableObject {
 
     func add(_ frame: DecodedFrame, time: Date) {
         guard frame.decoded, let rgb = frame.rgb, let image = NBTV.image(fromRGB: rgb) else {
-            // 學習式模式：幀收到了，但對方用的是另一份權重（或 app 裡沒有權重檔）
+            // 幀收到了，但對方用的是另一份權重（或 app 裡沒有那個模式的權重檔）
             lastResult = frame.modelMissing ? .modelMissing : .failed
             return
         }
         lastResult = .ok
         if frame.headerOK, !frame.callsign.isEmpty { syncCallsign = frame.callsign }
-        history.insert(ReceivedFrame(image: image, payload: frame.payload, isDigital: frame.isDigital, modeID: frame.modeID,
+        history.insert(ReceivedFrame(image: image, modeID: frame.modeID,
                                      callsign: frame.headerOK ? frame.callsign : "", sequence: frame.headerOK ? frame.sequence : -1, time: time,
                                      snrDb: frame.snrDb),
                        at: 0)
@@ -398,16 +389,13 @@ final class AppModel: ObservableObject {
 
     func isDisplayed(_ frame: ReceivedFrame) -> Bool { displayedFrame?.id == frame.id }
 
-    /// 一張收到的畫面存成檔案時的內容與檔名：數位模式把收到的影像酬載包成標準的 .avif（不重新壓縮），類比模式存 PNG。
+    /// 一張收到的畫面存成檔案時的內容與檔名：96×72 的 PNG，像素和收到的畫面完全相同。
     static func exportFile(for frame: ReceivedFrame) -> (data: Data, name: String)? {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyyMMdd-HHmmss"
         let call = frame.callsign.isEmpty ? "unknown" : frame.callsign.replacingOccurrences(of: "/", with: "-")
         let base = "NBTV-\(call)-\(formatter.string(from: frame.time))"
-        if frame.isDigital, let payload = frame.payload, let avif = NBTV.avifFile(fromPayload: payload) {
-            return (avif, base + ".avif")
-        }
         guard let png = NSBitmapImageRep(cgImage: frame.image).representation(using: .png, properties: [:]) else { return nil }
         return (png, base + ".png")
     }
@@ -582,7 +570,6 @@ final class AppModel: ObservableObject {
         if txFrameNumber != display.number || txPreview == nil {
             txFrameNumber = display.number
             txPreview = display.preview
-            txBytes = display.bytes
         }
         if txFramesSent != display.sent { txFramesSent = display.sent }
         txFrameProgress = display.progress
@@ -670,7 +657,6 @@ final class AppModel: ObservableObject {
         txFrameNumber = 0
         txFrameProgress = 0
         txPreview = nil
-        txBytes = nil
         onAir.removeAll()
         txNextNumber = 1
         txPreparing = true
@@ -743,7 +729,7 @@ final class AppModel: ObservableObject {
     private func firstFrameReady(_ frame: EncodedFrame?, session: Int) {
         guard session == txSession, txPhase == .starting else { return }
         guard let frame else {
-            failTransmit(NBTV.hasImageCodec ? "畫面編碼失敗" : "這個建置沒有影像編碼器，數位模式不能發射")
+            failTransmit(Modes.find(txModeID) == nil ? "app 裡沒有這個模式的模型，不能發射" : "畫面編碼失敗")
             return
         }
         DebugTap.log("第一張編好（\(frame.samples.count) 個取樣），按下 PTT（\(settings.pttMode.rawValue)）")
@@ -835,9 +821,8 @@ final class AppModel: ObservableObject {
                                 txNextNumber, frame.modeID, frame.samples.count, peak, bad ? "（含 NaN 或無限大！）" : "",
                                 Double(engine.output.queuedSamples) / rate, Double(engine.output.playedSamples) / rate, engine.output.underruns))
         }
-        let digital = Modes.find(frame.modeID)?.isDigital ?? true
         onAir.append(OnAirFrame(start: start, end: txEnd, samples: frame.samples, preview: NBTV.image(fromRGB: frame.preview),
-                                bytes: digital ? frame.imageBytes : nil, number: txNextNumber))
+                                number: txNextNumber))
         txNextNumber += 1
         txPreparing = false
         return true
@@ -871,7 +856,7 @@ final class AppModel: ObservableObject {
         // 目前正在播的那一張（還在開頭的靜音時是第一張）。這裡只記下來，畫面上的數字由 uiTick 更新。
         if let current = onAir.last(where: { $0.start <= position }) ?? onAir.first {
             let rate = Double(NBTV.sampleRate)
-            txDisplay = TransmitDisplay(number: current.number, preview: current.preview, bytes: current.bytes,
+            txDisplay = TransmitDisplay(number: current.number, preview: current.preview,
                                         progress: Double(max(0, min(position, current.end) - current.start)) / rate,
                                         sent: position >= current.end ? current.number : current.number - 1,
                                         elapsed: max(0, Double(position - txLead) / rate))

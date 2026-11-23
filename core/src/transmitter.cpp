@@ -1,45 +1,15 @@
 #include "transmitter.hpp"
 
-#include <cassert>
-
-#include "analog_frame.hpp"
-#include "digital_frame.hpp"
+#include "frame_header.hpp"
 #include "learned_frame.hpp"
 #include "ofdm_tx.hpp"
 
 namespace nbtv {
 
-float Transmitter::papr_for(const Mode& mode) const {
-    if (papr_db_ == 0.0f) return default_papr_db(mode);
-    return papr_db_ < 0.0f ? 0.0f : papr_db_;
-}
-
-std::vector<float> Transmitter::digital_frame(const Mode& mode, std::span<const std::uint8_t> image_data, int image_format) {
-    assert(mode.is_digital());
-    DigitalHeader header;
-    header.image_format = image_format;
-    header.sequence = sequence_;
-    header.callsign = callsign_;
-    sequence_ = (sequence_ + 1) & 0xFF;
-    return ofdm_modulate(mode, digital_encode(mode, header, image_data), papr_for(mode));
-}
-
-std::vector<float> Transmitter::analog_frame(const Mode& mode, std::span<const std::uint8_t> rgb, std::vector<std::uint8_t>* preview) {
-    assert(mode.is_analog());
-    AnalogHeader header;
-    header.sequence = sequence_;
-    header.callsign = callsign_;
-    sequence_ = (sequence_ + 1) & 0xFF;
-    AnalogEncoded enc = analog_encode(mode, header, rgb);
-    if (preview != nullptr) *preview = std::move(enc.preview);
-    return ofdm_modulate(mode, enc.cells, papr_for(mode));
-}
-
 std::vector<float> Transmitter::learned_frame(const Mode& mode, std::span<const std::uint8_t> rgb, std::vector<std::uint8_t>* preview) {
-    assert(mode.is_learned());
     const LearnedCodec* model = models_.find(mode);
     if (model == nullptr) return {};
-    AnalogHeader header;
+    FrameHeader header;
     header.sequence = sequence_;
     header.callsign = callsign_;
     std::vector<float> values;
@@ -50,7 +20,8 @@ std::vector<float> Transmitter::learned_frame(const Mode& mode, std::span<const 
         preview->resize(static_cast<std::size_t>(kImageRgbBytes));
         model->decode(values, kLearnedMaxSnrDb, *preview);
     }
-    return ofdm_modulate(mode, cells, papr_for(mode));
+    const float papr_db = papr_db_ == 0.0f ? kDefaultPaprDb : papr_db_ < 0.0f ? 0.0f : papr_db_;
+    return ofdm_modulate(mode, cells, papr_db);
 }
 
 }  // namespace nbtv

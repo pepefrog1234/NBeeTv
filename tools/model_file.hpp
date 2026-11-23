@@ -1,4 +1,4 @@
-// 命令列工具共用：讀入學習式模式的權重檔。
+// 命令列工具共用：讀入各個模式的權重檔。
 #pragma once
 
 #include <cstdint>
@@ -8,7 +8,7 @@
 
 namespace nbtv::tools {
 
-// 沒有用 --model 指定時用的權重檔（專案的 models/ 底下），每個學習式模式各一份。
+// 沒有用 --model 指定時用的權重檔（專案的 models/ 底下），每個模式各一份。
 // 權重檔以模型訓練完成的日期命名：「年月日-當天第幾個完成的」，例如 261123-1 是 2026 年 11 月 23 日完成的第一個。
 // 各個模型的來歷見 tools/learned/README.md 的一覽表。沒有這個模式的權重時回傳空字串。
 inline std::string default_model_path(int mode_id) {

@@ -1,25 +1,27 @@
 // 端對端測試共用：發射 → 通道模擬 → 接收。
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <map>
+#include <memory>
 #include <span>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "channel.hpp"
+#include "learned_codec.hpp"
+#include "model_file.hpp"
 #include "modes.hpp"
 #include "receiver.hpp"
-#include "rng.hpp"
+#include "test_images.hpp"
 #include "transmitter.hpp"
 
 namespace link_util {
 
 using namespace nbtv;
-
-inline std::vector<std::uint8_t> random_bytes(Rng& rng, int n) {
-    std::vector<std::uint8_t> v(static_cast<std::size_t>(n));
-    for (auto& b : v) b = static_cast<std::uint8_t>(rng.below(256));
-    return v;
-}
 
 inline double mean_power(std::span<const float> x) {
     double acc = 0.0;
@@ -27,13 +29,46 @@ inline double mean_power(std::span<const float> x) {
     return x.empty() ? 0.0 : acc / static_cast<double>(x.size());
 }
 
+// 專案 models/ 底下每個模式各一份的權重，依模式表的順序；讀不到的那一格是空指標。只讀一次。
+inline const std::vector<std::shared_ptr<const LearnedCodec>>& models() {
+    static const std::vector<std::shared_ptr<const LearnedCodec>> loaded = [] {
+        std::vector<std::shared_ptr<const LearnedCodec>> all;
+        for (const Mode& m : kModes) {
+            const std::string path = tools::default_model_path(m.id);
+            std::vector<std::uint8_t> bytes;
+            std::shared_ptr<const LearnedCodec> model;
+            if (!path.empty() && tools::read_file(path, bytes)) model = LearnedCodec::load(bytes);
+            if (model == nullptr && !path.empty()) std::printf("  找不到權重檔 %s\n", path.c_str());
+            all.push_back(std::move(model));
+        }
+        return all;
+    }();
+    return loaded;
+}
+
+// 模式表裡每個需要模型的模式都有權重：沒有的話，用到模型的測試只能略過
+inline bool have_models() {
+    const auto& all = models();
+    for (std::size_t i = 0; i < kModes.size(); ++i) {
+        if (!tools::default_model_path(kModes[i].id).empty() && all[i] == nullptr) return false;
+    }
+    return true;
+}
+
+template <typename Endpoint>  // Transmitter 或 Receiver
+void attach_models(Endpoint& endpoint) {
+    for (const auto& model : models()) {
+        if (model != nullptr) endpoint.set_model(model);
+    }
+}
+
 struct LinkResult {
     std::vector<RxFrame> frames;
     RxStatus final_status;
-    int decoded = 0;  // 解出來且內容正確的幀數
+    int decoded = 0;  // 有畫面、標頭也正確（呼號與模式都對）的幀數
 };
 
-// 把一段音訊（已含前後的靜音）送過通道再交給接收機；每次餵 chunk 個取樣，模擬音訊裝置的節奏。
+// 把一段音訊（已含前後的靜音）交給接收機；每次餵 chunk 個取樣，模擬音訊裝置的節奏。
 inline std::vector<RxFrame> run_receiver(Receiver& rx, std::span<const float> audio, std::size_t chunk = 1024) {
     std::vector<RxFrame> frames;
     for (std::size_t pos = 0; pos < audio.size(); pos += chunk) {
@@ -44,18 +79,15 @@ inline std::vector<RxFrame> run_receiver(Receiver& rx, std::span<const float> au
     return frames;
 }
 
-// 發射 count 幀數位模式（內容是亂數），前面空 lead 個取樣、後面空 tail 個取樣，過通道後接收。
-// 回傳每一幀送出的酬載，供比對。
-inline LinkResult run_digital_link(const Mode& mode, int count, const sim::ChannelParams& params, std::uint64_t seed,
-                                   int lead = 3000, int tail = 6000, bool noise_map = true) {
-    Rng rng(seed);
+// 發射 count 幀（同一張畫面），前面空 lead 個取樣、後面空 tail 個取樣，過通道後接收。
+inline LinkResult run_link(const Mode& mode, int count, std::span<const std::uint8_t> rgb, const sim::ChannelParams& params,
+                           int lead = 3000, int tail = 6000, bool noise_map = true) {
     Transmitter tx;
-    tx.set_callsign("BX4ACP");
-    std::vector<std::vector<std::uint8_t>> payloads;
+    tx.set_callsign("N0CALL");
+    attach_models(tx);
     std::vector<float> signal;
     for (int i = 0; i < count; ++i) {
-        payloads.push_back(random_bytes(rng, mode.image_bytes()));
-        const auto frame = tx.digital_frame(mode, payloads.back());
+        const auto frame = tx.learned_frame(mode, rgb);
         signal.insert(signal.end(), frame.begin(), frame.end());
     }
     const double power = mean_power(signal);
@@ -69,79 +101,56 @@ inline LinkResult run_digital_link(const Mode& mode, int count, const sim::Chann
 
     Receiver rx;
     rx.tuning().noise_map = noise_map;
+    attach_models(rx);
     LinkResult result;
     result.frames = run_receiver(rx, received);
     result.final_status = rx.status();
     for (const RxFrame& f : result.frames) {
-        if (!f.decoded || f.sequence < 0 || f.sequence >= count) continue;
-        if (f.image_data == payloads[static_cast<std::size_t>(f.sequence)] && f.callsign == "BX4ACP") ++result.decoded;
+        result.decoded += (f.decoded && f.header_ok && f.callsign == "N0CALL" && f.mode_id == mode.id) ? 1 : 0;
     }
     return result;
 }
 
-// 發射 count 幀類比模式（同一張畫面），過通道後接收；回傳收到的幀。
-inline LinkResult run_analog_link(const Mode& mode, int count, std::span<const std::uint8_t> rgb, const sim::ChannelParams& params,
-                                  int lead = 3000, int tail = 6000) {
-    Transmitter tx;
-    tx.set_callsign("BX4ACP");
-    std::vector<float> signal;
-    for (int i = 0; i < count; ++i) {
-        const auto frame = tx.analog_frame(mode, rgb);
-        signal.insert(signal.end(), frame.begin(), frame.end());
+// 有畫面的幀對原圖的平均 PSNR；一張也沒有時是 0
+inline double mean_psnr(const std::vector<RxFrame>& frames, const std::vector<std::uint8_t>& rgb) {
+    double total = 0.0;
+    int pictures = 0;
+    for (const RxFrame& f : frames) {
+        if (!f.decoded || f.rgb.size() != rgb.size()) continue;
+        total += test_images::psnr(f.rgb, rgb);
+        ++pictures;
     }
-    const double power = mean_power(signal);
-    std::vector<float> audio(static_cast<std::size_t>(lead), 0.0f);
-    audio.insert(audio.end(), signal.begin(), signal.end());
-    audio.insert(audio.end(), static_cast<std::size_t>(tail), 0.0f);
-    sim::Channel channel(params, power);
-    std::vector<float> received;
-    channel.process(audio, received);
-    Receiver rx;
-    LinkResult result;
-    result.frames = run_receiver(rx, received);
-    result.final_status = rx.status();
-    for (const RxFrame& f : result.frames) result.decoded += (f.decoded && f.header_ok) ? 1 : 0;
-    return result;
+    return pictures > 0 ? total / pictures : 0.0;
 }
 
-// 能量集中在少數幾個 DCT 係數的測試圖（漸層加棋盤格）。類比模式送這種畫面時，少數幾個格點會比其他的
-// 大上幾十倍，酬載聽起來像幾個單音——這是同步判定最容易被騙的內容。
-inline std::vector<std::uint8_t> test_pattern(int variant) {
-    std::vector<std::uint8_t> rgb(kImageRgbBytes);
-    for (int y = 0; y < kImageHeight; ++y) {
-        for (int x = 0; x < kImageWidth; ++x) {
-            const std::size_t i = static_cast<std::size_t>(3 * (y * kImageWidth + x));
-            rgb[i] = static_cast<std::uint8_t>((x * 2 + variant * 40) & 0xFF);
-            rgb[i + 1] = static_cast<std::uint8_t>((y * 3 + variant * 17) & 0xFF);
-            rgb[i + 2] = static_cast<std::uint8_t>(((x / 12 + y / 12) % 2) * 200 + 20);
+// 一次發射的音訊：frames 幀，畫面輪流用三張測試圖，呼號是 call。同樣的參數只編一次（編碼要跑類神經網路）。
+inline const std::vector<float>& burst(const Mode& mode, int frames, const std::string& call) {
+    static std::map<std::pair<std::pair<int, int>, std::string>, std::vector<float>> cache;
+    auto [slot, fresh] = cache.try_emplace({{mode.id, frames}, call});
+    if (fresh) {
+        Transmitter tx;
+        tx.set_callsign(call);
+        attach_models(tx);
+        for (int i = 0; i < frames; ++i) {
+            const auto f = tx.learned_frame(mode, test_images::load(test_images::kNames[i % 3]));
+            slot->second.insert(slot->second.end(), f.begin(), f.end());
         }
     }
-    return rgb;
+    return slot->second;
 }
 
 struct TwoBursts {
-    int first = 0;   // 第一次發射解出來的幀數
-    int second = 0;  // 第二次發射解出來的幀數
-    int bogus = 0;   // 不是任何一次發射送的、卻被當成畫面交出來的幀數
+    int first = 0;   // 第一次發射收到的幀數（有畫面、標頭正確）
+    int second = 0;  // 第二次發射收到的幀數
+    int bogus = 0;   // 不是任何一次發射送的、卻被當成畫面交出來的幀數（包括標頭對不上的畫面）
     int failed = 0;  // 「有一幀沒解出來」的通知次數
 };
 
 // 兩次發射（呼號不同）之間隔 gap 個取樣的靜音。cut > 0 時，第一次發射的最後一幀只送前 cut 個取樣（中途停止）。
-// 數位模式送亂數酬載，類比模式送 test_pattern。snr_db ≥ 90 表示不加雜訊，靜音就是完全的 0。
+// snr_db ≥ 90 表示不加雜訊，靜音就是完全的 0。
 inline TwoBursts run_two_bursts(const Mode& ma, int na, const Mode& mb, int nb, int gap, int cut, double snr_db, std::uint64_t seed) {
-    Rng rng(seed * 77 + 5);
-    auto burst = [&](const Mode& m, int frames, const char* call) {
-        Transmitter tx;
-        tx.set_callsign(call);
-        std::vector<float> signal;
-        for (int i = 0; i < frames; ++i) {
-            const auto f = m.is_digital() ? tx.digital_frame(m, random_bytes(rng, m.image_bytes())) : tx.analog_frame(m, test_pattern(i));
-            signal.insert(signal.end(), f.begin(), f.end());
-        }
-        return signal;
-    };
     std::vector<float> a = burst(ma, na, "AA1AAA");
-    const std::vector<float> b = burst(mb, nb, "BB2BBB");
+    const std::vector<float>& b = burst(mb, nb, "BB2BBB");
     const double power = mean_power(a);
     if (cut > 0) a.resize(a.size() - static_cast<std::size_t>(ma.frame_samples()) + static_cast<std::size_t>(cut));
 
@@ -160,6 +169,7 @@ inline TwoBursts run_two_bursts(const Mode& ma, int na, const Mode& mb, int nb, 
     channel.process(audio, received);
 
     Receiver rx;
+    attach_models(rx);
     TwoBursts result;
     for (const RxFrame& f : run_receiver(rx, received)) {
         const bool good = f.decoded && f.header_ok;

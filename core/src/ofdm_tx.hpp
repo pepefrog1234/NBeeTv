@@ -15,12 +15,10 @@ namespace nbtv {
 // 實數取樣的絕對值不會超過 1。
 inline constexpr float kTxHeadroom = 1.2f;
 
-// 各模式預設的包絡峰均比目標（dB）。削波門檻 = 平均包絡功率 + 這個值。
-// 草案把削波方式列為待定；這裡依各調變容得下的失真取值，test_ofdm 會量測削波後的調變誤差。
-constexpr float default_papr_db(const Mode& mode) {
-    if (!mode.is_digital()) return 7.0f;   // 類比沒有糾錯碼吸收失真，削得輕
-    return mode.bits_per_cell == 2 ? 5.0f : mode.bits_per_cell == 4 ? 6.0f : 7.0f;
-}
+// 預設的包絡峰均比目標（dB）。削波門檻 = 平均包絡功率 + 這個值。
+// 畫面的值沒有糾錯碼吸收失真，削波造成的誤差會直接變成畫面上的雜訊，所以削得輕；
+// test_frame 會量測削波後的調變誤差。
+inline constexpr float kDefaultPaprDb = 7.0f;
 
 // 把一幀調變成 mode.frame_samples() 個取樣：S0、S1、酬載符號，各含循環字首。
 // data_cells 是 mode.data_cells() 個資料格，依傳送順序排列。

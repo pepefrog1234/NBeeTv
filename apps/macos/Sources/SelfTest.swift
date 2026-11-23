@@ -3,7 +3,7 @@
 //   --selftest [--rig 主機:連接埠] [--no-camera] [--no-audio] [--no-devices]：逐項檢查外殼自己的零件
 //   （--no-camera 不開鏡頭，--no-audio 不經過音訊裝置，--no-devices 兩者都不要；
 //     --ask-camera 還沒有相機權限時向系統要求，--save-camera-frame <檔名> 把鏡頭取到的那一格存成 PPM）：
-//   1. Swift 與核心之間的收發（不經音訊裝置），包含類比模式送全黑、全白的畫面
+//   1. Swift 與核心之間的收發（不經音訊裝置），包含送全黑、全白的畫面
 //   2. 影片檔來源（做一段影片、開啟、跳到指定位置、取一格），以及用影片當來源的整個發射流程
 //      （音訊輸出換成模擬的、PTT 換成記錄用的：按下發射自動播放，播完自動停止、放開 PTT）
 //   3. rigctld 的 PTT（要給 --rig，對著真的 rigctld 測）
@@ -29,8 +29,7 @@ enum SelfTest {
 
     /// --transmit-test --device <名稱> [--mode <編號>] [--frames <張數>] [--callsign <呼號>] [--flat <0–255>]
     /// 不開視窗，把內附的測試圖用指定的模式送到指定的輸出裝置（配合另一個行程或真的 app 的接收測試）。
-    /// --flat 改送整張同一個亮度的畫面：類比模式下這種畫面整幀的能量只在少數幾個格點上，是接收端最容易出問題的內容
-    /// （很暗、過曝或被蓋住的鏡頭拍到的就是這種畫面）。
+    /// --flat 改送整張同一個亮度的畫面（很暗、過曝或被蓋住的鏡頭拍到的就是這種畫面）。
     static func transmitTest(arguments: [String]) -> Int32 {
         NSApplication.shared.setActivationPolicy(.prohibited)
         setvbuf(stdout, nil, _IOLBF, 0)
@@ -39,7 +38,7 @@ enum SelfTest {
             print("[transmit-test] 找不到輸出裝置「\(name)」")
             return 1
         }
-        let modeID = option("--mode", in: arguments).flatMap(Int.init) ?? 5
+        let modeID = option("--mode", in: arguments).flatMap(Int.init) ?? Modes.defaultID
         let count = option("--frames", in: arguments).flatMap(Int.init) ?? 3
         var images = ["coffee", "rocket", "cat"].compactMap(Demo.testImage)
         if let level = option("--flat", in: arguments).flatMap({ UInt8($0) }) {
@@ -102,7 +101,7 @@ enum SelfTest {
                 peak = max(peak, samples.map { abs($0) }.max() ?? 0)
                 while let frame = receiver.pollFrame() {
                     if frame.decoded { decoded += 1 }
-                    print("[receive-test] \(Modes.find(frame.modeID)?.label ?? "?")：\(frame.decoded ? "解碼成功" : "解碼失敗")，呼號 \(frame.callsign)，"
+                    print("[receive-test] \(Modes.find(frame.modeID)?.label ?? "?")：\(frame.decoded ? "有畫面" : "沒有畫面")，呼號 \(frame.callsign)，"
                         + "第 \(frame.sequence + 1) 張，訊雜比 \(String(format: "%.1f", frame.snrDb)) dB")
                 }
             }
@@ -121,14 +120,14 @@ enum SelfTest {
         // 裝置不是 48 kHz 時要轉換：交給接收機的取樣數應該是每秒 48000 個左右
         print(String(format: "[receive-test] 「%@」（裝置取樣率 %.0f Hz）：%.1f 秒收到 %d 個取樣（每秒 %.0f 個），峰值 %.3f", device.name,
                      AudioDevices.sampleRate(device.id), elapsed, total, Double(total) / elapsed, level))
-        print("[receive-test] \(Int(seconds)) 秒內解出 \(count) 張")
+        print("[receive-test] \(Int(seconds)) 秒內收到 \(count) 張")
         return 0
     }
 
     static func run(arguments: [String]) -> Int32 {
         NSApplication.shared.setActivationPolicy(.prohibited)
         setvbuf(stdout, nil, _IOLBF, 0)
-        print("[selftest] 核心 \(NBTV.version)，影像編解碼器：\(NBTV.hasImageCodec ? "有" : "沒有")，模式 \(Modes.all.count) 個")
+        print("[selftest] 核心 \(NBTV.version)，模式 \(Modes.all.count) 個")
         guard let coffee = Demo.testImage("coffee"), let rocket = Demo.testImage("rocket") else {
             report("內附的測試圖", false)
             return 1
@@ -138,14 +137,18 @@ enum SelfTest {
         let devices = !arguments.contains("--no-devices")
         let useCamera = devices && !arguments.contains("--no-camera")
         let useAudio = devices && !arguments.contains("--no-audio")
-        // 學習式模式各有一份權重檔；少了哪一份，那個模式就不會列在 Modes 裡
-        let models = Modes.learned.map {
+        // 每個模式各有一份權重檔；少了哪一份，那個模式就不會列在 Modes 裡
+        let models = Modes.all.map {
             "\($0.name)：模型 \($0.modelName)、識別碼 \(LearnedModel.idText(values: $0.learnedValues, width: $0.learnedWidth) ?? "?")、"
                 + "\($0.learnedValues) 個實數\($0.largeModel ? "、大型網路" : "")"
         }
-        report("學習式模式的模型", models.count == LearnedModel.resourceNames.count ? true : nil,
-               models.isEmpty ? "app 裡沒有權重檔，學習式模式不能用"
+        report("各模式的模型", models.count == LearnedModel.resourceNames.count,
+               models.isEmpty ? "app 裡沒有權重檔，沒有模式可以用"
                    : models.joined(separator: "；") + (models.count < LearnedModel.resourceNames.count ? "；其餘的權重檔不在 app 裡" : ""))
+        guard !Modes.all.isEmpty else {
+            print("[selftest] 1 項失敗")
+            return 1
+        }
         testCoreLoopback(coffee)
         testFlatPictures()
         testExport(coffee)
@@ -178,11 +181,10 @@ enum SelfTest {
     // MARK: 1. 核心
 
     private static func testCoreLoopback(_ image: Data) {
-        for modeID in [5, 9, 11, 12, 13, 14] {  // 模式 11 到 14 要 app 裡有權重檔才會列在 Modes 裡
-            guard let mode = Modes.find(modeID), mode.isDigital ? NBTV.hasImageCodec : true else { continue }
+        for mode in Modes.all {  // app 裡有權重檔的模式才會列在 Modes 裡
             let tx = CoreTransmitter()
-            tx.setMode(modeID)
-            tx.setCallsign("bx4acp")
+            tx.setMode(mode.id)
+            tx.setCallsign("n0call")
             var audio = Demo.silence(seconds: 0.3)
             var previews: [Data] = []
             for _ in 0..<2 {
@@ -195,30 +197,29 @@ enum SelfTest {
             }
             audio += tx.finish() + Demo.silence(seconds: 0.5)
             let frames = Demo.receive(audio).flatMap(\.frames)
-            let good = frames.filter { $0.decoded && $0.headerOK && $0.callsign == "BX4ACP" && $0.rgb != nil }
-            // 數位：收到的畫面與發射端的預覽逐位元相同；類比與學習式：只差削波失真，檢查有畫面即可
-            let same = !mode.isDigital || zip(good, previews).allSatisfy { $0.rgb == $1 }
-            report("核心收發（\(mode.label)）", good.count == 2 && same,
-                   "解出 \(good.count)/2 張\(mode.isDigital ? "，畫面\(same ? "與預覽相同" : "與預覽不同")" : "")")
+            let good = frames.filter { $0.decoded && $0.headerOK && $0.callsign == "N0CALL" && $0.modeID == mode.id && $0.rgb != nil }
+            // 收到的畫面和發射端的預覽只差削波失真；用錯模型的話解出來的只是雜訊，差得很遠
+            let worst = zip(good, previews).map { difference($0.rgb ?? Data(), $1) }.max() ?? 255
+            report("核心收發（\(mode.label)）", good.count == 2 && worst < 3,
+                   String(format: "收到 %d/2 張，和預覽平均差 %.1f／255", good.count, worst))
         }
     }
 
-    /// 類比模式送沒有細節的畫面（全黑、全白）：很暗、過曝或被蓋住的鏡頭拍到的就是這種畫面。
-    /// 這種幀整幀的能量只在少數幾個格點上；訊號很乾淨時，接收機曾經完全認不出來（核心的導頻驗證）。
+    /// 送沒有細節的畫面（全黑、全白）：很暗、過曝或被蓋住的鏡頭拍到的就是這種畫面。
+    /// 不論畫面內容是什麼，每一張都要收到，而且是原本的亮度。
     private static func testFlatPictures() {
         var details: [String] = []
         var ok = true
-        for modeID in [8, 9, 10] {
-            guard let mode = Modes.find(modeID) else { continue }
+        for mode in Modes.all {
             for level: UInt8 in [0, 255] {
                 let picture = Data(repeating: level, count: NBTV.rgbBytes)
                 let tx = CoreTransmitter()
-                tx.setMode(modeID)
-                tx.setCallsign("BX4ACP")
+                tx.setMode(mode.id)
+                tx.setCallsign("N0CALL")
                 var audio = Demo.silence(seconds: 0.3)
                 for _ in 0..<2 {
                     guard let frame = tx.encode(rgb: picture) else {
-                        report("類比模式送全黑、全白的畫面", false, "\(mode.name) 編碼失敗")
+                        report("送全黑、全白的畫面", false, "\(mode.name) 編碼失敗")
                         return
                     }
                     audio += frame.samples
@@ -233,7 +234,7 @@ enum SelfTest {
                 details.append("\(mode.name) \(level == 0 ? "全黑" : "全白") \(good.count)/2" + (good.isEmpty ? "" : String(format: "（差 %.1f）", error)))
             }
         }
-        report("類比模式送全黑、全白的畫面", ok, details.joined(separator: "、"))
+        report("送全黑、全白的畫面", ok, details.joined(separator: "、"))
     }
 
     /// 除錯紀錄（設定了 debugTapDirectory 才測）：從 BlackHole 收兩秒（只收不放），檢查音訊檔與紀錄檔有沒有寫出來。
@@ -265,15 +266,14 @@ enum SelfTest {
 
     // MARK: 存檔
 
-    /// 「儲存圖片」寫出去的檔案內容：數位模式是標準的 .avif（系統的影像解碼器要讀得出同一張畫面），類比與學習式模式是 PNG。
+    /// 「儲存圖片」寫出去的檔案內容：96×72 的 PNG，系統的影像解碼器讀回來要和收到的畫面完全相同。
     private static func testExport(_ image: Data) {
         var details: [String] = []
         var ok = true
-        for modeID in [1, 9, 11, 12] {
-            guard let mode = Modes.find(modeID), mode.isDigital ? NBTV.hasImageCodec : true else { continue }
+        for mode in Modes.all.filter({ [11, 14].contains($0.id) }) {
             let tx = CoreTransmitter()
-            tx.setMode(modeID)
-            tx.setCallsign("BX4ACP/P")
+            tx.setMode(mode.id)
+            tx.setCallsign("N0CALL/P")
             guard let encoded = tx.encode(rgb: image) else {
                 report("存檔的內容", false, "編碼失敗")
                 return
@@ -281,12 +281,11 @@ enum SelfTest {
             let audio = Demo.silence(seconds: 0.3) + encoded.samples + tx.finish() + Demo.silence(seconds: 0.5)
             guard let frame = Demo.receive(audio).flatMap(\.frames).first(where: { $0.decoded }), let rgb = frame.rgb,
                   let picture = NBTV.image(fromRGB: rgb) else {
-                report("存檔的內容", false, "\(mode.name) 沒有解出畫面")
+                report("存檔的內容", false, "\(mode.name) 沒有收到畫面")
                 return
             }
-            let received = AppModel.ReceivedFrame(image: picture, payload: frame.payload, isDigital: frame.isDigital, modeID: frame.modeID,
-                                                  callsign: frame.callsign, sequence: frame.sequence, time: Date(timeIntervalSince1970: 1_800_000_000),
-                                                  snrDb: frame.snrDb)
+            let received = AppModel.ReceivedFrame(image: picture, modeID: frame.modeID, callsign: frame.callsign, sequence: frame.sequence,
+                                                  time: Date(timeIntervalSince1970: 1_800_000_000), snrDb: frame.snrDb)
             guard let file = AppModel.exportFile(for: received) else {
                 report("存檔的內容", false, "\(mode.name) 產生不出檔案")
                 return
@@ -301,15 +300,12 @@ enum SelfTest {
                 for (a, b) in zip(back, rgb) { total += abs(Int(a) - Int(b)) }
                 difference = Double(total) / Double(rgb.count)
             }
-            let wanted = mode.isDigital ? ".avif" : ".png"
-            let nameOK = file.name.hasPrefix("NBTV-BX4ACP-P-") && file.name.hasSuffix(wanted)   // 呼號裡的斜線不能出現在檔名裡
-            // AVIF 的色彩轉換各家解碼器的進位略有不同，容許平均差 3／255；PNG 要完全一樣
-            let limit = mode.isDigital ? 3.0 : 0.0
-            ok = ok && nameOK && size == "96×72" && difference >= 0 && difference <= limit
+            let nameOK = file.name.hasPrefix("NBTV-N0CALL-P-") && file.name.hasSuffix(".png")   // 呼號裡的斜線不能出現在檔名裡
+            ok = ok && nameOK && size == "96×72" && difference == 0
             details.append(String(format: "%@ → %@（%d 位元組，系統解出 %@，與收到的畫面平均差 %.2f／255）", mode.name, file.name, file.data.count,
                                   size.isEmpty ? "失敗" : size, difference))
         }
-        report("存檔的內容", ok, details.joined(separator: "；"))
+        report("存檔的內容", ok && !details.isEmpty, details.joined(separator: "；"))
     }
 
     // MARK: 停止時的尾巴
@@ -322,12 +318,12 @@ enum SelfTest {
         func transmitter(_ modeID: Int) -> CoreTransmitter {
             let tx = CoreTransmitter()
             tx.setMode(modeID)
-            tx.setCallsign("BX4ACP")
+            tx.setCallsign("N0CALL")
             return tx
         }
         var details: [String] = []
         var ok = true
-        for modeID in [NBTV.hasImageCodec ? 5 : 8, 9] {
+        for modeID in [12, 14] where Modes.find(modeID) != nil {  // 一個小的模型、一個大的
             let reference = transmitter(modeID)
             let tx = transmitter(modeID)
             guard let alone = reference.encode(rgb: image), let sent = tx.encode(rgb: image), let dropped = tx.encode(rgb: other) else {
@@ -341,27 +337,27 @@ enum SelfTest {
             // 取消之後再編一張：幀序號接在送出去的那一張後面
             let next = tx.encode(rgb: other)
             let frames = Demo.receive(Demo.silence(seconds: 0.3) + sent.samples + tail + Demo.silence(seconds: 0.5)).flatMap(\.frames)
-            let decoded = frames.count == 1 && frames[0].decoded && frames[0].callsign == "BX4ACP"
+            let decoded = frames.count == 1 && frames[0].decoded && frames[0].callsign == "N0CALL"
             ok = ok && alone.samples == sent.samples && discarded && !again && !trueTail.isEmpty && tail == trueTail
                 && dropped.sequence == sent.sequence + 1 && next?.sequence == dropped.sequence && decoded
-            details.append(String(format: "%@：尾巴 %d 個取樣，取消下一張之後%@，解出 %d 張",
+            details.append(String(format: "%@：尾巴 %d 個取樣，取消下一張之後%@，收到 %d 張",
                                   Modes.find(modeID)?.name ?? "", trueTail.count, tail == trueTail ? "與只送一張時完全相同" : "不同", frames.count))
         }
-        report(name, ok, details.joined(separator: "；"))
+        report(name, ok && !details.isEmpty, details.joined(separator: "；"))
     }
 
     // MARK: 取樣率轉換
 
     /// 模擬 44.1 kHz 的音訊裝置：48 kHz 的訊號先轉成 44.1 kHz，再像輸入裝置那樣每 20 ms 一段轉回 48 kHz 給接收機。
     private static func testResampler(_ image: Data) {
-        guard let mode = Modes.find(NBTV.hasImageCodec ? 5 : 8), let down = StreamResampler(from: 48000, to: 44100),
+        guard let mode = Modes.find(12), let down = StreamResampler(from: 48000, to: 44100),
               let up = StreamResampler(from: 44100, to: 48000) else {
             report("取樣率轉換", false, "無法建立轉換器")
             return
         }
         let tx = CoreTransmitter()
         tx.setMode(mode.id)
-        tx.setCallsign("BX4ACP")
+        tx.setCallsign("N0CALL")
         var audio = Demo.silence(seconds: 0.3)
         for _ in 0..<2 { audio += tx.encode(rgb: image)?.samples ?? [] }
         audio += tx.finish() + Demo.silence(seconds: 0.6)
@@ -379,9 +375,9 @@ enum SelfTest {
             while let frame = receiver.pollFrame() { frames.append(frame) }
             position = end
         }
-        let good = frames.filter { $0.decoded && $0.callsign == "BX4ACP" }
+        let good = frames.filter { $0.decoded && $0.callsign == "N0CALL" }
         report("取樣率轉換（48 k → 44.1 k → 48 k，分段）", good.count == 2,
-               String(format: "解出 %d/2 張，%d 個取樣轉成 %d 個再轉回 %d 個", good.count, audio.count, device.count, produced))
+               String(format: "收到 %d/2 張，%d 個取樣轉成 %d 個再轉回 %d 個", good.count, audio.count, device.count, produced))
     }
 
     // MARK: 鏡頭
@@ -420,8 +416,7 @@ enum SelfTest {
         let buffer = box.get().buffer
         camera.stop()
         if ok, let buffer, let frame = FrameScaler.scale(buffer, mode: .fill) {
-            // 亮度的平均與標準差（0–255）。標準差只有個位數的畫面（很暗、過曝、對著白牆）幾乎沒有細節，
-            // 類比模式下整幀的能量會集中在少數幾個格點上，是接收端最難處理的內容。
+            // 亮度的平均與標準差（0–255）。標準差只有個位數的畫面（很暗、過曝、對著白牆）幾乎沒有細節。
             var sum = 0.0, squares = 0.0
             let pixels = frame.rgb.count / 3
             frame.rgb.withUnsafeBytes { raw in
@@ -442,13 +437,12 @@ enum SelfTest {
                 let saved = (try? file.write(to: URL(fileURLWithPath: savePath))) != nil
                 detail += saved ? "，已存成 \(savePath)" : "，存不進 \(savePath)"
             }
-            // 拿鏡頭拍到的這一格實際收發一次（不經音訊裝置）：每個類比模式與一個數位模式各送兩張
+            // 拿鏡頭拍到的這一格實際收發一次（不經音訊裝置）：每個模式各送兩張
             var results: [String] = []
-            for modeID in [8, 9, 10, 5] {
-                guard let mode = Modes.find(modeID), mode.isDigital ? NBTV.hasImageCodec : true else { continue }
+            for mode in Modes.all {
                 let tx = CoreTransmitter()
-                tx.setMode(modeID)
-                tx.setCallsign("BX4ACP")
+                tx.setMode(mode.id)
+                tx.setCallsign("N0CALL")
                 var audio = Demo.silence(seconds: 0.3)
                 var encoded = 0
                 for _ in 0..<2 {
@@ -607,7 +601,7 @@ enum SelfTest {
     private static func testReceivedHistory(_ image: Data) {
         let name = "收到的畫面：各自的訊雜比、保留的張數"
         let tx = CoreTransmitter()
-        tx.setMode(8)
+        tx.setMode(12)
         tx.setCallsign("N0CALL")
         var signal: [Float] = []
         for _ in 0..<2 { signal += tx.encode(rgb: image)?.samples ?? [] }
@@ -620,7 +614,7 @@ enum SelfTest {
             frames += Demo.receive(received).flatMap(\.frames).filter { $0.decoded }.prefix(1)
         }
         guard frames.count == 2 else {
-            report(name, false, "示範的訊號解出 \(frames.count)/2 張")
+            report(name, false, "示範的訊號收到 \(frames.count)/2 張")
             return
         }
         let model = AppModel(settings: AppSettings(store: nil), live: false)
@@ -746,7 +740,7 @@ enum SelfTest {
         settings.callsign = "N0CALL"
         settings.sourceKind = .video
         settings.loopVideo = false
-        settings.txModeID = 8   // 類比 8：每張 1.04 秒，不需要影像編解碼器
+        settings.txModeID = 12   // 模式 12：每張 1.04 秒
         let ptt = RecordingPTT()
         settings.debugPTTDriver = { ptt }
         let model = AppModel(settings: settings, live: true)
@@ -1007,10 +1001,10 @@ enum SelfTest {
             report("BlackHole 自發自收", nil, "找不到 BlackHole 虛擬音效卡")
             return
         }
-        guard let mode = Modes.find(NBTV.hasImageCodec ? 5 : 8) else { return }
+        guard let mode = Modes.find(12) else { return }
         let tx = CoreTransmitter()
         tx.setMode(mode.id)
-        tx.setCallsign("BX4ACP")
+        tx.setCallsign("N0CALL")
         guard let first = tx.encode(rgb: image), let second = tx.encode(rgb: image) else {
             report("音訊輸出", false, "編碼失敗")
             return
@@ -1075,10 +1069,11 @@ enum SelfTest {
         output.stop()
         input.stop()
         let (decoded, level, count) = queue.sync { (frames, peak, received) }
-        let good = decoded.filter { $0.decoded && $0.callsign == "BX4ACP" && $0.modeID == mode.id }
-        let same = !mode.isDigital || (good.count == 2 && good[0].rgb == first.preview && good[1].rgb == second.preview)
-        report("BlackHole 自發自收（\(mode.label)）", got && good.count == 2 && same,
-               String(format: "解出 %d/2 張，收到 %.1f 秒的音訊，峰值 %.2f，輸出佇列中途空掉 %d 次", good.count,
+        let good = decoded.filter { $0.decoded && $0.callsign == "N0CALL" && $0.modeID == mode.id }
+        // 收到的畫面和發射端的預覽只差削波失真與音效卡的轉換
+        let close = good.count == 2 && difference(good[0].rgb ?? Data(), first.preview) < 12 && difference(good[1].rgb ?? Data(), second.preview) < 12
+        report("BlackHole 自發自收（\(mode.label)）", got && good.count == 2 && close,
+               String(format: "收到 %d/2 張，收到 %.1f 秒的音訊，峰值 %.2f，輸出佇列中途空掉 %d 次", good.count,
                       Double(count) / Double(NBTV.sampleRate), level, max(0, output.underruns - 1)))
     }
 }

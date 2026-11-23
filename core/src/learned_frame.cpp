@@ -26,9 +26,7 @@ std::vector<std::uint16_t> make_order(int n) {
 const std::vector<std::uint16_t>& learned_value_order(const Mode& mode) {
     static const std::array<std::vector<std::uint16_t>, kModes.size()> tables = [] {
         std::array<std::vector<std::uint16_t>, kModes.size()> t;
-        for (std::size_t i = 0; i < kModes.size(); ++i) {
-            if (kModes[i].is_learned()) t[i] = make_order(kModes[i].learned_values);
-        }
+        for (std::size_t i = 0; i < kModes.size(); ++i) t[i] = make_order(kModes[i].learned_values);
         return t;
     }();
     for (std::size_t i = 0; i < kModes.size(); ++i) {
@@ -39,7 +37,7 @@ const std::vector<std::uint16_t>& learned_value_order(const Mode& mode) {
 }
 
 bool learned_model_fits(const Mode& mode, const LearnedCodec& codec) {
-    return mode.is_learned() && codec.value_count() == mode.learned_values && codec.base_width() == mode.learned_width;
+    return codec.value_count() == mode.learned_values && codec.base_width() == mode.learned_width;
 }
 
 void LearnedModels::set(std::shared_ptr<const LearnedCodec> model) {
@@ -63,22 +61,22 @@ const LearnedCodec* LearnedModels::find(const Mode& mode) const {
     return nullptr;
 }
 
-std::vector<cf> learned_encode(const Mode& mode, const LearnedCodec& codec, const AnalogHeader& header,
+std::vector<cf> learned_encode(const Mode& mode, const LearnedCodec& codec, const FrameHeader& header,
                                std::span<const std::uint8_t> rgb, std::vector<float>* values) {
     if (!learned_model_fits(mode, codec)) return {};
     std::vector<float> v(static_cast<std::size_t>(mode.learned_values));
     if (!codec.encode(rgb, v)) return {};
 
     std::vector<cf> plain(static_cast<std::size_t>(mode.data_cells()));  // 用不到的格點留 0
-    AnalogHeader h = header;
+    FrameHeader h = header;
     h.format = kLearnedFrameFormat;
-    h.gain_code = static_cast<int>(codec.model_id() & 0xFFu);
-    analog_header_encode(h, std::span<cf>(plain.data(), static_cast<std::size_t>(kAnalogHeaderCells)));
-    // 編碼器的輸出已經是每個實數均方值 1/2，兩個一組就是平均功率 1 的格點，和數位模式的資料格相同。
+    h.model_tag = static_cast<int>(codec.model_id() & 0xFFu);
+    header_encode(h, std::span<cf>(plain.data(), static_cast<std::size_t>(kHeaderCells)));
+    // 編碼器的輸出已經是每個實數均方值 1/2，兩個一組就是平均功率 1 的格點，和標頭的格點相同。
     // 放進去之前先打散（原因見標頭檔）。
     const std::vector<std::uint16_t>& order = learned_value_order(mode);
     for (std::size_t k = 0; k < v.size(); k += 2) {
-        plain[static_cast<std::size_t>(kAnalogHeaderCells) + k / 2] = cf(v[order[k]], v[order[k + 1]]);
+        plain[static_cast<std::size_t>(kHeaderCells) + k / 2] = cf(v[order[k]], v[order[k + 1]]);
     }
 
     std::vector<cf> cells(plain.size());
@@ -88,7 +86,6 @@ std::vector<cf> learned_encode(const Mode& mode, const LearnedCodec& codec, cons
 }
 
 LearnedUnpacked learned_unpack(const Mode& mode, std::span<const cf> cells, std::span<const float> noise_var) {
-    assert(mode.is_learned());
     assert(static_cast<int>(cells.size()) == mode.data_cells() && noise_var.size() == cells.size());
 
     std::vector<cf> plain(cells.size());
@@ -100,14 +97,14 @@ LearnedUnpacked learned_unpack(const Mode& mode, std::span<const cf> cells, std:
     }
 
     LearnedUnpacked out;
-    out.header_ok = analog_header_decode(std::span<const cf>(plain.data(), static_cast<std::size_t>(kAnalogHeaderCells)),
-                                         std::span<const float>(var.data(), static_cast<std::size_t>(kAnalogHeaderCells)), out.header);
+    out.header_ok = header_decode(std::span<const cf>(plain.data(), static_cast<std::size_t>(kHeaderCells)),
+                                  std::span<const float>(var.data(), static_cast<std::size_t>(kHeaderCells)), out.header);
     const std::size_t n = static_cast<std::size_t>(mode.learned_values);
     out.values.resize(n);
     out.noise_var.resize(n);
     const std::vector<std::uint16_t>& order = learned_value_order(mode);
     for (std::size_t k = 0; k < n; ++k) {
-        const std::size_t cell = static_cast<std::size_t>(kAnalogHeaderCells) + k / 2;
+        const std::size_t cell = static_cast<std::size_t>(kHeaderCells) + k / 2;
         out.values[order[k]] = (k % 2 == 0) ? plain[cell].real() : plain[cell].imag();
         out.noise_var[order[k]] = var[cell];
     }
@@ -116,7 +113,7 @@ LearnedUnpacked learned_unpack(const Mode& mode, std::span<const cf> cells, std:
 
 bool learned_model_matches(const LearnedUnpacked& frame, const LearnedCodec& codec) {
     if (!frame.header_ok) return true;
-    return frame.header.format == kLearnedFrameFormat && frame.header.gain_code == static_cast<int>(codec.model_id() & 0xFFu);
+    return frame.header.format == kLearnedFrameFormat && frame.header.model_tag == static_cast<int>(codec.model_id() & 0xFFu);
 }
 
 float learned_picture(const LearnedCodec& codec, const LearnedUnpacked& frame, const LearnedRxOptions& options,

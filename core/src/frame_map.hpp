@@ -3,7 +3,6 @@
 //   * 導頻 PRBS 的起始狀態：全 1（同 DVB-T），以 FFT 格號索引
 //   * S0：25 個偶數格上的二次相位序列（包絡峰均比 2.6 dB）
 //   * S1：16 條 BPSK 序列，任兩條的內積為 ±1，編號就是模式編號
-//   * 數位模式的補足格：已知的 QPSK 值
 #pragma once
 
 #include <cstdint>
@@ -38,9 +37,6 @@ cf s0_value(int bin);
 
 // S1 在第 bin 格的值（已含振幅），mode_id 是 0..15；頻帶外是 0。
 float s1_value(int mode_id, int bin);
-
-// 數位模式補足格的值：第 index 個補足格（從 0 起算）。
-cf padding_value(int index);
 
 // 酬載裡所有資料格的位置，依傳送順序（時間先後、頻率由低到高）排列。
 std::vector<CellPos> data_cell_positions(int payload_symbols);

@@ -8,8 +8,6 @@
 #include <cstdio>
 #include <functional>
 
-#include "analog_frame.hpp"
-#include "digital_frame.hpp"
 #include "fft.hpp"
 #include "frame_map.hpp"
 #include "learned_frame.hpp"
@@ -60,9 +58,9 @@ const std::array<int, 5>& acquire_shifts() {
 }
 
 // 偵測用的幅度上限：一個符號裡各載波幅度中位數的 kLimitFactor 倍。
-// 判定前導符號與導頻在不在的統計量，都假設能量大致平均分布在各個載波上。類比模式的畫面如果能量集中在
-// 少數幾個係數（測試圖、色條），那幾個格點會比其他的大上幾十倍，少數幾項就足以左右整個統計量，
-// 於是在酬載裡誤判出前導符號或導頻。把過大的值壓到上限（只改大小、不改相位）之後就不會；
+// 判定前導符號與導頻在不在的統計量，都假設能量大致平均分布在各個載波上。如果有幾個格點比其他的大上幾十倍
+// （窄頻的干擾，或是能量集中在少數幾個載波上的別種訊號），少數幾項就足以左右整個統計量，
+// 於是在不是前導符號的地方誤判出前導符號或導頻。把過大的值壓到上限（只改大小、不改相位）之後就不會；
 // 正常的訊號（含選擇性衰落）幅度很少超過中位數的 2.5 倍，幾乎不受影響。只用在偵測，不用在解調。
 constexpr float kLimitFactor = 2.5f;
 
@@ -76,9 +74,10 @@ float clip_level(const cf* values, int count, int stride = 1) {
 
 // 一個符號的能量是不是集中在少數幾個載波上：先不算最強的兩個（可能是單頻干擾），
 // 回傳接下來最強的 9 個佔其餘能量的比例。S1 的 49 個載波功率相同，就算經過選擇性衰落、淹在雜訊裡，
-// 這個比例也只有五成左右；類比模式的畫面如果幾乎沒有內容，酬載符號只剩導頻那八九個載波，比例會超過九成。
+// 這個比例也只有五成左右；只有導頻那八九個載波有能量的符號（資料格幾乎是 0），比例會超過九成。
 // 那種符號每 128 點重複（導頻每 6 格一個），S0 的滑動相關會把它當成候選，導頻的 PRBS 又可能湊巧和某個模式的
-// S1 序列有幾分相似，所以要另外擋掉。
+// S1 序列有幾分相似，所以要另外擋掉。現在的模式資料格都是滿功率，自己的訊號不會出現這種符號；
+// 這一關擋的是別種只佔幾個載波的訊號。
 double sparsity(const cf* values, int count) {
     assert(count <= kCarriers && count > 11);
     std::array<float, kCarriers> power;
@@ -102,11 +101,9 @@ cf limited(cf v, float level) {
 // 酬載符號裡導頻的幅度上限：只看「這個符號的導頻位置」上那八九個格點，取它們幅度中位數的 kLimitFactor 倍。
 // row 是格點陣列的列號，j 是它在酬載裡的符號編號（決定導頻在哪幾格）。
 //
-// 這裡不能像前導符號那樣取整個符號 49 個載波的中位數。類比模式的畫面如果幾乎沒有細節
-// （很暗、過曝、純色、鏡頭被蓋住），整幀的能量都在少數幾個係數上，其餘的資料格接近 0，
-// 整個符號的中位數就只剩雜訊的大小，導頻全被壓到那麼小；只有開頭載著標頭的一兩個符號不受影響，
-// 於是十幾個符號的統計量實際上只剩那一兩個符號，真正的幀反而通不過驗證。訊號愈乾淨愈容易發生。
-// 只看導頻位置的話，真正的幀在這些格點上都是導頻，中位數就是導頻的幅度；
+// 這裡不取整個符號 49 個載波的中位數：資料格的幅度隨畫面的內容而變，如果大半的資料格接近 0，
+// 整個符號的中位數就只剩雜訊的大小，導頻全被壓到那麼小，真正的幀反而通不過驗證（訊號愈乾淨愈容易發生）。
+// 只看導頻位置的話，真正的幀在這些格點上都是導頻，中位數就是導頻的幅度，和資料格放了什麼無關；
 // 不是幀的地方，這些格點上少數特別大的值照樣會被壓下來。
 float pilot_clip_level(const SymbolGrid& grid, int row, int j) {
     std::array<float, kCarriers> mag;
@@ -123,7 +120,7 @@ float pilot_clip_level(const SymbolGrid& grid, int row, int j) {
 // 只有雜訊時接近 0（約 1/sqrt(導頻對數)）。只看第 first 到 last−1 個酬載符號。
 // 每一對符號（第 j 個與第 j+3 個）先各自算出正規化的相關值，再對所有的符號對取平均：每一對的份量相同，
 // 不會被少數幾個特別強的符號左右（例如檢查的範圍裡大半是雜訊、最後幾個符號卻是另一次發射的開頭），
-// 完全沒有訊號的符號（數位的靜音）也照樣算一對、相關值是 0。
+// 完全沒有訊號的符號（取樣全是 0 的靜音）也照樣算一對、相關值是 0。
 double pilot_coherence(const SymbolGrid& grid, int first, int last) {
     cd total(0, 0);
     int pairs = 0;
@@ -162,7 +159,6 @@ void Receiver::reset() {
     mode_ = nullptr;
     snr_valid_ = false;
     sync_quality_ = 0.0;
-    analog_gain_code_ = -1;
     last_ok_ = false;
     last_complete_ = false;
     unconfirmed_run_ = 0;
@@ -368,6 +364,11 @@ void Receiver::fft_window(std::int64_t start, double cfo, cf* out) const {
 // 一小段延遲內（通道的延遲擴散有限）；假設錯了或只有雜訊，能量會平均散開。
 // 分數 = 視窗內的能量密度 ÷ 視窗外的能量密度（各自除以自由度），只有雜訊時約為 1。
 // s0_window 是 S0 的 FFT 視窗起點，S1 的視窗在一個符號之後。
+//
+// S1 的 16 條序列全部都比（kModeIdCount），不只模式表裡的那幾條：S0 是所有模式共用的，
+// 別的模式的幀（已經移除的數位與類比模式，或是以後才加的模式）一樣會通過 S0 的檢查，酬載裡也一樣有導頻。
+// 只比自己認得的序列的話，那種幀會被當成自己的某個模式收下來。全部都比，才看得出最像的其實是別的編號；
+// 回傳的 mode_id 可能是模式表裡沒有的，由呼叫端決定不收。
 Receiver::PreambleCheck Receiver::check_preamble(std::int64_t s0_window, double cfo, std::span<const int> shifts,
                                                  int expect_mode, int detect_first, int detect_last) const {
     constexpr int kHalf = kFftSize / 2;
@@ -410,15 +411,15 @@ Receiver::PreambleCheck Receiver::check_preamble(std::int64_t s0_window, double 
         struct Hypothesis {
             double score = 0.0, score_s1 = 0.0, score_s0 = 0.0;
         };
-        std::array<Hypothesis, kModes.size()> hyp{};
-        double s1_peak = 0.0;  // S1 單獨的分數在所有模式、所有延遲裡的最大值
-        for (std::size_t mi = 0; mi < kModes.size(); ++mi) {
-            const Mode& m = kModes[mi];
+        std::array<Hypothesis, kModeIdCount> hyp{};
+        double s1_peak = 0.0;  // S1 單獨的分數在所有模式編號、所有延遲裡的最大值
+        for (std::size_t mi = 0; mi < hyp.size(); ++mi) {
+            const int mode_id = static_cast<int>(mi);
             std::fill(b, b + kFftSize, cf(0, 0));
             double e1 = 0.0;
             for (int c = 0; c < kCarriers; ++c) {
                 const int bin = kFirstBin + c;
-                const cf v = limited(y1[bin + shift], level1) * (s1_value(m.id, bin) > 0 ? 1.0f : -1.0f);
+                const cf v = limited(y1[bin + shift], level1) * (s1_value(mode_id, bin) > 0 ? 1.0f : -1.0f);
                 b[bin] = v;
                 e1 += std::norm(v);
             }
@@ -463,15 +464,16 @@ Receiver::PreambleCheck Receiver::check_preamble(std::int64_t s0_window, double 
         // （兩者功率相同、走同一個通道），而且不能有別的模式或別的延遲比它集中得多——
         // 那表示這裡確實有前導符號，但不是這個假設說的位置或模式。
         const double s1_floor = std::max(kS1MinScore, kS1PeakRatio * s1_peak);
-        for (std::size_t mi = 0; mi < kModes.size(); ++mi) {
+        for (std::size_t mi = 0; mi < hyp.size(); ++mi) {
+            const int mode_id = static_cast<int>(mi);
             if (hyp[mi].score_s1 < s1_floor || hyp[mi].score_s1 < kS1BalanceRatio * hyp[mi].score_s0) continue;
             if (hyp[mi].score > best.score) {
                 best.score = hyp[mi].score;
                 best.score_s1 = hyp[mi].score_s1;
-                best.mode_id = kModes[mi].id;
+                best.mode_id = mode_id;
                 best.shift = shift;
             }
-            if (shift == 0 && kModes[mi].id == expect_mode) best.score_mode = hyp[mi].score;
+            if (shift == 0 && mode_id == expect_mode) best.score_mode = hyp[mi].score;
         }
     }
     return best;
@@ -534,12 +536,16 @@ bool Receiver::try_acquire(std::int64_t s0_start, cd corr, double metric) {
                      static_cast<long long>(s0_start), metric, eps * kSampleRate, chk.mode_id, chk.shift, chk.score, chk.score_s1);
     }
     if (chk.score < tuning_.acquire_score) return false;
+    // 最像的是模式表裡沒有的編號：別的模式的幀（舊版的數位、類比模式，或這一版還不認得的模式），不收
+    const Mode* mode = find_mode(chk.mode_id);
+    if (mode == nullptr) {
+        if (trace_) std::fprintf(stderr, "[rx]   模式 %d 不在模式表裡，不收\n", chk.mode_id);
+        return false;
+    }
     // 正在收一幀：暫定的幀，新的前導符號要比它更確定才取代它；證據很強的幀，只理會同樣很明確的前導符號
     const bool receiving = state_ == State::Receive;
     if (receiving && (tentative() ? chk.score <= frame_evidence_ : chk.score < 2.0 * tuning_.acquire_score)) return false;
 
-    const Mode* mode = find_mode(chk.mode_id);
-    assert(mode != nullptr);
     double cfo = eps + static_cast<double>(chk.shift) / kFftSize;
     const std::int64_t w1 = w0 + kSymbolSamples;
     const PathDelays paths = s1_path_delays(w1, cfo, chk.mode_id);
@@ -599,7 +605,6 @@ bool Receiver::try_acquire(std::int64_t s0_start, cd corr, double metric) {
     } else {
         start_scan(rescan_from_, t0 + mode->frame_samples() - kSymbolSamples);
     }
-    analog_gain_code_ = -1;
     // 解出第一幀之前，先用 S0 相關值粗估訊雜比：sqrt(metric) ≈ S/(S+N)
     const double r = std::min(std::sqrt(metric), 0.999);
     snr_db_ = static_cast<float>(10.0 * std::log10(r / (1.0 - r)));
@@ -755,87 +760,40 @@ void Receiver::process_frame() {
 
     RxFrame frame;
     frame.mode_id = mode.id;
-    frame.is_digital = mode.is_digital();
-    frame.is_learned = mode.is_learned();
     frame.snr_db = est.snr_db;
     frame.freq_offset_hz = static_cast<float>(cfo_ * kSampleRate);
     frame.start_sample = t0_;
 
-    bool ok = false;
-    bool emit = false;
-    if (mode.is_digital()) {
-        DigitalDecoded d = digital_decode(mode, cells, noise);
-        if (!d.crc_ok) {
-            // S1 可能把碼率認錯：同樣調變、同樣幀長的其他模式也試一次
-            for (const Mode& other : kModes) {
-                if (&other == &mode || !other.is_digital()) continue;
-                if (other.bits_per_cell != mode.bits_per_cell || other.payload_symbols != mode.payload_symbols) continue;
-                DigitalDecoded alt = digital_decode(other, cells, noise);
-                if (alt.crc_ok) {
-                    d = std::move(alt);
-                    mode_ = &other;
-                    frame.mode_id = other.id;
-                    break;
-                }
-            }
-        }
-        ok = d.crc_ok;
-        frame.decoded = ok;
-        frame.header_ok = ok;
-        frame.ldpc_iterations = d.ldpc_iterations;
-        if (ok) {
-            frame.callsign = d.header.callsign_valid ? d.header.callsign : std::string();
-            frame.sequence = d.header.sequence;
-            frame.image_format = d.header.image_format;
-            frame.image_data = std::move(d.image);
-        }
-        // 沒解出來的幀：前導符號確認過、從頭到尾都有導頻、中途也沒有出現別的前導符號，才回報「有一幀沒解出來」。
-        // 只有開頭一段有導頻的，是對方送到一半就停了，或是誤認的前導符號剛好落在別人的酬載裡。
-        emit = ok || (confirmed_ && intact);
-    } else if (mode.is_learned()) {
-        const LearnedUnpacked l = learned_unpack(mode, cells, noise);
-        ok = l.header_ok;
-        frame.header_ok = l.header_ok;
-        if (l.header_ok) {
-            frame.callsign = l.header.callsign_valid ? l.header.callsign : std::string();
-            frame.sequence = l.header.sequence;
-        }
-        // 和類比一樣，畫面本身不靠標頭；但只有確定這是一整幀才當成畫面（見下面類比的說明）。
-        const bool whole = l.header_ok || (confirmed_ && (previous_ok || !tentative()) && intact);
-        // 沒有這個模式用的模型，或標頭說對方用的是另一份權重：解出來只會是雜訊，不交出畫面，只回報收到了一幀
-        const LearnedCodec* model = models_.find(mode);
-        const bool usable = model != nullptr && learned_model_matches(l, *model);
-        frame.model_missing = whole && !usable;
-        frame.decoded = whole && usable;
-        if (frame.decoded) {
-            frame.rgb.resize(static_cast<std::size_t>(kImageRgbBytes));
-            LearnedRxOptions options;
-            options.median_snr = tuning_.learned_median_snr;
-            options.attenuate = tuning_.learned_attenuate;
-            options.floor = tuning_.learned_floor;
-            const float told = learned_picture(*model, l, options, frame.rgb);
-            if (trace_) std::fprintf(stderr, "[rx]   學習式：告訴解碼器的訊雜比 %.1f dB\n", told);
-        }
-        emit = whole || (confirmed_ && intact);
-    } else {
-        AnalogDecoded a = analog_decode(mode, cells, noise, analog_gain_code_);
-        ok = a.header_ok;
-        frame.header_ok = a.header_ok;
-        if (a.header_ok) {
-            analog_gain_code_ = a.header.gain_code;
-            frame.callsign = a.header.callsign_valid ? a.header.callsign : std::string();
-            frame.sequence = a.header.sequence;
-        }
-        // 畫面本身不靠標頭，標頭壞了也還原得出來（幀增益沿用上一張的，或用名目值）。但只有確定這是一整幀
-        // 才當成畫面：前導符號很明確或緊接在一張好的後面、從頭到尾都有導頻、中途也沒有出現別的前導符號。
-        // 否則多半只是雜訊、送到一半就停的幀，或是對到別的訊號上；這時只回報「有一幀沒解出來」。
-        const bool picture = a.header_ok || (confirmed_ && (previous_ok || !tentative()) && intact);
-        emit = picture || (confirmed_ && intact);
-        frame.decoded = picture;
-        if (picture) frame.rgb = std::move(a.rgb);
+    // 標頭帶著呼號與幀序號；畫面本身不靠標頭，標頭壞了也還原得出來。但只有確定這是一整幀才當成畫面：
+    // 標頭正確，或是前導符號很明確（或緊接在一張好的後面）、從頭到尾都有導頻、中途也沒有出現別的前導符號。
+    // 否則多半只是雜訊、送到一半就停的幀，或是對到別的訊號上；這時頂多回報「有一幀沒解出來」。
+    const LearnedUnpacked l = learned_unpack(mode, cells, noise);
+    const bool ok = l.header_ok;
+    frame.header_ok = l.header_ok;
+    if (l.header_ok) {
+        frame.callsign = l.header.callsign_valid ? l.header.callsign : std::string();
+        frame.sequence = l.header.sequence;
     }
+    const bool whole = l.header_ok || (confirmed_ && (previous_ok || !tentative()) && intact);
+    // 沒有這個模式用的模型，或標頭說對方用的是另一份權重：解出來只會是雜訊，不交出畫面，只回報收到了一幀
+    const LearnedCodec* model = models_.find(mode);
+    const bool usable = model != nullptr && learned_model_matches(l, *model);
+    frame.model_missing = whole && !usable;
+    frame.decoded = whole && usable;
+    if (frame.decoded) {
+        frame.rgb.resize(static_cast<std::size_t>(kImageRgbBytes));
+        LearnedRxOptions options;
+        options.median_snr = tuning_.learned_median_snr;
+        options.attenuate = tuning_.learned_attenuate;
+        options.floor = tuning_.learned_floor;
+        const float told = learned_picture(*model, l, options, frame.rgb);
+        if (trace_) std::fprintf(stderr, "[rx]   告訴解碼器的訊雜比 %.1f dB\n", told);
+    }
+    // 沒有畫面的幀：前導符號確認過、從頭到尾都有導頻、中途也沒有出現別的前導符號，才回報「有一幀沒解出來」。
+    // 只有開頭一段有導頻的，是對方送到一半就停了，或是誤認的前導符號剛好落在別人的酬載裡。
+    const bool emit = whole || (confirmed_ && intact);
 
-    if (trace_) std::fprintf(stderr, "[rx]   → %s（LDPC %d 次疊代）\n", ok ? "解碼成功" : "解碼失敗", frame.ldpc_iterations);
+    if (trace_) std::fprintf(stderr, "[rx]   → 標頭%s、%s\n", ok ? "正確" : "沒解出來", frame.decoded ? "有畫面" : "沒有畫面");
     if (emit) {
         if (frame.decoded) ++frames_decoded_;
         else ++frames_failed_;
@@ -853,8 +811,8 @@ void Receiver::process_frame() {
     const std::int64_t frame_start = t0_;
     t0_ += mode_->frame_samples();
     if (ok) {
-        // 解出來的這一幀不必再搜尋。不過解得出來不代表對方把整幀送完了：類比的標頭、低碼率的數位模式
-        // 都禁得起少掉後面一截。從尾端一段一段往回看，導頻在哪裡消失，就從那裡開始算「還沒看過」，
+        // 解出來的這一幀不必再搜尋。不過標頭解得出來不代表對方把整幀送完了：它有重複與迴旋碼保護，
+        // 禁得起少掉後面一截。從尾端一段一段往回看，導頻在哪裡消失，就從那裡開始算「還沒看過」，
         // 另一次發射可能就在那之後開始。
         int seen = mode.payload_symbols;  // 導頻一直到第幾個酬載符號都還在
         while (seen > 0) {
@@ -902,9 +860,15 @@ void Receiver::confirm_next() {
     const double switch_score = last_complete_ ? tuning_.switch_score : 2.0 * tuning_.acquire_score;
     const Mode* const previous_mode = mode_;
     if (chk.mode_id != mode_->id && chk.score >= switch_score && chk.score > 1.3 * chk.score_mode) {
-        // 對方換了模式
-        mode_ = find_mode(chk.mode_id);
-        confirmed = true;
+        if (const Mode* other = find_mode(chk.mode_id)) {
+            // 對方換了模式
+            mode_ = other;
+            confirmed = true;
+        } else {
+            // 接下來的是別的模式的幀（模式表裡沒有的編號）：不是我們要收的，當成沒有看到前導符號
+            if (trace_) std::fprintf(stderr, "[rx]   下一幀是模式 %d，不在模式表裡，不收\n", chk.mode_id);
+            confirmed = false;
+        }
     }
 
     if (confirmed && !last_complete_) {
@@ -921,7 +885,6 @@ void Receiver::confirm_next() {
     }
 
     if (confirmed) {
-        if (mode_ != previous_mode) analog_gain_code_ = -1;
         confirmed_ = true;
         presence_checked_ = true;
         unconfirmed_run_ = 0;

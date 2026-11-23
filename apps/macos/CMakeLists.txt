@@ -29,7 +29,7 @@ set(NBTV_APP_SOURCES
 )
 
 # 內附的測試圖（96×72 的 PPM）：--snapshot 與 --selftest 用它們當畫面來源。
-# 學習式模式（模式 11 到 14）的權重檔也放進去，每個模式一份；app 啟動後第一次用到時載入。
+# 四個模式（11 到 14）的模型權重檔也放進去，每個模式一份；app 啟動後第一次用到時載入。少了哪一份，那個模式就不能用。
 # 檔名是模型的名稱（訓練完成的年月日-當天第幾個）：依序是模式 11、12、13、14 用的。
 set(NBTV_APP_RESOURCES
   ${PROJECT_SOURCE_DIR}/core/tests/data/coffee.ppm

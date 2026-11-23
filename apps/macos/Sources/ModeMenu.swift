@@ -1,4 +1,4 @@
-// 發射模式選單：數位 0–5、類比 8–10，以及（app 裡有權重檔時）學習式 11–14。每一列的資料都取自核心的模式表。
+// 發射模式選單：app 裡有權重檔的模式（模式 11 到 14），由快到慢。每一列的資料都取自核心的模式表。
 import SwiftUI
 
 struct ModeMenuView: View {
@@ -22,19 +22,11 @@ struct ModeMenuView: View {
             .frame(height: 24)
             .accessibilityHidden(true)
 
-            group("數位 · LDPC＋AVIF", "畫面乾淨；愈往下畫質愈高或速度愈快，需要的訊號也愈好")
-            ForEach(Modes.digital) { row($0) }
-
-            Rectangle().fill(Theme.buttonRing).frame(height: 1).padding(.horizontal, 8).padding(.vertical, 6)
-
-            group("相干類比", "訊號愈弱畫面愈糊，但不會整張收不到")
-            ForEach(Modes.analog) { row($0) }
-
-            if !Modes.learned.isEmpty {
-                Rectangle().fill(Theme.buttonRing).frame(height: 1).padding(.horizontal, 8).padding(.vertical, 6)
-
-                group("學習式 · 類神經網路（實驗中）", "弱訊號時比相干類比清楚；收發兩邊要用同一份權重")
-                ForEach(Modes.learned) { row($0) }
+            if Modes.menuOrder.isEmpty {
+                group("沒有可以用的模式", "app 裡找不到模型的權重檔")
+            } else {
+                group("類神經網路編碼（實驗中）", "訊號愈弱畫面愈糊，不會整張收不到；兩邊要用同一份權重")
+                ForEach(Modes.menuOrder) { row($0) }
             }
         }
         .padding(6)

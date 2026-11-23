@@ -1,4 +1,4 @@
-// nbtv-sim：發射 → 通道模擬 → 接收，統計掉幀率（數位）或畫質（類比、學習式）。
+// nbtv-sim：發射 → 通道模擬 → 接收，統計收到幾幀、標頭解出幾成，以及畫質。
 // 每一輪是一次連續發射（幾幀），前面先放一段只有雜訊的時間；每一輪用不同的通道亂數。
 #include <atomic>
 #include <cmath>
@@ -42,7 +42,7 @@ double psnr(const std::vector<std::uint8_t>& a, const std::vector<std::uint8_t>&
 }
 
 bool g_noise_map = true;
-std::shared_ptr<const LearnedCodec> g_model;  // 學習式模式用；載入後不再改變，各執行緒共用
+std::shared_ptr<const LearnedCodec> g_model;  // 載入後不再改變，各執行緒共用
 bool g_learned_median = true, g_learned_attenuate = true, g_learned_floor = true;
 
 Totals run_round(const Mode& mode, sim::ChannelParams params, int burst, const std::vector<std::uint8_t>& image, std::uint64_t seed,
@@ -52,20 +52,9 @@ Totals run_round(const Mode& mode, sim::ChannelParams params, int burst, const s
     tx.set_callsign("BX4ACP");
     tx.set_papr_db(papr_db);
     tx.set_model(g_model);
-    std::vector<std::vector<std::uint8_t>> payloads;
     std::vector<float> signal;
     for (int i = 0; i < burst; ++i) {
-        std::vector<float> frame;
-        if (mode.is_digital()) {
-            std::vector<std::uint8_t> payload(static_cast<std::size_t>(mode.image_bytes()));
-            for (auto& b : payload) b = static_cast<std::uint8_t>(rng.below(256));
-            frame = tx.digital_frame(mode, payload);
-            payloads.push_back(std::move(payload));
-        } else if (mode.is_learned()) {
-            frame = tx.learned_frame(mode, image);
-        } else {
-            frame = tx.analog_frame(mode, image);
-        }
+        const std::vector<float> frame = tx.learned_frame(mode, image);
         signal.insert(signal.end(), frame.begin(), frame.end());
     }
     double power = 0;
@@ -93,12 +82,7 @@ Totals run_round(const Mode& mode, sim::ChannelParams params, int burst, const s
         rx.push(std::span<const float>(received).subspan(pos, std::min<std::size_t>(1024, received.size() - pos)));
         RxFrame f;
         while (rx.poll(f)) {
-            if (mode.is_digital()) {
-                if (f.decoded && f.sequence >= 0 && f.sequence < burst && f.image_data == payloads[static_cast<std::size_t>(f.sequence)]) {
-                    ++t.decoded;
-                    t.snr_sum += f.snr_db;
-                }
-            } else if (f.decoded && f.rgb.size() == image.size()) {
+            if (f.decoded && f.rgb.size() == image.size()) {
                 ++t.received;
                 t.decoded += f.header_ok ? 1 : 0;
                 t.snr_sum += f.snr_db;
@@ -121,7 +105,7 @@ int main(int argc, char** argv) {
     if (args.has("help")) {
         std::printf(
             "用法：nbtv-sim [選項]\n"
-            "  --mode N          模式編號（預設 1）\n"
+            "  --mode N          模式編號 11–14（預設 11）\n"
             "  --channel 名稱    awgn、poor、moderate、slow（預設 awgn）\n"
             "  --snr 清單        訊雜比，可用逗號列出多個，例如 3,4,5（3 kHz 雜訊頻寬）\n"
             "  --frames N        每個訊雜比送幾幀（預設 200）\n"
@@ -129,18 +113,18 @@ int main(int argc, char** argv) {
             "  --offset Hz       頻率偏移；--ppm N 取樣時脈誤差\n"
             "  --tone Hz         單頻載波干擾的頻率；--tone-db dB 它相對於訊號的功率（預設 0）\n"
             "  --impulse N       每秒 N 次脈衝雜訊；--impulse-db dB 脈衝期間的雜訊功率（預設 20）；--impulse-ms 持續時間（預設 20）\n"
-            "  --image 檔.ppm    類比與學習式模式用的畫面（96×72）\n"
-            "  --model 檔名      學習式模式的權重檔（預設用專案 models/ 裡給那個模式的）\n"
-            "  --learned-mean    學習式：告訴解碼器的訊雜比用各格點雜訊的平均值，不用中位數（比較用）\n"
-            "  --learned-plain   學習式：雜訊特別大的格點不壓小（比較用）\n"
-            "  --learned-nofloor 學習式：訊雜比低於解碼器認得的下限時不另外處理（比較用）\n"
+            "  --image 檔.ppm    要送的畫面（96×72）\n"
+            "  --model 檔名      權重檔（預設用專案 models/ 裡給那個模式的）\n"
+            "  --learned-mean    告訴解碼器的訊雜比用各格點雜訊的平均值，不用中位數（比較用）\n"
+            "  --learned-plain   雜訊特別大的格點不壓小（比較用）\n"
+            "  --learned-nofloor 訊雜比低於解碼器認得的下限時不另外處理（比較用）\n"
             "  --papr dB         包絡峰均比目標（0 用預設值，負值不削波）\n"
             "  --flat-noise      接收機不用逐符號、逐載波的雜訊估計（比較用）\n"
             "  --threads N       執行緒數（預設用全部核心）\n"
             "  --seed N          亂數種子\n");
         return 0;
     }
-    const Mode* mode = find_mode(args.integer("mode", 1));
+    const Mode* mode = find_mode(args.integer("mode", 11));
     if (mode == nullptr) {
         std::fprintf(stderr, "沒有這個模式\n");
         return 2;
@@ -170,20 +154,18 @@ int main(int argc, char** argv) {
     const float papr = static_cast<float>(args.num("papr", 0.0));
 
     std::vector<std::uint8_t> image(kImageRgbBytes, 128);
-    if (!mode->is_digital()) {
+    {
         int w = 0, h = 0;
         if (!args.has("image") || !read_ppm(args.str("image", ""), image, &w, &h) || w != kImageWidth || h != kImageHeight) {
-            std::fprintf(stderr, "類比與學習式模式需要 --image 指定 96×72 的 PPM\n");
+            std::fprintf(stderr, "需要 --image 指定 96×72 的 PPM\n");
             return 2;
         }
-    }
-    if (mode->is_learned()) {
         const std::string model_path = args.str("model", default_model_path(mode->id));
         std::vector<std::uint8_t> bytes;
         std::string error = "讀不到檔案";
         if (read_file(model_path, bytes)) g_model = LearnedCodec::load(bytes, &error);
         if (g_model == nullptr || !learned_model_fits(*mode, *g_model)) {
-            std::fprintf(stderr, "學習式模式需要權重檔 %s：%s\n", model_path.c_str(), g_model == nullptr ? error.c_str() : "不是給這個模式用的");
+            std::fprintf(stderr, "需要權重檔 %s：%s\n", model_path.c_str(), g_model == nullptr ? error.c_str() : "不是給這個模式用的");
             return 2;
         }
     }
@@ -194,7 +176,7 @@ int main(int argc, char** argv) {
     if (params.tone_hz > 0.0) std::printf("，載波干擾 %.0f Hz／%+.0f dB", params.tone_hz, params.tone_db);
     if (params.impulse_rate > 0.0) std::printf("，脈衝雜訊每秒 %.1f 次／%+.0f dB／%.0f ms", params.impulse_rate, params.impulse_db, params.impulse_ms);
     std::printf("；每點 %d 幀（每次連續 %d 幀）\n", rounds * burst, burst);
-    std::printf(mode->is_digital() ? "  訊雜比   送出   解出   掉幀率   量到的訊雜比\n" : "  訊雜比   送出   收到   標頭正確   平均 PSNR   量到的訊雜比\n");
+    std::printf("  訊雜比   送出   收到   標頭正確   平均 PSNR   量到的訊雜比\n");
     for (double snr : snrs) {
         params.snr_db = snr;
         Totals total;
@@ -216,16 +198,10 @@ int main(int argc, char** argv) {
             });
         }
         for (std::thread& th : pool) th.join();
-        if (mode->is_digital()) {
-            std::printf("  %5.1f   %5ld  %5ld   %5.1f%%   %6.1f dB\n", snr, total.sent, total.decoded,
-                        100.0 * static_cast<double>(total.sent - total.decoded) / static_cast<double>(total.sent),
-                        total.decoded > 0 ? total.snr_sum / static_cast<double>(total.decoded) : 0.0);
-        } else {
-            std::printf("  %5.1f   %5ld  %5ld   %7.1f%%   %7.1f dB   %6.1f dB\n", snr, total.sent, total.received,
-                        100.0 * static_cast<double>(total.decoded) / static_cast<double>(total.sent),
-                        total.psnr_count > 0 ? total.psnr_sum / static_cast<double>(total.psnr_count) : 0.0,
-                        total.psnr_count > 0 ? total.snr_sum / static_cast<double>(total.psnr_count) : 0.0);
-        }
+        std::printf("  %5.1f   %5ld  %5ld   %7.1f%%   %7.1f dB   %6.1f dB\n", snr, total.sent, total.received,
+                    100.0 * static_cast<double>(total.decoded) / static_cast<double>(total.sent),
+                    total.psnr_count > 0 ? total.psnr_sum / static_cast<double>(total.psnr_count) : 0.0,
+                    total.psnr_count > 0 ? total.snr_sum / static_cast<double>(total.psnr_count) : 0.0);
         std::fflush(stdout);
     }
     return 0;

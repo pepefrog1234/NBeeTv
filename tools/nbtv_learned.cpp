@@ -1,4 +1,4 @@
-// nbtv-learned：用學習式影像編碼把 96×72 的 PPM 編成通道值、加白雜訊、再解回來，印出畫質與花的時間。
+// nbtv-learned：用模型把 96×72 的 PPM 編成通道值、加白雜訊、再解回來，印出畫質與花的時間。
 // 不經過數據機，只看「畫面 ↔ 通道值」這一段（等於理想的等化）；走完整收發鏈的是模式 11 到 14，用 nbtv-tx、nbtv-rx、nbtv-sim。
 #include <chrono>
 #include <cmath>
@@ -41,7 +41,7 @@ int main(int argc, char** argv) {
     if (args.positional.empty() || args.has("help")) {
         std::printf(
             "用法：nbtv-learned [選項] 影像.ppm [影像2.ppm …]\n"
-            "  --mode N        用哪個學習式模式的模型：11（2.72 秒）、12（1.04 秒）、13（2.72 秒，加寬的模型）\n"
+            "  --mode N        用哪個模式的模型：11（2.72 秒）、12（1.04 秒）、13（2.72 秒，加寬的模型）\n"
             "                  或 14（0.67 秒，加寬的模型），預設 11\n"
             "  --model 檔名    直接指定權重檔（預設是專案 models/ 裡給那個模式的）\n"
             "  --snr dB        加白雜訊的格點訊雜比；不給就不加雜訊\n"
@@ -52,8 +52,8 @@ int main(int argc, char** argv) {
         return args.has("help") ? 0 : 2;
     }
     const Mode* mode = find_mode(args.integer("mode", 11));
-    if (mode == nullptr || !mode->is_learned()) {
-        std::fprintf(stderr, "--mode 要是學習式模式的編號\n");
+    if (mode == nullptr) {
+        std::fprintf(stderr, "沒有這個模式\n");
         return 2;
     }
     const std::string model_path = args.str("model", default_model_path(mode->id));

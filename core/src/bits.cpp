@@ -41,16 +41,6 @@ std::uint16_t crc16(std::span<const std::uint8_t> bytes) {
     return crc;
 }
 
-void scramble(std::span<std::uint8_t> bits) {
-    // 暫存器第 1 級放在 bit 14、第 15 級放在 bit 0；回授是第 14、15 級的互斥或。
-    unsigned sr = 0x4A80u;
-    for (std::uint8_t& bit : bits) {
-        const unsigned fb = (sr ^ (sr >> 1)) & 1u;
-        bit = static_cast<std::uint8_t>(bit ^ fb);
-        sr = (sr >> 1) | (fb << 14);
-    }
-}
-
 std::array<std::int8_t, 128> pilot_prbs() {
     std::array<std::uint8_t, 128> w{};
     for (std::size_t k = 0; k < w.size(); ++k) {

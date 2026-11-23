@@ -1,4 +1,4 @@
-// 位元工具、CRC、擾碼、導頻 PRBS、呼號編碼與 FFT。
+// 位元工具、CRC、導頻 PRBS、呼號編碼與 FFT。
 #include <cmath>
 #include <string>
 #include <vector>
@@ -30,24 +30,6 @@ void test_crc() {
     CHECK_EQ(crc32(data), 0xCBF43926u);  // CRC-32 的標準檢查值
     CHECK_EQ(crc16(data), 0x29B1u);      // CRC-16/CCITT-FALSE 的標準檢查值
     CHECK_EQ(crc32({}), 0u);
-}
-
-void test_scrambler() {
-    // DVB 的能量擴散序列以 0000 0011 開頭（第一個位元組是 0x03）。
-    std::vector<std::uint8_t> bits(64, 0);
-    scramble(bits);
-    std::vector<std::uint8_t> bytes(8);
-    bits_to_bytes(bits, bytes);
-    CHECK_EQ(bytes[0], 0x03);
-    // 做兩次會還原
-    scramble(bits);
-    for (std::uint8_t b : bits) CHECK_EQ(b, 0);
-    // 長序列裡 0 與 1 大致各半
-    std::vector<std::uint8_t> long_bits(16200, 0);
-    scramble(long_bits);
-    int ones = 0;
-    for (std::uint8_t b : long_bits) ones += b;
-    CHECK(ones > 7800 && ones < 8400);
 }
 
 void test_pilot_prbs() {
@@ -123,7 +105,6 @@ void test_fft() {
 int main() {
     test_bit_packing();
     test_crc();
-    test_scrambler();
     test_pilot_prbs();
     test_callsign();
     test_fft();

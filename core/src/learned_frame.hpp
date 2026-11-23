@@ -1,13 +1,13 @@
-// 學習式模式（實驗中）：畫面 ↔ 一幀的資料格。
+// 畫面 ↔ 一幀的資料格。
 //
-// 幀的安排比照相干類比：開頭 kAnalogHeaderCells 格是標頭（和類比同一種編法），之後每格放兩個實數，
-// 最後做同一種格點交錯。實數由 LearnedCodec 產生（mode.learned_values 個）；模式多出來的格點是 0。
+// 幀的安排：開頭 kHeaderCells 格是標頭（frame_header.hpp），之後每格放兩個實數，最後整幀做格點交錯
+// （Mode::interleaved_position）。實數由 LearnedCodec 產生（mode.learned_values 個）；模式多出來的格點是 0。
 //
 // 實數放進格點之前先照一個固定的亂數排列打散（learned_value_order）。編碼器的輸出是「通道 × 列 × 行」，
 // 照原來的順序放的話，衰落抹掉的一片格點會集中落在畫面的某幾行上：那一塊在每個通道都沒有資料，
 // 解碼器就在那裡畫出黑塊與點陣。打散之後，同樣的衰落在每個位置只抹掉差不多比例的通道，畫面是整體變糊。
 //
-// 標頭：「格式」那 4 個位元是 kLearnedFrameFormat（排法改了就換一個數字）；「幀增益」那個位元組改放
+// 標頭：「格式」那 4 個位元是 kLearnedFrameFormat（排法改了就換一個數字），另有一個位元組放
 // 模型識別碼的最低 8 位元。兩者有一個對不上，接收端就知道解不出來，不交出畫面。
 #pragma once
 
@@ -16,7 +16,7 @@
 #include <span>
 #include <vector>
 
-#include "analog_frame.hpp"
+#include "frame_header.hpp"
 #include "learned_codec.hpp"
 #include "modes.hpp"
 #include "types.hpp"
@@ -33,7 +33,7 @@ const std::vector<std::uint16_t>& learned_value_order(const Mode& mode);
 // 這個模型能不能用在這個模式：實數的個數與寬度（LearnedCodec::base_width）都要和模式的相同。
 bool learned_model_fits(const Mode& mode, const LearnedCodec& codec);
 
-// 發射機、接收機手上的一組模型。每個學習式模式用「實數個數與寬度都和它相同」的那一個，所以每種組合最多留一個。
+// 發射機、接收機手上的一組模型。每個模式用「實數個數與寬度都和它相同」的那一個，所以每種組合最多留一個。
 class LearnedModels {
 public:
     // 加進一個模型；已經有實數個數與寬度都相同的就換成這一個。空指標表示全部拿掉。
@@ -45,15 +45,15 @@ private:
     std::vector<std::shared_ptr<const LearnedCodec>> models_;
 };
 
-// 畫面 → mode.data_cells() 個格點，依傳送順序。header 的 gain_code 由這裡填。
+// 畫面 → mode.data_cells() 個格點，依傳送順序。header 的 format 與 model_tag 由這裡填。
 // values 不是空指標時，另外交出編碼器產生的實數（發射端做預覽用）。模型和模式不合時回傳空的。
-std::vector<cf> learned_encode(const Mode& mode, const LearnedCodec& codec, const AnalogHeader& header,
+std::vector<cf> learned_encode(const Mode& mode, const LearnedCodec& codec, const FrameHeader& header,
                                std::span<const std::uint8_t> rgb, std::vector<float>* values = nullptr);
 
 // 還原交錯、解出標頭之後的一幀
 struct LearnedUnpacked {
     bool header_ok = false;
-    AnalogHeader header;           // header_ok 時有效；gain_code 是對方模型識別碼的最低 8 位元
+    FrameHeader header;            // header_ok 時有效；model_tag 是對方模型識別碼的最低 8 位元
     std::vector<float> values;     // mode.learned_values 個實數
     std::vector<float> noise_var;  // 各實數所在格點的複數雜訊變異數
 };

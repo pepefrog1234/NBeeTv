@@ -8,12 +8,8 @@
 #include <string>
 #include <vector>
 
-#include "analog_tables.hpp"
-#include "av1_payload.hpp"
 #include "callsign.hpp"
-#include "digital_frame.hpp"
 #include "dsp.hpp"
-#include "image_codec.hpp"
 #include "learned_codec.hpp"
 #include "modes.hpp"
 #include "receiver.hpp"
@@ -26,7 +22,6 @@
 static_assert(NBTV_IMAGE_RGB_BYTES == nbtv::kImageRgbBytes);
 static_assert(NBTV_CALLSIGN_MAX == nbtv::kCallsignMaxChars);
 static_assert(NBTV_SPECTRUM_BINS == nbtv::kSpectrumBins);
-static_assert(NBTV_AVIF_OVERHEAD == nbtv::kAvifShellBytes + nbtv::kAvifTemporalDelimiterBytes);
 
 namespace {
 
@@ -35,34 +30,18 @@ using nbtv::Mode;
 void fill(const Mode& m, nbtv_mode_info* out) {
     *out = nbtv_mode_info{};
     out->id = m.id;
-    out->kind = m.is_digital() ? NBTV_MODE_DIGITAL : m.is_learned() ? NBTV_MODE_LEARNED : NBTV_MODE_ANALOG;
     out->payload_symbols = m.payload_symbols;
     out->frame_symbols = m.frame_symbols();
     out->frame_samples = m.frame_samples();
     out->frame_seconds = m.frame_seconds();
     out->data_cells = m.data_cells();
-    out->bits_per_cell = m.bits_per_cell;
-    out->code_rate_num = m.rate_num;
-    out->code_rate_den = m.rate_den;
-    out->ldpc_info_bits = m.ldpc_info_bits;
-    out->payload_bytes = m.payload_bytes();
-    out->image_bytes = m.image_bytes();
-    out->padding_cells = m.padding_cells();
-    out->header_cells = m.header_cells();
-    out->analog_values = m.analog_values();
-    out->analog_coefficients = m.is_analog() ? nbtv::analog_plan(m).coefficients : 0;
+    out->header_cells = nbtv::kHeaderCells;
+    out->value_capacity = m.value_capacity();
     out->learned_values = m.learned_values;
     out->learned_width = m.learned_width;
 }
 
 constexpr bool valid_rate(int sample_rate) { return sample_rate == 12000 || sample_rate == 48000; }
-
-constexpr int max_image_bytes() {
-    int n = 0;
-    for (const Mode& m : nbtv::kModes) n = std::max(n, m.image_bytes());
-    return n;
-}
-static_assert(NBTV_MAX_IMAGE_BYTES == max_image_bytes());
 
 std::span<const std::uint8_t> rgb_span(const std::uint8_t* rgb) { return {rgb, static_cast<std::size_t>(nbtv::kImageRgbBytes)}; }
 
@@ -74,8 +53,7 @@ struct nbtv_model {
 
 struct nbtv_tx {
     int rate = nbtv::kSampleRate;
-    const Mode* mode = nbtv::find_mode(1);
-    int speed = nbtv::kDefaultEncoderSpeed;
+    const Mode* mode = &nbtv::kModes.front();
     nbtv::Transmitter tx;
     nbtv::Interpolator4 up;
     bool need_flush = false;
@@ -151,7 +129,7 @@ int nbtv_mode_by_id(int id, nbtv_mode_info* out) {
     return 0;
 }
 
-/* ---- 學習式模式的模型 ---- */
+/* ---- 模型 ---- */
 
 nbtv_model* nbtv_model_load(const uint8_t* data, size_t size) {
     if (data == nullptr || size == 0) return nullptr;
@@ -179,33 +157,6 @@ int nbtv_callsign_normalize(const char* text, char* out) {
     return static_cast<int>(call.size());
 }
 
-/* ---- 影像 ---- */
-
-int nbtv_has_image_codec(void) { return nbtv::image_codec_available() ? 1 : 0; }
-
-int nbtv_image_encode(const uint8_t* rgb, int max_bytes, int speed, uint8_t* out, int out_capacity) {
-    if (rgb == nullptr || out == nullptr) return -1;
-    nbtv::ImageEncodeResult r;
-    if (!nbtv::image_encode(rgb_span(rgb), max_bytes, speed < 0 ? nbtv::kDefaultEncoderSpeed : speed, r)) return -1;
-    if (static_cast<int>(r.payload.size()) > out_capacity) return -1;
-    std::copy(r.payload.begin(), r.payload.end(), out);
-    return static_cast<int>(r.payload.size());
-}
-
-int nbtv_image_decode(const uint8_t* payload, int length, uint8_t* rgb) {
-    if (payload == nullptr || rgb == nullptr || length <= 0) return -1;
-    const bool ok = nbtv::image_decode({payload, static_cast<std::size_t>(length)}, {rgb, static_cast<std::size_t>(nbtv::kImageRgbBytes)});
-    return ok ? 0 : -1;
-}
-
-int nbtv_avif_from_payload(const uint8_t* payload, int length, uint8_t* out, int out_capacity) {
-    if (payload == nullptr || out == nullptr || length <= 0) return -1;
-    const std::vector<std::uint8_t> file = nbtv::avif_from_payload({payload, static_cast<std::size_t>(length)});
-    if (file.empty() || static_cast<int>(file.size()) > out_capacity) return -1;
-    std::copy(file.begin(), file.end(), out);
-    return static_cast<int>(file.size());
-}
-
 /* ---- 發射 ---- */
 
 nbtv_tx* nbtv_tx_create(int sample_rate) {
@@ -230,10 +181,6 @@ void nbtv_tx_set_callsign(nbtv_tx* tx, const char* callsign) {
     if (tx != nullptr) tx->tx.set_callsign(nbtv::normalize_callsign(callsign != nullptr ? callsign : ""));
 }
 
-void nbtv_tx_set_encoder_speed(nbtv_tx* tx, int speed) {
-    if (tx != nullptr) tx->speed = speed < 0 ? nbtv::kDefaultEncoderSpeed : std::min(speed, 10);
-}
-
 void nbtv_tx_set_model(nbtv_tx* tx, const nbtv_model* model) {
     if (tx != nullptr) tx->tx.set_model(model != nullptr ? model->codec : nullptr);
 }
@@ -250,56 +197,19 @@ int nbtv_tx_encode_image(nbtv_tx* tx, const uint8_t* rgb, float* samples, int ca
                          nbtv_tx_frame_info* info) {
     if (tx == nullptr || rgb == nullptr || samples == nullptr || capacity < nbtv_tx_frame_samples(tx)) return -1;
     const Mode& mode = *tx->mode;
+    if (tx->tx.model_for(mode) == nullptr) return -1;
     nbtv_tx_frame_info local{};
     local.mode_id = mode.id;
     local.sequence = tx->tx.sequence();
-    std::vector<float> frame;
-    if (mode.is_digital()) {
-        nbtv::ImageEncodeResult enc;
-        if (!nbtv::image_encode(rgb_span(rgb), mode.image_bytes(), tx->speed, enc)) return -1;
-        tx->remember();
-        local.image_bytes = static_cast<int>(enc.payload.size());
-        local.quantizer = enc.quantizer;
-        if (preview_rgb != nullptr &&
-            !nbtv::image_decode(enc.payload, {preview_rgb, static_cast<std::size_t>(nbtv::kImageRgbBytes)})) {
-            std::memcpy(preview_rgb, rgb, static_cast<std::size_t>(nbtv::kImageRgbBytes));
-        }
-        frame = tx->tx.digital_frame(mode, enc.payload, static_cast<int>(nbtv::ImageFormat::Av1));
-    } else if (mode.is_learned()) {
-        if (tx->tx.model_for(mode) == nullptr) return -1;
-        std::vector<std::uint8_t> preview;
-        tx->remember();
-        frame = tx->tx.learned_frame(mode, rgb_span(rgb), preview_rgb != nullptr ? &preview : nullptr);
-        if (frame.empty()) {
-            tx->undo.valid = false;
-            return -1;
-        }
-        if (preview_rgb != nullptr) std::copy(preview.begin(), preview.end(), preview_rgb);
-    } else {
-        std::vector<std::uint8_t> preview;
-        tx->remember();
-        frame = tx->tx.analog_frame(mode, rgb_span(rgb), preview_rgb != nullptr ? &preview : nullptr);
-        if (preview_rgb != nullptr) std::copy(preview.begin(), preview.end(), preview_rgb);
-        local.coefficients = nbtv::analog_plan(mode).coefficients;
-    }
-    if (info != nullptr) *info = local;
-    return tx->deliver(frame, samples, capacity);
-}
-
-int nbtv_tx_encode_payload(nbtv_tx* tx, const uint8_t* payload, int length, float* samples, int capacity,
-                           nbtv_tx_frame_info* info) {
-    if (tx == nullptr || payload == nullptr || samples == nullptr || capacity < nbtv_tx_frame_samples(tx)) return -1;
-    const Mode& mode = *tx->mode;
-    if (!mode.is_digital() || length < 0 || length > mode.image_bytes()) return -1;
-    if (info != nullptr) {
-        *info = nbtv_tx_frame_info{};
-        info->mode_id = mode.id;
-        info->sequence = tx->tx.sequence();
-        info->image_bytes = length;
-    }
+    std::vector<std::uint8_t> preview;
     tx->remember();
-    const std::vector<float> frame =
-        tx->tx.digital_frame(mode, {payload, static_cast<std::size_t>(length)}, static_cast<int>(nbtv::ImageFormat::Av1));
+    const std::vector<float> frame = tx->tx.learned_frame(mode, rgb_span(rgb), preview_rgb != nullptr ? &preview : nullptr);
+    if (frame.empty()) {
+        tx->undo.valid = false;
+        return -1;
+    }
+    if (preview_rgb != nullptr) std::copy(preview.begin(), preview.end(), preview_rgb);
+    if (info != nullptr) *info = local;
     return tx->deliver(frame, samples, capacity);
 }
 
@@ -381,24 +291,15 @@ int nbtv_rx_poll_frame(nbtv_rx* rx, nbtv_rx_frame* out) {
     if (!rx->rx.poll(f)) return 0;
     std::memset(out, 0, sizeof *out);
     out->mode_id = f.mode_id;
-    out->kind = f.is_digital ? NBTV_MODE_DIGITAL : f.is_learned ? NBTV_MODE_LEARNED : NBTV_MODE_ANALOG;
     out->model_missing = f.model_missing ? 1 : 0;
-    out->decoded = f.decoded ? 1 : 0;
     out->header_ok = f.header_ok ? 1 : 0;
     std::strncpy(out->callsign, f.callsign.c_str(), NBTV_CALLSIGN_MAX);
     out->sequence = f.header_ok ? f.sequence : -1;
     out->snr_db = f.snr_db;
     out->freq_offset_hz = f.freq_offset_hz;
-    if (f.is_digital) {
-        if (f.decoded && f.image_format == static_cast<int>(nbtv::ImageFormat::Av1)) {
-            const std::size_t length = std::min<std::size_t>(nbtv::av1_payload_length(f.image_data), NBTV_MAX_IMAGE_BYTES);
-            out->image_bytes = static_cast<int>(length);
-            std::copy_n(f.image_data.begin(), length, out->image_data);
-            out->has_image = length > 0 && nbtv::image_decode({out->image_data, length}, {out->rgb, sizeof out->rgb}) ? 1 : 0;
-        }
-    } else if (f.decoded && f.rgb.size() == sizeof out->rgb) {
+    if (f.decoded && f.rgb.size() == sizeof out->rgb) {
         std::copy(f.rgb.begin(), f.rgb.end(), out->rgb);
-        out->has_image = 1;
+        out->decoded = 1;
     }
     return 1;
 }

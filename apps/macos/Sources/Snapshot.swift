@@ -16,8 +16,8 @@ enum SnapshotRunner {
             print("[snapshot] 找不到內附的測試圖")
             return 1
         }
-        guard NBTV.hasImageCodec else {
-            print("[snapshot] 這個建置沒有影像編解碼器，無法產生數位模式的示範資料")
+        guard [11, 12, 13].allSatisfy({ Modes.find($0) != nil }) else {
+            print("[snapshot] app 裡少了模式 11、12 或 13 的權重檔，無法產生示範資料")
             return 1
         }
 
@@ -44,7 +44,7 @@ enum SnapshotRunner {
             var many = original
             while many.count < count {
                 let source = original[many.count % original.count]
-                many.append(AppModel.ReceivedFrame(image: source.image, payload: source.payload, isDigital: source.isDigital, modeID: source.modeID,
+                many.append(AppModel.ReceivedFrame(image: source.image, modeID: source.modeID,
                                                    callsign: source.callsign, sequence: source.sequence,
                                                    time: (many.last?.time ?? Date()).addingTimeInterval(-3),
                                                    snrDb: source.snrDb - Double(many.count % 9) * 1.7))
@@ -72,10 +72,9 @@ enum SnapshotRunner {
         render(SettingsView(placeholderControls: true).environmentObject(receiving), width: 560, height: SettingsView.windowHeight,
                to: directory.appendingPathComponent("4-settings.png"))
 
-        // 5. 發射模式選單
-        // app 裡有學習式模式的權重檔時，選單多一組（分隔線與標題共 50 點，每個模式一列 30 點）
-        let menuHeight: CGFloat = 470 + (Modes.learned.isEmpty ? 0 : 50 + 30 * CGFloat(Modes.learned.count))
-        let menu = ModeMenuView(selectedID: 1, standalone: true) { _ in }
+        // 5. 發射模式選單：欄位標題、一組說明，每個模式一列 30 點，外加四周的留白
+        let menuHeight: CGFloat = 112 + 30 * CGFloat(Modes.menuOrder.count)
+        let menu = ModeMenuView(selectedID: Modes.defaultID, standalone: true) { _ in }
             .padding(16)
             .frame(width: 400, height: menuHeight, alignment: .top)
             .background(Theme.background)
@@ -94,7 +93,7 @@ enum SnapshotRunner {
         settings.pttMode = .serial
         settings.serialPort = "/dev/cu.usbserial-1420"
         settings.serialLine = .rts
-        settings.txModeID = 1
+        settings.txModeID = Modes.defaultID
         settings.sourceKind = source
         // 開發用：NBTV_SNAPSHOT_SNR=1 打開「在收到的畫面上標示訊雜比」，NBTV_SNAPSHOT_NO_LOOP=1 取消「循環播放」
         settings.showFrameSNR = ProcessInfo.processInfo.environment["NBTV_SNAPSHOT_SNR"] != nil
@@ -106,7 +105,7 @@ enum SnapshotRunner {
         Calendar.current.date(bySettingHour: hour, minute: minute, second: second, of: Date()) ?? Date()
     }
 
-    /// 對方（N0CALL）先後用類比 8、類比 9、數位 3 傳了幾張；我們從數位那一段的第 10 張開始收，目前第 13 張收到一半。
+    /// 對方（N0CALL）先後用模式 12、模式 11、模式 13 傳了幾張；我們從最後那一段的第 10 張開始收，目前第 13 張收到一半。
     private static func makeReceivingModel(coffee: Data, rocket: Data, cat: Data) -> AppModel {
         let model = AppModel(settings: demoSettings(source: .camera), live: false)
         model.refreshDevices()
@@ -130,24 +129,24 @@ enum SnapshotRunner {
             if partial == nil { out += tx.finish() }
             return out
         }
-        let analogFast = session(mode: 8, images: [coffee])
-        let analogMedium = session(mode: 9, images: [rocket, cat])
-        // 數位 3：共 13 張，只收第 10–12 張，以及第 13 張的前 61 個符號
+        let fast = session(mode: 12, images: [coffee])
+        let medium = session(mode: 11, images: [rocket, cat])
+        // 模式 13：共 13 張，只收第 10–12 張，以及第 13 張的前 61 個符號
         let cycle = [coffee, rocket, cat]
-        let symbolSamples = Modes.find(3).map { Int(($0.frameSeconds * Double(NBTV.sampleRate) / Double($0.frameSymbols)).rounded()) } ?? 1280
-        let digital = session(mode: 3, images: (0..<13).map { cycle[$0 % 3] }, keepFrom: 9, partial: 61 * symbolSamples)
-        signal = analogFast + analogMedium + digital
+        let symbolSamples = Modes.find(13).map { Int(($0.frameSeconds * Double(NBTV.sampleRate) / Double($0.frameSymbols)).rounded()) } ?? 1280
+        let last = session(mode: 13, images: (0..<13).map { cycle[$0 % 3] }, keepFrom: 9, partial: 61 * symbolSamples)
+        signal = fast + medium + last
         // 兩次發射之間的空檔。開發用：NBTV_SNAPSHOT_GAP=秒數 可以換成別的長度——不論多長，接收機都應該解出 6 張
         // （核心曾經在 0.75–0.81 秒這幾個長度漏掉下一張或多交出一張，回歸測試在 core/tests/test_link.cpp）
         let gap = ProcessInfo.processInfo.environment["NBTV_SNAPSHOT_GAP"].flatMap(Double.init) ?? 0.8
-        audio += analogFast + Demo.silence(seconds: gap) + analogMedium + Demo.silence(seconds: 6.5) + digital
+        audio += fast + Demo.silence(seconds: gap) + medium + Demo.silence(seconds: 6.5) + last
 
         // 訊雜比 14 dB、電台偏了 +12 Hz、輸入音量約 −18 dB
         let received = Demo.radioChannel(audio, signalPower: Demo.power(signal), snrDb: 14, shiftHz: 12, outputLevelDb: -18)
         // 照實際接收的順序把每一塊的更新交給介面的狀態物件；時間用示範的鐘點
         let times = [time(14, 19, 58), time(14, 20, 12), time(14, 20, 15), time(14, 32, 1), time(14, 32, 4), time(14, 32, 7)]
         var decoded = 0
-        var last = RxUpdate()
+        var final = RxUpdate()
         var log: [String] = []
         for update in Demo.receive(received) {
             var status = update
@@ -156,16 +155,16 @@ enum SnapshotRunner {
             for frame in update.frames {
                 model.add(frame, time: times[min(decoded, times.count - 1)])
                 if frame.decoded { decoded += 1 }
-                log.append("\(Modes.find(frame.modeID)?.name ?? "模式 \(frame.modeID)")\(frame.decoded ? "" : "（解碼失敗）")"
+                log.append("\(Modes.find(frame.modeID)?.name ?? "模式 \(frame.modeID)")\(frame.decoded ? "" : "（沒有畫面）")"
                     + (frame.headerOK ? " \(frame.callsign) 第 \(frame.sequence + 1) 張" : " 標頭錯誤"))
             }
-            last = update
+            final = update
         }
         if decoded != times.count {
             print("[snapshot] 注意：預期解出 \(times.count) 張，實際 \(decoded) 張。接收機依序交出：" + log.joined(separator: "、"))
         }
         print(String(format: "[snapshot] 接收：解出 %d 張，同步 %@，訊雜比 %.1f dB，頻偏 %+.1f Hz，進度 %d/%d，輸入 %.1f dB", decoded,
-                     last.synced ? "是" : "否", last.snrDb, last.offsetHz, last.symbolsDone, last.symbolsTotal, last.inputLevelDb))
+                     final.synced ? "是" : "否", final.snrDb, final.offsetHz, final.symbolsDone, final.symbolsTotal, final.inputLevelDb))
         if let source = NBTV.image(fromRGB: coffee), let scaled = FrameScaler.scale(source, mode: .fill) {
             model.sourcePreview = NBTV.image(fromRGB: scaled)
             model.sourceSize = CGSize(width: source.width, height: source.height)
@@ -173,34 +172,33 @@ enum SnapshotRunner {
         return model
     }
 
-    /// 我們（BX4ACP）用數位 1 發射：已送出 8 張，第 9 張送到 3.2 秒。
+    /// 我們用模式 11 發射：已送出 8 張，第 9 張送到 1.6 秒。
     private static func makeTransmittingModel(coffee: Data, rocket: Data, cat: Data, history: [AppModel.ReceivedFrame]) -> AppModel {
         let model = AppModel(settings: demoSettings(source: .camera), live: false)
         model.refreshDevices()
         model.history = history
         let tx = CoreTransmitter()
-        tx.setMode(1)
-        tx.setCallsign("BX4ACP")
+        tx.setMode(11)
+        tx.setCallsign(model.settings.callsign)
         let cycle = [rocket, cat, coffee]
         let frames = (0..<9).compactMap { tx.encode(rgb: cycle[$0 % 3]) }
-        guard let current = frames.last, let mode = Modes.find(1) else { return model }
-        let progress = 3.2
+        guard let current = frames.last, let mode = Modes.find(11) else { return model }
+        let progress = 1.6
         model.txPhase = .transmitting
-        model.txModeID = 1
+        model.txModeID = 11
         model.txFrameNumber = frames.count
         model.txFramesSent = frames.count - 1
         model.txFrameProgress = progress
         model.txElapsed = Double(frames.count - 1) * mode.frameSeconds + progress
         model.txPreview = NBTV.image(fromRGB: current.preview)
-        model.txBytes = current.imageBytes
-        // 瀑布圖：送出去的訊號（前面幾張加上目前這張的前 3.2 秒）
+        // 瀑布圖：送出去的訊號（前面幾張加上目前這張的前 1.6 秒）
         var sent: [Float] = []
         for frame in frames.dropLast().suffix(3) { sent += frame.samples }
         sent += current.samples[0..<Int(progress * Double(NBTV.sampleRate))]
         let gain = Float(pow(10.0, model.settings.outputLevelDb / 20.0))
         let rows = Demo.monitorRows(sent.map { $0 * gain })
         model.appendSpectrum(rows, reference: .transmit)
-        print("[snapshot] 發射：第 \(frames.count) 張，壓縮後 \(current.imageBytes) 位元組，瀑布圖 \(rows.count) 列")
+        print("[snapshot] 發射：第 \(frames.count) 張（\(mode.label)），瀑布圖 \(rows.count) 列")
         if let source = NBTV.image(fromRGB: coffee), let scaled = FrameScaler.scale(source, mode: .fill) {
             model.sourcePreview = NBTV.image(fromRGB: scaled)
             model.sourceSize = CGSize(width: source.width, height: source.height)

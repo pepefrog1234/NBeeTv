@@ -1,10 +1,12 @@
 // 端對端：發射 → 通道模擬 → 接收機（同步、通道估測、解碼）。
+// 這裡看的是接收機本身：捕獲、頻偏與定時、追蹤、兩次發射之間的銜接。各個模式的畫質在 test_learned.cpp。
 #include <algorithm>
-#include <cmath>
 #include <cstdio>
 
 #include "check.hpp"
 #include "link_util.hpp"
+#include "ofdm_tx.hpp"
+#include "rng.hpp"
 #include "test_images.hpp"
 
 using namespace nbtv;
@@ -12,17 +14,20 @@ using namespace link_util;
 
 namespace {
 
-// 乾淨的通道：每個數位模式連續三幀都要解出來，頻偏與訊雜比的讀數合理
+// 乾淨的通道：每個模式連續三幀都要收到，頻偏與訊雜比的讀數合理
 void test_clean() {
+    const auto rgb = test_images::load("coffee");
     for (const Mode& m : kModes) {
-        if (!m.is_digital()) continue;
         sim::ChannelParams p;
         p.add_noise = false;
-        const LinkResult r = run_digital_link(m, 3, p, 100 + static_cast<std::uint64_t>(m.id));
+        const LinkResult r = run_link(m, 3, rgb, p);
         CHECK_EQ(r.decoded, 3);
         CHECK_EQ(static_cast<int>(r.frames.size()), 3);
-        for (const RxFrame& f : r.frames) {
+        for (std::size_t i = 0; i < r.frames.size(); ++i) {
+            const RxFrame& f = r.frames[i];
             CHECK_EQ(f.mode_id, m.id);
+            CHECK_EQ(f.sequence, static_cast<int>(i));
+            CHECK(!f.model_missing);
             CHECK_NEAR(f.freq_offset_hz, 0.0, 0.3);
             CHECK(f.snr_db > 18.0);  // 只剩削波失真
         }
@@ -31,18 +36,19 @@ void test_clean() {
     }
 }
 
-// 白雜訊：比草案的 AWGN 容量極限高 3–4 dB 的地方要全部解出來，量到的訊雜比要接近設定值
+// 白雜訊：每一幀都要收到（標頭也要解得出來），量到的訊雜比要接近設定值
 void test_awgn() {
+    const auto rgb = test_images::load("rocket");
     struct Point {
         int mode;
         double snr_db;
     };
-    for (const Point& pt : {Point{0, -1.5}, Point{1, 2.5}, Point{2, 6.5}, Point{3, 7.5}, Point{4, 12.5}, Point{5, 16.5}}) {
+    for (const Point& pt : {Point{11, 2.5}, Point{12, 6.5}, Point{13, 12.5}, Point{14, 2.5}, Point{14, 16.5}}) {
         const Mode& m = *find_mode(pt.mode);
         sim::ChannelParams p;
         p.snr_db = pt.snr_db;
         p.seed = 7 + static_cast<std::uint64_t>(pt.mode);
-        const LinkResult r = run_digital_link(m, 3, p, 200 + static_cast<std::uint64_t>(pt.mode), 5000);
+        const LinkResult r = run_link(m, 3, rgb, p, 5000);
         CHECK_EQ(r.decoded, 3);
         double snr = 0;
         for (const RxFrame& f : r.frames) snr += f.snr_db / static_cast<double>(r.frames.size());
@@ -53,39 +59,42 @@ void test_awgn() {
 
 // 頻率偏移 ±150 Hz 內都要能捕獲，讀數要對
 void test_frequency_offset() {
-    const Mode& m = *find_mode(3);
+    const auto rgb = test_images::load("cat");
+    const Mode& m = *find_mode(12);
     for (double offset : {-150.0, -93.75, -47.0, -20.0, 0.4, 46.0, 100.0, 150.0}) {
         sim::ChannelParams p;
         p.snr_db = 12.0;
         p.freq_offset_hz = offset;
         p.seed = 31;
-        const LinkResult r = run_digital_link(m, 2, p, 300);
+        const LinkResult r = run_link(m, 2, rgb, p);
         CHECK_EQ(r.decoded, 2);
         if (!r.frames.empty()) CHECK_NEAR(r.frames[0].freq_offset_hz, offset, 0.5);
     }
 }
 
-// 取樣時脈誤差 ±100 ppm
+// 取樣時脈誤差 ±100 ppm：最長的幀（2.72 秒）裡定時會漂 3 個取樣
 void test_clock_offset() {
+    const auto rgb = test_images::load("cat");
     for (double ppm : {-100.0, 100.0}) {
-        for (int mode : {1, 5}) {
+        for (int mode : {11, 14}) {
             const Mode& m = *find_mode(mode);
             sim::ChannelParams p;
-            p.snr_db = mode == 1 ? 4.0 : 20.0;
+            p.snr_db = mode == 11 ? 4.0 : 20.0;
             p.clock_ppm = ppm;
             p.seed = 41;
-            const LinkResult r = run_digital_link(m, 3, p, 400);
+            const LinkResult r = run_link(m, 3, rgb, p);
             CHECK_EQ(r.decoded, 3);
         }
     }
 }
 
-// 只有雜訊：不能解出任何幀，也不能一直停在「已同步」
+// 只有雜訊：不能交出任何幀，也不能一直停在「已同步」
 void test_noise_only() {
     Rng rng(55);
     std::vector<float> noise(12000 * 40);
     for (float& v : noise) v = static_cast<float>(0.1 * rng.gauss());
     Receiver rx;
+    attach_models(rx);
     int synced_chunks = 0, chunks = 0;
     for (std::size_t pos = 0; pos < noise.size(); pos += 1200) {
         rx.push(std::span<const float>(noise).subspan(pos, 1200));
@@ -99,97 +108,71 @@ void test_noise_only() {
     std::printf("  純雜訊 40 秒：%d/%d 個時段誤判為同步\n", synced_chunks, chunks);
 }
 
-// 衰落通道（2 ms／1 Hz），訊雜比充裕時應該幾乎都解得出來
+// 衰落通道（2 ms／1 Hz），訊雜比充裕時應該幾乎都收得到
 void test_fading() {
-    const Mode& m = *find_mode(1);
+    const auto rgb = test_images::load("cat");
+    const Mode& m = *find_mode(11);
     sim::ChannelParams p;
     sim::channel_preset("poor", p);
     p.snr_db = 14.0;
     p.seed = 77;
-    const LinkResult r = run_digital_link(m, 6, p, 500);
+    const LinkResult r = run_link(m, 6, rgb, p);
     CHECK(r.decoded >= 5);
-    std::printf("  模式 1 差通道 14 dB：%d/6\n", r.decoded);
+    std::printf("  模式 11 差通道 14 dB：%d/6\n", r.decoded);
 }
 
-// 弱訊號：模式 0 在 −2 dB、頻偏 130 Hz 下仍要從第一幀就鎖定（S0 的頻偏與定時估計在這裡都很吵，
+// 弱訊號：0 dB、頻偏 130 Hz 下仍要從第一幀就鎖定（S0 的頻偏與定時估計在這裡都很吵，
 // 靠 S1 與導頻的驗證把它們修正回來）
 void test_weak_signal() {
-    const Mode& m = *find_mode(0);
+    const auto rgb = test_images::load("rocket");
+    const Mode& m = *find_mode(13);
     sim::ChannelParams p;
-    p.snr_db = -2.0;
+    p.snr_db = 0.0;
     p.freq_offset_hz = 130.0;
-    int decoded = 0;
-    for (std::uint64_t seed : {4u, 38u, 44u}) {  // 改進捕獲之前，這三個種子都會漏掉第一幀
+    int pictures = 0, headers = 0;
+    for (std::uint64_t seed : {4u, 38u, 44u}) {
         p.seed = seed;
-        const LinkResult r = run_digital_link(m, 2, p, 600 + seed, 3000 + static_cast<int>(seed) * 37);
-        decoded += r.decoded;
-        for (const RxFrame& f : r.frames) CHECK_NEAR(f.freq_offset_hz, 130.0, 1.0);
+        const LinkResult r = run_link(m, 2, rgb, p, 3000 + static_cast<int>(seed) * 37);
+        headers += r.decoded;
+        for (const RxFrame& f : r.frames) {
+            pictures += f.decoded ? 1 : 0;
+            CHECK_NEAR(f.freq_offset_hz, 130.0, 1.0);
+        }
     }
-    CHECK_EQ(decoded, 6);
-    std::printf("  模式 0、AWGN −2 dB、頻偏 130 Hz：%d/6\n", decoded);
+    CHECK_EQ(pictures, 6);
+    CHECK(headers >= 5);
+    std::printf("  模式 13、AWGN 0 dB、頻偏 130 Hz：%d/6 張有畫面，其中 %d 張標頭正確\n", pictures, headers);
 }
 
 // 脈衝雜訊（靜電突波）：每秒 2 次、每次 20 ms、比訊號強 20 dB。被打到的符號要靠逐符號的雜訊估計降低權重，
-// 否則那幾個符號的軟值會把整個碼字帶壞。
+// 否則那幾個符號上的值會當成和其他的一樣可靠，畫面就被它們帶壞。
 void test_impulse_noise() {
-    const Mode& m = *find_mode(1);
+    const auto rgb = test_images::load("cat");
+    const Mode& m = *find_mode(11);
     sim::ChannelParams p;
     p.snr_db = 14.0;
     p.impulse_rate = 2.0;
     p.impulse_db = 20.0;
     p.impulse_ms = 20.0;
     int with_map = 0, flat = 0;
+    double psnr_map = 0.0, psnr_flat = 0.0;
     for (std::uint64_t seed : {3u, 5u}) {
         p.seed = seed;
-        with_map += run_digital_link(m, 2, p, 700 + seed, 4000).decoded;
-        flat += run_digital_link(m, 2, p, 700 + seed, 4000, 6000, false).decoded;
+        const LinkResult a = run_link(m, 2, rgb, p, 4000);
+        const LinkResult b = run_link(m, 2, rgb, p, 4000, 6000, false);
+        with_map += a.decoded;
+        flat += b.decoded;
+        psnr_map += mean_psnr(a.frames, rgb) / 2.0;
+        psnr_flat += mean_psnr(b.frames, rgb) / 2.0;
     }
-    CHECK(with_map >= 3);
-    CHECK(flat < with_map);
-    std::printf("  模式 1、14 dB 加脈衝雜訊：逐符號雜訊估計 %d/4，單一雜訊值 %d/4\n", with_map, flat);
+    CHECK_EQ(with_map, 4);
+    CHECK(psnr_map > psnr_flat + 1.0);
+    std::printf("  模式 11、14 dB 加脈衝雜訊：逐符號雜訊估計 %d/4、%.1f dB，單一雜訊值 %d/4、%.1f dB\n", with_map, psnr_map, flat, psnr_flat);
 }
 
-// 相干類比：乾淨通道的畫質只受係數截斷與削波影響；加雜訊後畫質逐步下降，但每一幀都有畫面
-void test_analog() {
-    const auto rgb = test_images::load("coffee");
-    struct Expect {
-        int mode;
-        double clean_psnr, noisy_psnr;
-    };
-    for (const Expect& e : {Expect{8, 20.5, 19.0}, Expect{9, 23.5, 21.0}, Expect{10, 29.0, 23.0}}) {
-        const Mode& m = *find_mode(e.mode);
-        sim::ChannelParams p;
-        p.add_noise = false;
-        const LinkResult clean = run_analog_link(m, 3, rgb, p);
-        CHECK_EQ(static_cast<int>(clean.frames.size()), 3);
-        CHECK_EQ(clean.decoded, 3);
-        double p_clean = 0, p_noisy = 0;
-        for (const RxFrame& f : clean.frames) {
-            CHECK_EQ(f.mode_id, e.mode);
-            CHECK(!f.is_digital);
-            CHECK(f.callsign == "BX4ACP");
-            p_clean += test_images::psnr(f.rgb, rgb) / 3.0;
-        }
-        if (clean.frames.size() == 3) CHECK_EQ(clean.frames[2].sequence, 2);
-        CHECK(p_clean > e.clean_psnr);
-
-        p.add_noise = true;
-        p.snr_db = 10.0;
-        p.seed = 91;
-        const LinkResult noisy = run_analog_link(m, 3, rgb, p);
-        CHECK_EQ(noisy.decoded, 3);
-        for (const RxFrame& f : noisy.frames) p_noisy += test_images::psnr(f.rgb, rgb) / static_cast<double>(noisy.frames.size());
-        CHECK(p_noisy > e.noisy_psnr);
-        CHECK(p_noisy < p_clean);
-        std::printf("  類比模式 %d：乾淨通道 PSNR %.1f dB，AWGN 10 dB 時 %.1f dB\n", e.mode, p_clean, p_noisy);
-    }
-}
-
-// 相干類比送幾乎沒有細節的畫面：全黑、全白、純色，或是鏡頭被蓋住時那種只有一點雜訊的黑畫面。
-// 這種畫面整幀的能量只在少數幾個係數上，其餘的資料格接近 0。訊號愈乾淨，這種幀愈容易完全收不到：
-// 捕獲後的導頻驗證原本以整個符號的中位數當幅度上限，資料格都是 0 的符號裡導頻就全被壓掉了
-// （見 receiver.cpp 的 pilot_clip_level）。不論畫面內容是什麼，每一幀都要收到、標頭要對、畫面要還原。
-void test_analog_flat_pictures() {
+// 幾乎沒有細節的畫面：全黑、全白、純色，或是鏡頭被蓋住時那種只有一點雜訊的黑畫面。
+// 不論畫面內容是什麼，每一幀都要收到、標頭要對、畫面要還原。
+void test_flat_pictures() {
     auto flat = [](int r, int g, int b) {
         std::vector<std::uint8_t> rgb(kImageRgbBytes);
         for (std::size_t i = 0; i < rgb.size(); i += 3) {
@@ -211,7 +194,7 @@ void test_analog_flat_pictures() {
 
     int runs = 0, bad = 0;
     double worst_psnr = 99.0;
-    for (int id : {8, 9, 10}) {
+    for (int id : {11, 12, 14}) {
         const Mode& m = *find_mode(id);
         for (const Picture& pic : pictures) {
             for (double snr : {99.0, 40.0, 12.0}) {  // 99：不加雜訊
@@ -219,31 +202,30 @@ void test_analog_flat_pictures() {
                 p.add_noise = snr < 90.0;
                 p.snr_db = snr;
                 p.seed = static_cast<std::uint64_t>(500 + id);
-                const LinkResult r = run_analog_link(m, 2, pic.rgb, p);
+                const LinkResult r = run_link(m, 2, pic.rgb, p);
                 double psnr = 99.0;
-                for (const RxFrame& f : r.frames) psnr = std::min(psnr, test_images::psnr(f.rgb, pic.rgb));
-                // 畫質的下限：純色的畫面整幀功率都在直流係數那幾十個格點上，發射端的削波會讓亮度差幾級
-                const bool ok = r.frames.size() == 2 && r.decoded == 2 && psnr > (snr < 20.0 ? 26.0 : 30.0);
+                for (const RxFrame& f : r.frames) psnr = std::min(psnr, f.decoded ? test_images::psnr(f.rgb, pic.rgb) : 0.0);
+                const bool ok = r.frames.size() == 2 && r.decoded == 2 && psnr > (snr < 20.0 ? 24.0 : 28.0);
                 ++runs;
                 CHECK(ok);
                 if (ok) {
                     worst_psnr = std::min(worst_psnr, psnr);
                 } else {
                     ++bad;
-                    std::printf("  類比模式 %d 送「%s」（%s）：收到 %zu 幀、標頭正確 %d 幀（應為 2），PSNR %.1f dB\n", id, pic.name,
+                    std::printf("  模式 %d 送「%s」（%s）：收到 %zu 幀、標頭正確 %d 幀（應為 2），PSNR %.1f dB\n", id, pic.name,
                                 snr < 90.0 ? (snr > 20.0 ? "40 dB" : "12 dB") : "無雜訊", r.frames.size(), r.decoded, psnr);
                 }
             }
         }
     }
-    std::printf("  類比模式送沒有細節的畫面：%d 種情形，%d 種有問題（通過的裡面最低的 PSNR %.1f dB）\n", runs, bad, worst_psnr);
+    std::printf("  沒有細節的畫面：%d 種情形，%d 種有問題（通過的裡面最低的 PSNR %.1f dB）\n", runs, bad, worst_psnr);
 }
 
 // 一次發射結束後，隔一小段時間又有另一次發射（換人發射、停了再開始）。不論空檔多長，兩次發射的每一幀
 // 都要收到，也不能多出不存在的畫面。這裡的空檔長度都是曾經出過問題的：
 //   - 接收機以為對方還在送、硬收一幀的那段時間裡，新的發射開始了（0.1–1 秒）
 //   - 新的前導符號離原本預期的位置只差幾十到一百多個取樣（S0 每 128 點重複，位置差 128 點時分不出來）
-//   - 完全的靜音（數位的 0）讓滑動相關的分母變成 0
+//   - 完全的靜音（取樣全是 0）讓滑動相關的分母變成 0
 void test_back_to_back() {
     struct Case {
         int mode_a, frames_a, mode_b, frames_b;
@@ -252,14 +234,18 @@ void test_back_to_back() {
         std::vector<int> gaps;
     };
     const Case cases[] = {
-        {8, 1, 9, 2, 14.0, 808, {0, 66, 80, 120, 156, 200, 400, 800, 1160, 1880, 2160, 2840, 6560, 7720, 8760, 9000, 9520, 9600, 9640, 9720,
-                                 10520, 12480, 13520}},
-        {3, 2, 3, 2, 14.0, 803, {0, 66, 160, 320, 640, 4859, 9600, 20000, 32640}},
-        {9, 1, 3, 2, 14.0, 809, {10509, 15481}},
-        {5, 1, 5, 2, 99.0, 805, {66, 69, 153, 156, 162, 2000, 8621}},
-        {8, 2, 8, 2, 99.0, 808, {120, 8621, 8695}},
-        // 訊雜比 6 dB：第一幀的前導符號之前 124 個取樣處有一個分數剛過門檻的誤認；不能因此跳過真正的前導符號
-        {8, 3, 8, 3, 6.0, 24, {12587}},
+        // 短的幀接長的幀
+        {12, 1, 11, 2, 14.0, 808, {0, 66, 80, 120, 156, 200, 400, 800, 1160, 1880, 2160, 2840, 6560, 7720, 8760, 9000, 9520, 9600, 9640, 9720,
+                                   10520, 12480, 13520}},
+        // 同一個模式
+        {11, 2, 11, 2, 14.0, 803, {0, 66, 160, 320, 640, 4859, 9600, 20000, 32640}},
+        // 幀完全相同、只差在 S1 序列的兩個模式
+        {11, 1, 13, 2, 14.0, 809, {10509, 15481}},
+        // 沒有雜訊：兩次發射之間是完全的靜音
+        {14, 1, 14, 2, 99.0, 805, {66, 69, 153, 156, 162, 2000, 8621}},
+        {12, 2, 12, 2, 99.0, 808, {120, 8621, 8695}},
+        // 訊雜比 6 dB
+        {12, 3, 12, 3, 6.0, 24, {12587}},
     };
     int runs = 0, bad = 0;
     for (const Case& c : cases) {
@@ -281,7 +267,7 @@ void test_back_to_back() {
 }
 
 // 第一次發射送到一半就停（最後一幀只送出前面一部分），接著另一次發射開始。
-// 那個不完整的幀可能解得出來（類比的標頭、低碼率的數位模式禁得起少一截），也可能回報成沒解出來；
+// 那個不完整的幀可能解得出來（標頭有重複與迴旋碼保護，禁得起少一截），也可能回報成沒解出來；
 // 但第二次發射的每一幀都要收到，而且不能把不完整的幀或別的東西當成畫面交出來。
 void test_interrupted_transmission() {
     struct Case {
@@ -290,10 +276,10 @@ void test_interrupted_transmission() {
         std::vector<int> gaps;
     };
     const Case cases[] = {
-        {8, 9, 5000, 14.0, {300, 5550, 6660, 6808, 6919, 7548}},  // 類比 8 只送了四成，標頭有時還解得出來
-        {9, 3, 20000, 14.0, {300, 5000, 11865, 12091}},  // 類比 9 送了六成：解得出來，第二次發射在它「該結束」之前就開始
-        {3, 9, 9000, 14.0, {300, 4859, 12000}},          // 數位 3 只送了不到三成：解不出來
-        {1, 1, 40000, 8.0, {300, 23632}},                // 數位 1 送了六成：LDPC 還是解出來了
+        {12, 11, 5000, 14.0, {300, 5550, 6660, 6808, 6919, 7548}},  // 模式 12 只送了四成
+        {11, 13, 20000, 14.0, {300, 5000, 11865, 12091}},  // 模式 11 送了六成，第二次發射在它「該結束」之前就開始
+        {13, 11, 9000, 14.0, {300, 4859, 12000}},          // 模式 13 只送了不到三成
+        {14, 14, 3000, 8.0, {300, 2310, 4620}},            // 模式 14 送了不到四成
     };
     int runs = 0, bad = 0;
     for (const Case& c : cases) {
@@ -314,20 +300,96 @@ void test_interrupted_transmission() {
     std::printf("  發射中途停止後接著另一次發射：%d 種情形，%d 種有問題\n", runs, bad);
 }
 
+// 別的模式的幀：S1 用的是模式表裡沒有的編號（0–5、8–10 是已經移除的數位與類比模式用過的，6、7、15 沒有用過）。
+// S0 與導頻和我們的一模一樣，只有 S1 不同。接收機要認得出那不是自己的模式：不同步、不回報任何幀，
+// 也不能因此漏掉緊接著來的、自己認得的發射。
+void test_foreign_modes() {
+    // 一次「別的模式」的發射：幀長照 payload_symbols，資料格一半的幀放 QPSK（像數位模式）、一半放高斯值（像類比模式）
+    auto foreign_burst = [](int id, int payload_symbols, int frames, Rng& rng) {
+        const Mode fake{id, payload_symbols, 1, 2, 1};  // 只借用幀的算術與 S1 的編號；後三個欄位調變時用不到
+        std::vector<float> signal;
+        for (int i = 0; i < frames; ++i) {
+            std::vector<cf> cells(static_cast<std::size_t>(fake.data_cells()));
+            for (cf& c : cells) {
+                c = i % 2 == 0 ? cf(rng.bit() ? -0.70710678f : 0.70710678f, rng.bit() ? -0.70710678f : 0.70710678f) : cf(rng.cgauss());
+            }
+            const auto frame = ofdm_modulate(fake, cells, kDefaultPaprDb);
+            signal.insert(signal.end(), frame.begin(), frame.end());
+        }
+        return signal;
+    };
+    const Mode& ours = *find_mode(12);
+    const std::vector<float>& own = burst(ours, 2, "N0CALL");
+    int runs = 0, bad = 0;
+    for (int id : {0, 4, 7, 9, 15}) {
+        CHECK(find_mode(id) == nullptr);
+        for (int payload_symbols : {100, 37}) {
+            for (double snr : {99.0, 12.0, 3.0}) {  // 99：不加雜訊
+                for (bool followed : {false, true}) {  // 後面有沒有緊接著我們認得的發射
+                    Rng rng(static_cast<std::uint64_t>(1000 + id * 10 + payload_symbols));
+                    const std::vector<float> other = foreign_burst(id, payload_symbols, 3, rng);
+                    std::vector<float> audio(3000, 0.0f);
+                    audio.insert(audio.end(), other.begin(), other.end());
+                    if (followed) {
+                        audio.insert(audio.end(), 700, 0.0f);
+                        audio.insert(audio.end(), own.begin(), own.end());
+                    }
+                    audio.insert(audio.end(), 12000, 0.0f);
+                    sim::ChannelParams params;
+                    params.snr_db = snr;
+                    params.add_noise = snr < 90.0;
+                    params.seed = static_cast<std::uint64_t>(40 + id);
+                    sim::Channel channel(params, mean_power(other));
+                    std::vector<float> received;
+                    channel.process(audio, received);
+
+                    Receiver rx;
+                    attach_models(rx);
+                    int good = 0, extra = 0, synced_on_foreign = 0;
+                    const std::size_t foreign_end = 3000 + other.size();
+                    for (std::size_t pos = 0; pos < received.size(); pos += 1024) {
+                        rx.push(std::span<const float>(received).subspan(pos, std::min<std::size_t>(1024, received.size() - pos)));
+                        if (pos + 1024 <= foreign_end && rx.status().synced) ++synced_on_foreign;
+                        RxFrame f;
+                        while (rx.poll(f)) {
+                            const bool mine = f.decoded && f.header_ok && f.callsign == "N0CALL" && f.mode_id == ours.id;
+                            ++(mine ? good : extra);
+                        }
+                    }
+                    const bool ok = extra == 0 && synced_on_foreign == 0 && good == (followed ? 2 : 0);
+                    CHECK(ok);
+                    ++runs;
+                    if (!ok) {
+                        ++bad;
+                        std::printf("  別的模式（編號 %d、%d 個酬載符號、%s）%s：自己的收到 %d 張、多出 %d 幀、誤判同步 %d 個時段\n", id, payload_symbols,
+                                    snr < 90.0 ? (snr > 5.0 ? "12 dB" : "3 dB") : "無雜訊", followed ? "後面接著模式 12 的發射" : "", good, extra,
+                                    synced_on_foreign);
+                    }
+                }
+            }
+        }
+    }
+    std::printf("  別的模式的幀：%d 種情形，%d 種有問題\n", runs, bad);
+}
+
 }  // namespace
 
 int main() {
+    test_noise_only();
+    if (!have_models()) {
+        std::printf("  少了權重檔，略過需要模型的測試\n");
+        return check::finish("link");
+    }
+    test_foreign_modes();
     test_back_to_back();
     test_interrupted_transmission();
     test_weak_signal();
     test_impulse_noise();
-    test_analog();
-    test_analog_flat_pictures();
+    test_flat_pictures();
     test_clean();
     test_awgn();
     test_frequency_offset();
     test_clock_offset();
-    test_noise_only();
     test_fading();
     return check::finish("link");
 }

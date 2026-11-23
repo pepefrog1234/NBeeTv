@@ -53,18 +53,6 @@ float s1_value(int mode_id, int bin) {
     return kS1Amplitude * static_cast<float>(sign);
 }
 
-cf padding_value(int index) {
-    // 取擾碼序列的前幾個位元當成 QPSK
-    static const std::array<std::uint8_t, 128> bits = [] {
-        std::array<std::uint8_t, 128> b{};
-        scramble(b);
-        return b;
-    }();
-    const float a = 0.70710678f;
-    const std::size_t i = static_cast<std::size_t>(index % 64) * 2;
-    return cf(bits[i] ? -a : a, bits[i + 1] ? -a : a);
-}
-
 std::vector<CellPos> data_cell_positions(int payload_symbols) {
     std::vector<CellPos> cells;
     cells.reserve(static_cast<std::size_t>(data_cells(payload_symbols)));

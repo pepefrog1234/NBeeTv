@@ -143,10 +143,7 @@ struct PictureSection: View {
         return parts.joined(separator: " · ")
     }
 
-    private var onAirNote: String {
-        if let bytes = model.txBytes { return "對方收到的樣子 · 壓縮後 \(bytes) 位元組" }
-        return model.txPreview == nil ? "" : "對方收到的樣子（沒有雜訊時）"
-    }
+    private var onAirNote: String { model.txPreview == nil ? "" : "對方收到的樣子（沒有雜訊時）" }
 }
 
 /// 停用的小按鈕外觀（尚未收到畫面時的「儲存圖片」）。

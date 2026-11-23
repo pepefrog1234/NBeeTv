@@ -12,7 +12,6 @@ endif()
 
 option(NBTV_BUILD_TESTS "Build the unit tests" ON)
 option(NBTV_BUILD_TOOLS "Build the command line tools" ON)
-option(NBTV_WITH_AVIF "Use libavif (libaom, dav1d) for the digital mode's image codec" ON)
 option(NBTV_BUILD_MACOS_APP "Build the macOS app (SwiftUI shell)" OFF)
 option(NBTV_MACOS_SECOND_APP "Also build NBTV 2.app, a second copy with its own settings, to run two at once" OFF)
 

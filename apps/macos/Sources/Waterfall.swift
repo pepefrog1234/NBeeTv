@@ -80,7 +80,7 @@ final class WaterfallStore {
         let sorted = line[first...last].sorted()
         let median = sorted[sorted.count / 2]
         let p80 = sorted[sorted.count * 4 / 5]
-        // 完全沒有輸入（數位靜音）：畫成全黑，也不拿來更新基準
+        // 完全沒有輸入（取樣全是 0）：畫成全黑，也不拿來更新基準
         if median < WaterfallStore.silenceLevel { return median + WaterfallStore.noiseLevel * WaterfallStore.range }
         // 訊號比基準強太多時（例如沒有雜訊的虛擬音效卡）壓住上限，免得整片飽和
         let ceiling = p80 - (WaterfallStore.maxSignalLevel - WaterfallStore.noiseLevel) * WaterfallStore.range

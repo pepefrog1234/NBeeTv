@@ -22,20 +22,15 @@ namespace nbtv {
 
 struct RxFrame {
     int mode_id = -1;
-    bool is_digital = true;
-    bool is_learned = false;   // 學習式模式（is_digital 為 false）
-    bool decoded = false;      // 數位：CRC 正確；類比、學習式：有畫面
-    bool model_missing = false;  // 學習式：沒有設定模型，或對方用的是另一份權重，所以沒有畫面
-    bool header_ok = false;    // 標頭（呼號、幀序號）可信
+    bool decoded = false;        // 有畫面（rgb 有效）
+    bool model_missing = false;  // 收到了一幀，但沒有設定這個模式的模型，或對方用的是另一份權重，所以沒有畫面
+    bool header_ok = false;      // 標頭（呼號、幀序號）可信。標頭壞了畫面仍可能還原得出來
     std::string callsign;
     int sequence = -1;
     float snr_db = 0.0f;
     float freq_offset_hz = 0.0f;
-    int ldpc_iterations = 0;
-    int image_format = 0;
-    std::vector<std::uint8_t> image_data;  // 數位：影像酬載（含尾端補零），decoded 時有效
-    std::vector<std::uint8_t> rgb;         // 類比、學習式：96×72×3 的畫面
-    std::int64_t start_sample = 0;         // 幀開頭在輸入串流裡的位置（12 kHz 的取樣編號）
+    std::vector<std::uint8_t> rgb;  // 96×72×3 的畫面，decoded 時有效
+    std::int64_t start_sample = 0;  // 幀開頭在輸入串流裡的位置（12 kHz 的取樣編號）
 };
 
 struct RxStatus {
@@ -62,8 +57,8 @@ struct RxTuning {
     int detect_last = 72;
     // 分數的定義見 check_preamble。只有雜訊時，45 個假設（9 個模式 × 5 個整數頻偏）裡最大的分數
     // 中位數約 2.2、約 2% 超過 3.0；−3 dB 的訊號中位數約 5.9、−5 dB 約 4.3。
-    // （這是 9 個模式時量的。現在是 11 個模式、55 個假設，雜訊超過門檻的機會略多一點，靠後面的導頻驗證把關：
-    // 加到 11 個模式之後，四小時的純雜訊沒有一次進入同步。）
+    // （這是只比 9 條 S1 序列時量的。現在 16 條序列全部都比、共 80 個假設，其中模式表裡沒有的編號只用來
+    // 認出「別的模式」、不會被收下來；門檻沒有跟著調，後面還有導頻驗證把關：四小時的純雜訊沒有一次進入同步。）
     double acquire_score = 3.0;   // 捕獲的門檻（通過後還要經過導頻驗證）
     // 追蹤時確認下一幀前導符號的門檻（只檢查目前的模式）。只在上一幀解出來時使用；
     // 上一幀沒解出來的話改用 acquire_score，而且同樣要經過導頻驗證。
@@ -75,7 +70,7 @@ struct RxTuning {
     double verify_pilots = 0.40;
     // 是否使用逐符號、逐載波的雜訊估計（見 ChannelEstimate::noise_at）。關掉時每個格點都用同一個雜訊變異數。
     bool noise_map = true;
-    // 學習式模式：各格點雜訊不一樣大時的處理方式，見 LearnedRxOptions（learned_frame.hpp）。
+    // 各格點雜訊不一樣大時，交給解碼器之前的處理方式，見 LearnedRxOptions（learned_frame.hpp）。
     bool learned_median_snr = true;
     bool learned_attenuate = true;
     bool learned_floor = true;
@@ -87,8 +82,8 @@ public:
 
     RxTuning& tuning() { return tuning_; }
 
-    // 學習式模式用的模型。每個模式用「實數個數和它相同」的那一個，所以要收幾個學習式模式就設定幾個；
-    // 個數相同的再設定一次會取代前一個，傳空指標表示全部拿掉。某個模式沒有模型時，它的幀只回報
+    // 各個模式用的模型。每個模式用「實數個數與寬度都和它相同」的那一個，所以要收幾個模式就設定幾個；
+    // 兩者都相同的再設定一次會取代前一個，傳空指標表示全部拿掉。某個模式沒有模型時，它的幀只回報
     // 「收到一幀，但沒有畫面」。reset() 不會清掉模型。
     void set_model(std::shared_ptr<const LearnedCodec> model) { models_.set(std::move(model)); }
 
@@ -107,7 +102,7 @@ private:
     enum class State { Search, Receive, Confirm };
 
     struct PreambleCheck {
-        int mode_id = -1;
+        int mode_id = -1;         // 最像的模式編號（0..15）；可能是模式表裡沒有的，那種幀不收
         int shift = 0;            // 整數頻偏（FFT 格數）
         double score = 0.0;       // 最佳假設的分數：延遲視窗內外的能量密度比，只有雜訊時約為 1
         double score_s1 = 0.0;    // 同一個假設只看 S1 的分數
@@ -190,7 +185,6 @@ private:
     double sync_quality_ = 0.0;
     float snr_db_ = 0.0f;
     bool snr_valid_ = false;
-    int analog_gain_code_ = -1;  // 這次傳輸最近一次解出的類比幀增益，標頭壞掉時沿用
 
     bool trace_ = false;
     std::deque<RxFrame> frames_;
