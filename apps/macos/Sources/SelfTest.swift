@@ -140,7 +140,7 @@ enum SelfTest {
         let useAudio = devices && !arguments.contains("--no-audio")
         // 學習式模式各有一份權重檔；少了哪一份，那個模式就不會列在 Modes 裡
         let models = Modes.learned.map {
-            "\($0.name)：識別碼 \(LearnedModel.idText(values: $0.learnedValues, width: $0.learnedWidth) ?? "?")、"
+            "\($0.name)：模型 \($0.modelName)、識別碼 \(LearnedModel.idText(values: $0.learnedValues, width: $0.learnedWidth) ?? "?")、"
                 + "\($0.learnedValues) 個實數\($0.largeModel ? "、大型網路" : "")"
         }
         report("學習式模式的模型", models.count == LearnedModel.resourceNames.count ? true : nil,
@@ -178,7 +178,7 @@ enum SelfTest {
     // MARK: 1. 核心
 
     private static func testCoreLoopback(_ image: Data) {
-        for modeID in [5, 9, 11, 12, 13] {  // 模式 11、12、13 要 app 裡有權重檔才會列在 Modes 裡
+        for modeID in [5, 9, 11, 12, 13, 14] {  // 模式 11 到 14 要 app 裡有權重檔才會列在 Modes 裡
             guard let mode = Modes.find(modeID), mode.isDigital ? NBTV.hasImageCodec : true else { continue }
             let tx = CoreTransmitter()
             tx.setMode(modeID)

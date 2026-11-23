@@ -178,7 +178,7 @@ int main(int argc, char** argv) {
         }
     }
     if (mode->is_learned()) {
-        const std::string model_path = args.str("model", default_model_path(mode->learned_values, mode->learned_width));
+        const std::string model_path = args.str("model", default_model_path(mode->id));
         std::vector<std::uint8_t> bytes;
         std::string error = "讀不到檔案";
         if (read_file(model_path, bytes)) g_model = LearnedCodec::load(bytes, &error);

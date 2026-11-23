@@ -15,7 +15,7 @@ import torch.nn.functional as F
 H, W = 72, 96
 MAX_SNR_DB = 30.0
 MIN_SNR_DB = {1: -2.0, 2: -6.0}   # 各結構的解碼器認得的最低訊雜比（訓練時涵蓋到這裡）
-# 解析度每減半一次的通道數。模式 11、12 的模型是這一組；模式 13 的模型每一層加寬一倍（64, 128, 256, 384，train.py --widths）。
+# 解析度每減半一次的通道數。模式 11、12 的模型是這一組；模式 13、14 的模型每一層加寬一倍（64, 128, 256, 384，train.py --widths）。
 # 權重檔沒有另外記寬度：讀的一方（這裡的 widths_of、C++ 的 core/src/learned_codec.cpp）由張量的形狀看出來。
 # 哪個模式用哪種寬度的模型寫在核心的模式表（core/src/modes.hpp）。
 DEFAULT_WIDTHS = (32, 64, 128, 192)

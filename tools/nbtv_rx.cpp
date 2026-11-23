@@ -59,7 +59,7 @@ int main(int argc, char** argv) {
         return loaded || !required;
     };
     for (const Mode& m : kModes) {
-        if (m.is_learned()) load_model(default_model_path(m.learned_values, m.learned_width), false);
+        if (m.is_learned()) load_model(default_model_path(m.id), false);
     }
     if (args.has("model") && !load_model(args.str("model", ""), true)) return 1;
     int index = 0, good = 0;

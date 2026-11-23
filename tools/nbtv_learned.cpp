@@ -1,5 +1,5 @@
 // nbtv-learned：用學習式影像編碼把 96×72 的 PPM 編成通道值、加白雜訊、再解回來，印出畫質與花的時間。
-// 不經過數據機，只看「畫面 ↔ 通道值」這一段（等於理想的等化）；走完整收發鏈的是模式 11、12、13，用 nbtv-tx、nbtv-rx、nbtv-sim。
+// 不經過數據機，只看「畫面 ↔ 通道值」這一段（等於理想的等化）；走完整收發鏈的是模式 11 到 14，用 nbtv-tx、nbtv-rx、nbtv-sim。
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -41,7 +41,8 @@ int main(int argc, char** argv) {
     if (args.positional.empty() || args.has("help")) {
         std::printf(
             "用法：nbtv-learned [選項] 影像.ppm [影像2.ppm …]\n"
-            "  --mode N        用哪個學習式模式的模型：11（2.72 秒）、12（1.04 秒）或 13（2.72 秒，加寬的模型），預設 11\n"
+            "  --mode N        用哪個學習式模式的模型：11（2.72 秒）、12（1.04 秒）、13（2.72 秒，加寬的模型）\n"
+            "                  或 14（0.67 秒，加寬的模型），預設 11\n"
             "  --model 檔名    直接指定權重檔（預設是專案 models/ 裡給那個模式的）\n"
             "  --snr dB        加白雜訊的格點訊雜比；不給就不加雜訊\n"
             "  --seed N        雜訊的亂數種子（預設 1）\n"
@@ -55,7 +56,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "--mode 要是學習式模式的編號\n");
         return 2;
     }
-    const std::string model_path = args.str("model", default_model_path(mode->learned_values, mode->learned_width));
+    const std::string model_path = args.str("model", default_model_path(mode->id));
     std::vector<std::uint8_t> file;
     if (!read_file(model_path, file)) {
         std::fprintf(stderr, "讀不到權重檔 %s\n", model_path.c_str());

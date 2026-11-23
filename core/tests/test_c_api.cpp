@@ -438,7 +438,7 @@ void test_learned_mode(int mode_id, const char* weights, double min_psnr) {
 // 兩個學習式模式各有自己的模型：發射機、接收機都設定兩個，一次發射裡換模式，各用各的模型
 void test_learned_two_models() {
     bool found[2] = {false, false};
-    nbtv_model* models[2] = {load_model("learned_7776_v3", &found[0]), load_model("learned_2592_v2", &found[1])};
+    nbtv_model* models[2] = {load_model("261123-1", &found[0]), load_model("261122-3", &found[1])};
     if (models[0] == nullptr || models[1] == nullptr) {
         for (nbtv_model* m : models) nbtv_model_destroy(m);
         return;
@@ -511,8 +511,8 @@ void test_learned_two_models() {
 // 模式 11 與 13 的實數一樣多，模型的寬度不同：各用各的模型，設定其中一個不會讓另一個模式也能用
 void test_learned_two_widths() {
     bool found[2] = {false, false};
-    nbtv_model* narrow = load_model("learned_7776_v3", &found[0]);
-    nbtv_model* wide = load_model("learned_7776_wide_v1", &found[1]);
+    nbtv_model* narrow = load_model("261123-1", &found[0]);
+    nbtv_model* wide = load_model("261122-4", &found[1]);
     if (narrow == nullptr || wide == nullptr) {
         nbtv_model_destroy(narrow);
         nbtv_model_destroy(wide);
@@ -589,9 +589,10 @@ int main() {
     loopback(48000, 9, "rocket");
     loopback(12000, 8, "coffee");
     test_payload_path();
-    test_learned_mode(11, "learned_7776_v3", 28.3);
-    test_learned_mode(12, "learned_2592_v2", 23.5);
-    test_learned_mode(13, "learned_7776_wide_v1", 29.4);
+    test_learned_mode(11, "261123-1", 28.3);
+    test_learned_mode(12, "261122-3", 23.5);
+    test_learned_mode(13, "261122-4", 29.4);
+    test_learned_mode(14, "261123-3", 21.8);
     test_learned_two_models();
     test_learned_two_widths();
     test_spectrum();

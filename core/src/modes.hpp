@@ -61,7 +61,7 @@ struct Mode {
     }
 };
 
-inline constexpr std::array<Mode, 12> kModes{{
+inline constexpr std::array<Mode, 13> kModes{{
     // id  種類                酬載符號  乘數  位元/格  碼率    K
     {0, ModeKind::Digital, 200, 2503, 2, 1, 4, 3240},
     {1, ModeKind::Digital, 200, 2503, 2, 1, 2, 7200},
@@ -74,11 +74,14 @@ inline constexpr std::array<Mode, 12> kModes{{
     {9, ModeKind::Analog, 100, 1255, 0, 0, 0, 0},
     {10, ModeKind::Analog, 200, 2509, 0, 0, 0, 0},
     // 學習式（實驗中）：幀的安排和類比相同（11、13 比照模式 9，12 比照模式 8），只是實數由類神經網路產生
-    // （見 learned_frame.hpp）。每個模式各有自己的模型，實數的個數是「潛在通道數 × 9 × 12」：72 與 24 個通道。
+    // （見 learned_frame.hpp）。每個模式各有自己的模型，實數的個數是「潛在通道數 × 9 × 12」：72、24 與 14 個通道。
     // 13 的幀和 11 完全相同，只是模型的每一層加寬一倍（運算量約四倍）。
+    // 14 是最快的：23 個酬載符號、每張 0.667 秒，沒有對應的類比模式；14 個通道，用的也是加寬的模型。
+    // 乘數照其他模式的做法取約 0.31·N、與 N 互質的數（N = 935 = 5·11·17）。
     {11, ModeKind::Learned, 100, 1255, 0, 0, 0, 0, 7776, 32},
     {12, ModeKind::Learned, 37, 464, 0, 0, 0, 0, 2592, 32},
     {13, ModeKind::Learned, 100, 1255, 0, 0, 0, 0, 7776, 64},
+    {14, ModeKind::Learned, 23, 291, 0, 0, 0, 0, 1512, 64},
 }};
 
 constexpr const Mode* find_mode(int id) {

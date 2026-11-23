@@ -46,24 +46,30 @@ enum NBTV {
     }
 }
 
-/// 學習式模式（模式 11、12、13，實驗中）用的模型：每個模式各一份權重，放在 app 的 Resources 裡，第一次用到時載入（各約 0.1 秒，模式 13 的約 0.35 秒），
-/// 之後所有的發射機、接收機共用；核心載入之後不會再改動它們，所以可以同時在不同的佇列上使用。
+/// 學習式模式（模式 11 到 14，實驗中）用的模型：每個模式各一份權重，放在 app 的 Resources 裡，第一次用到時載入
+/// （小的約 0.1 秒，加寬的約 0.35 秒），之後所有的發射機、接收機共用；核心載入之後不會再改動它們，所以可以同時在不同的佇列上使用。
 enum LearnedModel {
-    /// Resources 裡的權重檔（不含副檔名）。哪一份給哪個模式用由核心決定：模型的實數個數與寬度都和模式的相同就是。
-    /// 最後一份是模式 13 用的大型網路（每一層加寬一倍，46 MB）。
-    static let resourceNames = ["learned_7776_v3", "learned_2592_v2", "learned_7776_wide_v1"]
+    /// Resources 裡的權重檔（不含副檔名）。檔名就是模型的名稱：「訓練完成的年月日-當天第幾個完成的」。
+    /// 哪一份給哪個模式用由核心決定：模型的實數個數與寬度都和模式的相同就是。
+    /// 依序是模式 11、12、13、14 用的；後兩份是加寬的大型網路（各 46 MB）。
+    static let resourceNames = ["261123-1", "261122-3", "261122-4", "261123-3"]
 
-    /// 載入成功的模型。找不到或損壞的那一份不在裡面：對應的模式不會列在選單裡，收到那種幀也不會有畫面。
-    static let handles: [OpaquePointer] = resourceNames.compactMap { name -> OpaquePointer? in
+    /// 載入成功的模型與它的名稱。找不到或損壞的那一份不在裡面：對應的模式不會列在選單裡，收到那種幀也不會有畫面。
+    static let loaded: [(name: String, handle: OpaquePointer)] = resourceNames.compactMap { name in
         guard let url = Bundle.main.url(forResource: name, withExtension: "bin"),
-              let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return nil }
-        return data.withUnsafeBytes { nbtv_model_load($0.bindMemory(to: UInt8.self).baseAddress, $0.count) }
+              let data = try? Data(contentsOf: url, options: .mappedIfSafe),
+              let handle = data.withUnsafeBytes({ nbtv_model_load($0.bindMemory(to: UInt8.self).baseAddress, $0.count) }) else { return nil }
+        return (name, handle)
     }
+    static let handles: [OpaquePointer] = loaded.map(\.handle)
 
-    /// 「一張畫面變成 values 個實數、第一層 width 個通道」的那個模型（模式的 learned_values 與 learned_width）；沒有的話是 nil
-    static func handle(values: Int, width: Int) -> OpaquePointer? {
-        handles.first { Int(nbtv_model_values($0)) == values && Int(nbtv_model_width($0)) == width }
+    private static func find(values: Int, width: Int) -> (name: String, handle: OpaquePointer)? {
+        loaded.first { Int(nbtv_model_values($0.handle)) == values && Int(nbtv_model_width($0.handle)) == width }
     }
+    /// 「一張畫面變成 values 個實數、第一層 width 個通道」的那個模型（模式的 learned_values 與 learned_width）；沒有的話是 nil
+    static func handle(values: Int, width: Int) -> OpaquePointer? { find(values: values, width: width)?.handle }
+    /// 那個模型的名稱，例如「261123-1」
+    static func name(values: Int, width: Int) -> String? { find(values: values, width: width)?.name }
     /// 那個模型的權重檔識別碼；收發兩邊要相同才解得出畫面
     static func idText(values: Int, width: Int) -> String? {
         handle(values: values, width: width).map { String(format: "%08X", nbtv_model_id($0)) }
@@ -86,8 +92,9 @@ struct ModeInfo: Identifiable, Hashable {
     let analogCoefficients: Int
     let learnedValues: Int
     let learnedWidth: Int  // 學習式：模型第一層的通道數
-    var quality = ""  // 類比與學習式：粗略／中等／細緻，依每幀的長短
-    var largeModel = false  // 學習式：幀和另一個學習式模式相同，只是模型比較大（運算量約四倍）
+    var modelName = ""  // 學習式：用的模型的名稱（訓練完成的年月日-當天第幾個），例如「261123-1」
+    var quality = ""  // 類比與學習式：粗略／中等／細緻，依每幀的長短；比最短的類比模式還短的學習式模式是「快速」
+    var largeModel = false  // 學習式：用的是加寬的大型網路（運算量約四倍）
 
     var isDigital: Bool { kind == .digital }
     var isLearned: Bool { kind == .learned }
@@ -133,7 +140,9 @@ struct ModeInfo: Identifiable, Hashable {
         switch kind {
         case .digital: return "每張 \(secondsText) · 影像上限 \(imageBytes) 位元組"
         case .analog: return "每張 \(secondsText) · 傳 \(contentText)"
-        case .learned: return "每張 \(secondsText) · \(largeModel ? "大型的類神經網路" : "類神經網路")編碼，實驗中"
+        case .learned:
+            return "每張 \(secondsText) · \(largeModel ? "大型的類神經網路" : "類神經網路")編碼，實驗中"
+                + (modelName.isEmpty ? "" : " · 模型 \(modelName)")
         }
     }
 }
@@ -165,20 +174,24 @@ enum Modes {
         let names = ["粗略", "中等", "細緻"]
         let analogLengths = list.filter { $0.kind == .analog }.map(\.payloadSymbols).sorted()
         for i in list.indices where list[i].kind != .digital {
-            if let rank = analogLengths.firstIndex(of: list[i].payloadSymbols), analogLengths.count == names.count { list[i].quality = names[rank] }
-        }
-        // 兩個學習式模式的幀一樣長時，模型比較寬的那一個標成「大型」（模式 13 對模式 11）
-        for i in list.indices where list[i].kind == .learned {
-            list[i].largeModel = list.contains {
-                $0.kind == .learned && $0.payloadSymbols == list[i].payloadSymbols && $0.learnedWidth < list[i].learnedWidth
+            if let rank = analogLengths.firstIndex(of: list[i].payloadSymbols), analogLengths.count == names.count {
+                list[i].quality = names[rank]
+            } else if list[i].kind == .learned, let shortest = analogLengths.first, list[i].payloadSymbols < shortest {
+                list[i].quality = "快速"  // 模式 14：每張 0.67 秒，沒有一樣長的類比模式
             }
+        }
+        // 學習式模式：記下用的是哪個模型；模型比其他學習式模式寬的標成「大型」（模式 13、14）
+        let narrowest = list.filter { $0.kind == .learned }.map(\.learnedWidth).min() ?? 0
+        for i in list.indices where list[i].kind == .learned {
+            list[i].largeModel = list[i].learnedWidth > narrowest
+            list[i].modelName = LearnedModel.name(values: list[i].learnedValues, width: list[i].learnedWidth) ?? ""
         }
         return list
     }()
 
     static var digital: [ModeInfo] { all.filter(\.isDigital) }
     static var analog: [ModeInfo] { all.filter { $0.kind == .analog } }
-    /// 依每幀的長短排，和類比那一組一樣由粗略到細緻；一樣長的，模型小的在前（模式編號是 12、11、13）
+    /// 依每幀的長短排，和類比那一組一樣由快到慢；一樣長的，模型小的在前（模式編號是 14、12、11、13）
     static var learned: [ModeInfo] {
         all.filter(\.isLearned).sorted { ($0.payloadSymbols, $0.learnedWidth, $0.id) < ($1.payloadSymbols, $1.learnedWidth, $1.id) }
     }

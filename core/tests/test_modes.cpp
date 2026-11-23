@@ -130,24 +130,30 @@ const LearnedRow kLearnedSpec[] = {
     {11, 9, 102, 2.720, 7782, 72, 32},
     {12, 8, 39, 1.040, 2658, 24, 32},
     {13, 9, 102, 2.720, 7782, 72, 64},  // 幀和模式 11 完全相同，模型的每一層加寬一倍
+    {14, 0, 25, 0.667, 1518, 14, 64},   // 最快的一個：沒有對應的類比模式（analog_id 寫 0），23 個酬載符號
 };
 
 void test_learned_modes() {
     int learned_count = 0;
     for (const LearnedRow& row : kLearnedSpec) {
         const Mode* m = find_mode(row.id);
-        const Mode* analog = find_mode(row.analog_id);
+        const Mode* analog = row.analog_id > 0 ? find_mode(row.analog_id) : nullptr;
         CHECK(m != nullptr);
         if (m == nullptr) continue;
         ++learned_count;
         CHECK(m->kind == ModeKind::Learned);
         CHECK(m->is_learned() && !m->is_digital() && !m->is_analog());
-        CHECK(analog->is_analog() && !analog->is_learned());
-        CHECK_EQ(m->payload_symbols, analog->payload_symbols);
-        CHECK_EQ(m->cell_multiplier, analog->cell_multiplier);
+        if (analog != nullptr) {  // 幀比照某個類比模式：符號數、交錯乘數、資料格數都相同
+            CHECK(analog->is_analog() && !analog->is_learned());
+            CHECK_EQ(m->payload_symbols, analog->payload_symbols);
+            CHECK_EQ(m->cell_multiplier, analog->cell_multiplier);
+            CHECK_EQ(m->data_cells(), analog->data_cells());
+        } else {  // 自己的幀長：沒有哪個類比模式一樣長
+            for (const Mode& other : kModes) CHECK(!other.is_analog() || other.payload_symbols != m->payload_symbols);
+        }
         CHECK_EQ(m->frame_symbols(), row.frame_symbols);
+        CHECK_EQ(m->payload_symbols, row.frame_symbols - kPreambleSymbols);
         CHECK_NEAR(m->frame_seconds(), row.seconds, 0.0005);
-        CHECK_EQ(m->data_cells(), analog->data_cells());
         CHECK_EQ(m->header_cells(), 176);
         CHECK_EQ(m->analog_values(), row.analog_values);
         CHECK_EQ(m->learned_values, row.latent_channels * 9 * 12);
@@ -173,12 +179,12 @@ void test_learned_modes() {
 }
 
 void test_undefined_ids() {
-    for (int id : {-1, 6, 7, 14, 15, 16}) CHECK(find_mode(id) == nullptr);
+    for (int id : {-1, 6, 7, 15, 16}) CHECK(find_mode(id) == nullptr);
 }
 
 void test_c_api() {
     CHECK(std::strcmp(nbtv_version_string(), "0.1.0") == 0);
-    CHECK_EQ(nbtv_mode_count(), 12);
+    CHECK_EQ(nbtv_mode_count(), 13);
     for (int i = 0; i < nbtv_mode_count(); ++i) {
         nbtv_mode_info a{};
         nbtv_mode_info b{};
