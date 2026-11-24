@@ -1,7 +1,10 @@
 # 測試可以直接看核心內部的標頭（core/src）。
+# 執行緒：test_link 把可能卡住的接收機放在另一條執行緒跑，等不到就算失敗。
+find_package(Threads REQUIRED)
+
 function(nbtv_add_test name)
   add_executable(test_${name} test_${name}.cpp)
-  target_link_libraries(test_${name} PRIVATE nbtvcore nbtvsim)
+  target_link_libraries(test_${name} PRIVATE nbtvcore nbtvsim Threads::Threads)
   target_include_directories(test_${name} PRIVATE ${PROJECT_SOURCE_DIR}/core/src ${PROJECT_SOURCE_DIR}/tools)
   target_compile_definitions(test_${name} PRIVATE
     NBTV_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"

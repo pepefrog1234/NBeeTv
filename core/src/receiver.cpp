@@ -166,6 +166,7 @@ void Receiver::reset() {
     rescan_from_ = 0;
     frame_evidence_ = 0.0;
     pending_start_ = -1;
+    done_start_ = INT64_MIN;
     enter_search(0);
 }
 
@@ -577,40 +578,52 @@ bool Receiver::try_acquire(std::int64_t s0_start, cd corr, double metric) {
                      pilots.cfo_delta * kSampleRate, tau, static_cast<long long>(t0), pilots.rho);
     }
     if (pilots.rho < tuning_.verify_pilots) return false;
+    // 已經收完的幀不再收一次。搜尋都從上一幀的前導符號之後開始，候選位置往回最多只看到那之前 248 個取樣，
+    // 照理不會再找到同一幀；這一關是保險：不管流程怎麼走，處理過的幀起點只會愈來愈後面，
+    // 所以手上的取樣一定處理得完，不會在同樣幾個位置之間來回。
+    if (t0 < done_start_ + kCyclicPrefix) {
+        if (trace_) std::fprintf(stderr, "[rx]   幀起點 %lld 的那一幀已經收過了，不再收一次\n", static_cast<long long>(t0));
+        return false;
+    }
+    const Acquisition found{mode, cfo + pilots.cfo_delta, t0, chk.score, metric};
     if (receiving && !tentative()) {
-        // 目前這一幀照樣收完（少了後面一截也可能解得出來），之後從這個前導符號重新開始
+        // 目前這一幀照樣收完（少了後面一截也可能解得出來），之後直接去收這個前導符號開始的那一幀
         if (trace_) std::fprintf(stderr, "[rx]   目前這一幀還沒收完就出現另一個前導符號：收完後改從 %lld 開始\n", static_cast<long long>(t0));
+        pending_ = found;
         pending_start_ = t0;
         scan_limit_ = scan_pos_;  // 不必再找了
         return false;
     }
-    cfo += pilots.cfo_delta;
+    begin_frame(found);
+    return true;
+}
 
-    mode_ = mode;
-    cfo_ = cfo;
-    t0_ = t0;
+// 開始收一幀。它的前導符號已經通過 try_acquire 的檢查。
+void Receiver::begin_frame(const Acquisition& found) {
+    mode_ = found.mode;
+    cfo_ = found.cfo;
+    t0_ = found.t0;
     state_ = State::Receive;
     confirmed_ = true;
     presence_checked_ = true;
-    rescan_from_ = t0 + kSymbolSamples;  // 這一幀若沒解出來、也沒有下一幀，就從這個前導符號之後重新搜尋
+    rescan_from_ = found.t0 + kSymbolSamples;  // 這一幀若沒解出來、也沒有下一幀，就從這個前導符號之後重新搜尋
     unconfirmed_run_ = 0;
     last_ok_ = false;
     last_complete_ = false;
-    sync_quality_ = chk.score;
-    frame_evidence_ = chk.score;
+    sync_quality_ = found.score;
+    frame_evidence_ = found.score;
     if (tentative()) {
         // 證據薄弱的捕獲有可能是誤認，而真正的前導符號常常就在附近（弱訊號時候選位置可以差一百多個取樣，
         // S0 又每 128 點重複）：接著原來的位置繼續找，不要跳到這一幀的前導符號之後，免得把它跳過去。
         pending_start_ = -1;
-        scan_limit_ = t0 + mode->frame_samples() - kSymbolSamples;
+        scan_limit_ = found.t0 + found.mode->frame_samples() - kSymbolSamples;
     } else {
-        start_scan(rescan_from_, t0 + mode->frame_samples() - kSymbolSamples);
+        start_scan(rescan_from_, found.t0 + found.mode->frame_samples() - kSymbolSamples);
     }
     // 解出第一幀之前，先用 S0 相關值粗估訊雜比：sqrt(metric) ≈ S/(S+N)
-    const double r = std::min(std::sqrt(metric), 0.999);
+    const double r = std::min(std::sqrt(found.metric), 0.999);
     snr_db_ = static_cast<float>(10.0 * std::log10(r / (1.0 - r)));
     snr_valid_ = true;
-    return true;
 }
 
 SymbolGrid Receiver::demodulate(std::int64_t t0, double cfo, int rows) const {
@@ -766,6 +779,9 @@ void Receiver::process_frame() {
     const bool previous_ok = last_ok_;
     const std::int64_t t0_before = t0_;
     const double cfo_before = cfo_;
+    // 前導符號確認過的幀處理一次就夠了（見 done_start_）。沒確認到前導符號、只是假設對方還在送的幀不算：
+    // 那裡不一定真的有一幀，之後回頭搜尋時可能在它前後找到真正的前導符號。
+    if (confirmed_) done_start_ = t0_before;
     SymbolGrid grid = demodulate(t0_, cfo_, rows);
 
     // 殘餘頻偏：由導頻估出後重新解調（頻偏會造成載波間干擾，不能只在頻域補相位）
@@ -902,10 +918,15 @@ void Receiver::process_frame() {
         }
     }
     if (pending_start_ >= 0) {
-        // 這一幀收到一半時，裡面出現了另一個很明確的前導符號：直接去收那一次發射
-        const std::int64_t from = pending_start_ - kSymbolSamples;
-        mode_ = nullptr;
-        enter_search(from);
+        // 這一幀收到一半時，裡面出現了另一個很明確的前導符號：直接去收那一次發射。那個前導符號已經驗證過了，
+        // 不回頭再搜尋一次——它可能就在這一幀開頭之後不遠（兩次發射疊在一起），回頭搜尋會先找到剛收完的
+        // 這一幀的前導符號，把這一幀再收一次、又看到同一個前導符號，永遠在兩者之間來回。
+        if (pending_.t0 >= done_start_ + kCyclicPrefix) {
+            begin_frame(pending_);
+        } else {
+            mode_ = nullptr;
+            enter_search(t0_before + kSymbolSamples);
+        }
         return;
     }
     state_ = State::Confirm;

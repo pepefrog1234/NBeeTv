@@ -1,7 +1,10 @@
 // 端對端：發射 → 通道模擬 → 接收機（同步、通道估測、解碼）。
 // 這裡看的是接收機本身：捕獲、頻偏與定時、追蹤、兩次發射之間的銜接。各個模式的畫質在 test_learned.cpp。
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <future>
 
 #include "check.hpp"
 #include "link_util.hpp"
@@ -300,6 +303,74 @@ void test_interrupted_transmission() {
     std::printf("  發射中途停止後接著另一次發射：%d 種情形，%d 種有問題\n", runs, bad);
 }
 
+// 兩次發射疊在一起（兩台同時發射，或是兩段錄音被混成一段）：第一次發射連續送三幀，第二次發射在它的第二幀
+// 開始之後一個多符號才開始。接收機正在收的那一幀前導符號很明確、收到一半又看到另一個很明確的前導符號時，
+// 會先把這一幀收完，再去收另一次發射。曾經出過的問題：回頭去找那個前導符號時，又抓到剛收完的那一幀，
+// 於是在兩者之間來回，push() 永遠不會返回。
+// 兩邊互相干擾，這裡不要求每一幀都解得出來，只要求：接收機會收完、同一幀不交出來兩次、
+// 還沒被蓋到的第一幀一定收得到。
+void test_overlapping_transmissions() {
+    struct Case {
+        int mode_a, mode_b, delay;  // delay：第二次發射在第一次發射的第二幀開始之後幾個取樣開始
+        float gain_b;               // 第二次發射的音量是第一次的幾倍
+        double snr_db;
+    };
+    const Case cases[] = {
+        {14, 11, 450, 0.7f, 99.0}, {14, 14, 450, 0.7f, 99.0}, {14, 11, 340, 0.7f, 15.0}, {14, 14, 340, 0.7f, 15.0},
+        {14, 11, 450, 1.4f, 15.0}, {14, 12, 450, 1.4f, 15.0}, {14, 12, 340, 0.7f, 15.0}, {12, 11, 450, 0.7f, 15.0},
+        {11, 14, 397, 1.0f, 15.0}, {13, 14, 520, 0.7f, 99.0},
+    };
+    int runs = 0, bad = 0;
+    for (const Case& c : cases) {
+        const Mode& ma = *find_mode(c.mode_a);
+        const Mode& mb = *find_mode(c.mode_b);
+        const std::vector<float>& a = burst(ma, 3, "AA1AAA");
+        const std::vector<float>& b = burst(mb, 1, "BB2BBB");
+        const std::size_t start_a = 3000, start_b = start_a + static_cast<std::size_t>(ma.frame_samples() + c.delay);
+        std::vector<float> audio(std::max(start_a + a.size(), start_b + b.size()) + 12000, 0.0f);
+        for (std::size_t i = 0; i < a.size(); ++i) audio[start_a + i] += a[i];
+        for (std::size_t i = 0; i < b.size(); ++i) audio[start_b + i] += c.gain_b * b[i];
+
+        sim::ChannelParams params;
+        params.snr_db = c.snr_db;
+        params.add_noise = c.snr_db < 90.0;
+        params.seed = 77;
+        sim::Channel channel(params, mean_power(a));
+        std::vector<float> received;
+        channel.process(audio, received);
+
+        Receiver rx;
+        attach_models(rx);
+        // 卡住的話永遠等不到結果，所以放在另一條執行緒跑；超過時限就算失敗，直接結束測試程式
+        auto job = std::async(std::launch::async, [&] { return run_receiver(rx, received); });
+        if (job.wait_for(std::chrono::seconds(120)) != std::future_status::ready) {
+            std::printf("  模式 %d 的第二幀開始後 %d 個取樣出現模式 %d（音量 %.1f 倍、訊雜比 %.0f dB）：接收機 120 秒還沒收完，卡住了\n",
+                        c.mode_a, c.delay, c.mode_b, static_cast<double>(c.gain_b), c.snr_db);
+            std::fflush(stdout);
+            std::_Exit(1);
+        }
+        const std::vector<RxFrame> frames = job.get();
+        bool repeated = false;
+        for (std::size_t i = 0; i < frames.size(); ++i) {
+            for (std::size_t j = i + 1; j < frames.size(); ++j) {
+                if (std::llabs(frames[i].start_sample - frames[j].start_sample) < kSymbolSamples) repeated = true;
+            }
+        }
+        const bool first_frame = !frames.empty() && frames[0].decoded && frames[0].header_ok && frames[0].callsign == "AA1AAA" &&
+                                 frames[0].mode_id == ma.id && frames[0].sequence == 0;
+        const bool ok = !repeated && first_frame && frames.size() <= 4;  // 總共只送了四幀
+        CHECK(ok);
+        ++runs;
+        if (!ok) {
+            ++bad;
+            std::printf("  模式 %d 的第二幀開始後 %d 個取樣出現模式 %d（音量 %.1f 倍、訊雜比 %.0f dB）：交出 %zu 幀%s%s\n", c.mode_a, c.delay,
+                        c.mode_b, static_cast<double>(c.gain_b), c.snr_db, frames.size(), repeated ? "，同一幀交出來不只一次" : "",
+                        first_frame ? "" : "，第一幀沒有收到");
+        }
+    }
+    std::printf("  兩次發射疊在一起：%d 種情形，%d 種有問題\n", runs, bad);
+}
+
 // 別的模式的幀：S1 用的是模式表裡沒有的編號（0–5、8–10 是已經移除的數位與類比模式用過的，6、7、15 沒有用過）。
 // S0 與導頻和我們的一模一樣，只有 S1 不同。接收機要認得出那不是自己的模式：不同步、不回報任何幀，
 // 也不能因此漏掉緊接著來的、自己認得的發射。
@@ -380,6 +451,7 @@ int main() {
         std::printf("  少了權重檔，略過需要模型的測試\n");
         return check::finish("link");
     }
+    test_overlapping_transmissions();
     test_foreign_modes();
     test_back_to_back();
     test_interrupted_transmission();

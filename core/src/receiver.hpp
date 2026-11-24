@@ -120,9 +120,19 @@ private:
     std::int64_t end() const { return base_ + static_cast<std::int64_t>(buf_.size()); }
     const cf& sample(std::int64_t index) const { return buf_[static_cast<std::size_t>(index - base_)]; }
 
+    // 捕獲到的一幀：前導符號通過了 try_acquire 的兩道檢查（前導符號的分數、酬載開頭的導頻）
+    struct Acquisition {
+        const Mode* mode = nullptr;
+        double cfo = 0.0;      // 頻偏，每個取樣的週數（已經加上導頻驗證時估出的修正）
+        std::int64_t t0 = 0;   // S0 循環字首的起點
+        double score = 0.0;    // 前導符號的分數
+        double metric = 0.0;   // S0 滑動相關的值，用來在解出第一幀之前粗估訊雜比
+    };
+
     bool step();
     bool search_step();
     bool try_acquire(std::int64_t s0_start, cd corr, double metric);
+    void begin_frame(const Acquisition& found);
     void fft_window(std::int64_t start, double cfo, cf* out) const;
     PreambleCheck check_preamble(std::int64_t s0_window, double cfo, std::span<const int> shifts, int expect_mode, int detect_first,
                                  int detect_last) const;
@@ -206,8 +216,13 @@ private:
     std::int64_t rescan_from_ = 0;
     int unconfirmed_run_ = 0;
     double frame_evidence_ = 0.0;  // 目前這一幀前導符號的分數；沒確認到前導符號的幀是 0
-    // 目前這一幀（前導符號很明確）還沒收完，裡面就出現另一個很明確的前導符號時，那個前導符號的位置；沒有是 −1
+    // 目前這一幀（前導符號很明確）還沒收完，裡面就出現另一個很明確的前導符號時，那個前導符號的位置；沒有是 −1。
+    // pending_ 是它驗證過的結果：目前這一幀收完之後直接從那裡收下去，不回頭再搜尋一次。
     std::int64_t pending_start_ = -1;
+    Acquisition pending_;
+    // 最近一個處理完的幀（前導符號確認過的）在捕獲或確認時的起點。起點沒有超過它的幀不再捕獲一次：
+    // 處理過的幀只會愈來愈後面，所以不管輸入是什麼，push() 一定會返回。
+    std::int64_t done_start_ = INT64_MIN;
     double sync_quality_ = 0.0;
     float snr_db_ = 0.0f;
     bool snr_valid_ = false;
