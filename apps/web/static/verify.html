@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="robots" content="noindex">
+<title data-i18n="doc.verify">查驗 NBTV 收聽卡</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/i18n.js" defer></script>
+<script src="/static/verify.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/">
+    <span class="call" id="station">NBTV</span>
+    <span class="brand-title" data-i18n="title">NBTV 收聽卡</span>
+  </a>
+  <nav class="top-nav">
+    <a href="/" data-i18n="nav.home">領取收聽卡</a>
+    <button type="button" class="lang" id="lang" aria-label="Switch language">EN</button>
+  </nav>
+</header>
+
+<main>
+  <section class="intro">
+    <h1 data-i18n="verify.heading">查驗收聽卡</h1>
+    <p class="lead" data-i18n="verify.lead"></p>
+  </section>
+
+  <form class="panel lookup" id="lookup" novalidate>
+    <div class="field">
+      <label for="serial" data-i18n="verify.serial">序號</label>
+      <input type="text" id="serial" class="mono" autocomplete="off" autocapitalize="characters" spellcheck="false"
+             maxlength="20" placeholder="XXXX-XXXX-XXXX">
+    </div>
+    <button type="submit" class="primary" data-i18n="verify.submit">查驗</button>
+  </form>
+
+  <section class="panel" id="outcome" hidden>
+    <h2 id="outcome-title" tabindex="-1"></h2>
+    <p id="outcome-body"></p>
+    <a class="card-link" id="card-link" hidden><img id="card-image" alt="" width="1680" height="1080"></a>
+    <dl class="stats" id="record" hidden></dl>
+    <h3 id="self-heading" hidden data-i18n="verify.self"></h3>
+    <dl class="stats" id="self-record" hidden></dl>
+  </section>
+
+  <section class="panel">
+    <h2 data-i18n="offline.heading">離線查驗</h2>
+    <p data-i18n="offline.body"></p>
+    <p class="fingerprint"><span data-i18n="offline.fingerprint">根憑證指紋（SHA-256）</span><br><code id="fingerprint">…</code></p>
+    <div class="actions">
+      <a class="secondary" href="/root.pem" data-i18n="offline.cert">下載根憑證（PEM）</a>
+      <a class="secondary" href="/verify_card.py" data-i18n="offline.tool">下載查驗工具（Python）</a>
+    </div>
+    <pre class="command"><code>python3 verify_card.py card.png --cert <span id="cert-name">root.pem</span></code></pre>
+    <p class="hint" data-i18n="offline.note"></p>
+    <p class="hint" id="c2pa-note" hidden data-i18n="offline.c2pa"></p>
+  </section>
+</main>
+
+<footer class="bottom">
+  <p data-i18n="footer.signed">收聽卡以本台自己簽發的憑證做數位簽章。</p>
+</footer>
+</body>
+</html>

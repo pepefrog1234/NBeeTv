@@ -7,6 +7,7 @@
   訊號愈弱畫面愈糊，但不會整張收不到。收發兩邊要用同一份模型的權重。
 - **四個模式**：模式 14 每張 0.67 秒、模式 12 每張 1.04 秒、模式 11 與 13 每張 2.72 秒（13 用的是大四倍的網路，畫質再高 0.1–0.6 dB）。
   愈慢的模式一張畫面送的值愈多，畫面愈細。命令列工具與 macOS 的 app 都可以收發。
+- **收聽卡網站**（`apps/web/`）：聽眾上傳從無線電錄下來的 WAV 檔，解得出來就發一張有數位簽章的收聽卡。
 - 先做 macOS，之後不排除 iOS 與 Android。
 
 **已經移除的模式**（2026-11-23）：原本另有六個數位模式（OFDM＋LDPC，每張是一張 AV1 影像，編號 0–5）與三個相干類比模式
@@ -35,6 +36,7 @@
 | `tools/` | 命令列工具：`nbtv-tx`、`nbtv-rx`、`nbtv-chan`、`nbtv-sim`、`nbtv-learned`。`design/` 是產生核心常數用的設計工具，`learned/` 是模型的訓練與匯出程式（Python）。 |
 | `models/` | 模型的權重檔，每個模式一份，以模型訓練完成的日期命名（年月日-當天第幾個，例如 `261123-1.bin`）：模式 11、12 的各約 11.8 MB，模式 13、14 的各約 46 MB。另有接收端「合併最近幾幀」用的小網路的權重，每個畫面模型各配一份（各不到 1 MB）。 |
 | `apps/macos/` | macOS 外殼（SwiftUI）。 |
+| `apps/web/` | 收聽卡網站（Python）：上傳錄音、用 `nbtv-rx` 解碼、發卡、簽章與查驗。架設方式見 [apps/web/README.md](apps/web/README.md)。 |
 
 ## 建置與測試
 
@@ -72,6 +74,8 @@ build/tools/nbtv-chan --channel poor --snr 14 --offset 37 --ppm 40 tx.wav rx.wav
 mkdir -p out && build/tools/nbtv-rx --out-dir out rx.wav
 # 加 --merge：解每一幀之前把前面幾幀收到的值合進來，畫面沒變的地方比較清楚（見「接收端合併最近幾幀」）
 build/tools/nbtv-rx --merge --out-dir out rx.wav
+# 加 --json：給程式讀的輸出，每一幀一行 JSON（收聽卡網站用的就是這個）
+build/tools/nbtv-rx --json --out-dir out rx.wav
 
 # 收到幾幀、標頭解出幾成、畫質的統計（多執行緒）
 build/tools/nbtv-sim --mode 11 --channel poor --snr 5,10,15,20 --image core/tests/data/cat.ppm
@@ -97,6 +101,7 @@ build/tools/nbtv-learned --snr 10 --out out/learned.ppm core/tests/data/cat.ppm
 | C API、48 kHz 重取樣、瀑布圖頻譜 | 完成，含測試 |
 | 通道模擬與命令列工具 | 完成 |
 | macOS 外殼（SwiftUI） | 第一版完成：五張版面、收發流程、PTT（VOX／序列埠／rigctld）。以內附測試圖的模擬收發驗證過；鏡頭擷取與真的序列埠控制線還沒測，細節見 [apps/macos/README.md](apps/macos/README.md) |
+| 收聽卡網站（`apps/web/`） | 第一版完成，含測試：上傳、解碼、發卡、數位簽章（自己簽發的根憑證與簽章憑證）、C2PA、序號與離線查驗、Cloudflare Turnstile。自動測試用的是合成的錄音與假的查證服務；正式的網域上（經過 Cloudflare Tunnel 與 Turnstile）實際上傳、出卡、查驗走過一次。見 [apps/web/README.md](apps/web/README.md) |
 | 數位模式（LDPC＋AV1）、相干類比模式 | 做完之後在 2026-11-23 移除（見最上面的說明） |
 | 實機測試（音訊線迴路、假負載、空中） | 未開始 |
 | iOS、Android 外殼 | 未開始 |

@@ -1,0 +1,11 @@
+# Cloudflare Tunnel 的設定範例，放在 ~/.cloudflared/config.yml。
+# <UUID> 是 cloudflared tunnel create 印出來的那一串；hostname 換成你的網域。
+tunnel: <UUID>
+credentials-file: /Users/你的帳號/.cloudflared/<UUID>.json
+
+ingress:
+  # 收聽卡網站只聽 127.0.0.1:8088，外面的人只能經過這條通道進來
+  - hostname: card.example.com
+    service: http://127.0.0.1:8088
+  # 其他的網域名稱一律回 404
+  - service: http_status:404

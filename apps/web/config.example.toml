@@ -1,0 +1,78 @@
+# NBTV 收聽卡網站的設定。複製成 config.toml 再改（這個目錄裡的 .toml 除了這份範例之外都不進版本控制）。
+# 路徑一律相對於這個檔案所在的目錄。沒有寫的項目用這裡列的預設值。
+
+[station]
+# 電台的呼號：錄音裡要解出這個呼號才發卡，卡片上最大的字也是它
+callsign = "BX4ACP"
+# 顯示在首頁的公告（發射的時間、頻率、模式…）；可以用三個引號寫好幾行。留空就不顯示
+notice = ""
+
+[rules]
+# 有畫面的幀要「超過」這個數目才發卡（10 表示至少 11 幀）
+min_frames = 10
+# 錄音最長幾秒
+max_seconds = 300
+
+[server]
+# 只聽本機：對外由 Cloudflare Tunnel（cloudflared）連進來，不要直接開放到網路上
+host = "127.0.0.1"
+port = 8088
+# 對外的網址。會印在收聽卡的 QR code 與紀錄裡，卡片發出去之後就改不了，上線前要先填對。
+# 只在本機試用時是 http://127.0.0.1:8088（網站自己只講 http，https 是 Cloudflare 那一段加的）；
+# 正式上線時填 https://你的網域，不要加埠號（8088 只是網站在這台電腦上聽的埠，對外是標準的 443）
+public_url = "http://127.0.0.1:8088"
+# 經過 Cloudflare 時設成 true：訪客的位址改從 CF-Connecting-IP 取（用來限制每個人的用量）。
+# 只在本機試用時要是 false
+behind_cloudflare = false
+
+[limits]
+# 上傳的檔案上限（MB）。五分鐘的 48 kHz 立體聲 16 位元是 58 MB；Cloudflare 免費方案的上限是 100 MB
+max_upload_mb = 64
+# 同時解幾份錄音。一份最多用掉一個處理器核心與約 450 MB 的記憶體
+workers = 2
+# 最多幾份錄音在等（含還在上傳的）；滿了就請訪客晚點再來
+queue = 8
+# 每個來源位址在 window_minutes 分鐘內最多開始幾次解碼
+jobs_per_ip = 6
+window_minutes = 10
+# 一天（UTC）最多發幾張卡。有照片當底圖時一張卡約 1 到 3 MB
+cards_per_day = 200
+# 一份錄音解超過這麼多秒就放棄
+decode_timeout_seconds = 300
+
+[decoder]
+# 專案建出來的 nbtv-rx（先在專案根目錄執行 cmake -S . -B build && cmake --build build）
+nbtv_rx = "../../build/tools/nbtv-rx"
+# 解每一幀之前把前面幾幀合進來，畫面沒變的地方比較清楚（和 app 的預設相同）
+merge = true
+
+[turnstile]
+# Cloudflare Turnstile（防機器人）。到 Cloudflare 的控制台建一個 widget，把兩把金鑰填在下面兩行的引號裡。
+# secret_key 不能外流。這裡只放 Turnstile 的金鑰：Cloudflare Tunnel 的權杖是給 cloudflared 用的，不要貼在這個檔案裡
+enabled = true
+site_key = ""
+secret_key = ""
+# 伺服器查證權杖時，會核對它是在哪個主機名稱的頁面上取得的：預設只收 public_url 的主機名稱。
+# 網站另外還有別的網域時才需要列出來（不含 https:// 與埠號）；widget 在 Cloudflare 那邊的網域清單也要有它們
+# hostnames = ["card.example.com"]
+# 只在本機試用時可以填 Cloudflare 公開的測試金鑰（驗證一律通過，等於沒有防護）：
+#   site_key = "1x00000000000000000000AA"
+#   secret_key = "1x0000000000000000000000000000000AA"
+# 或把 enabled 設成 false
+
+[card]
+# 收聽卡的底圖：把照片（.jpg、.png、.webp）放進這個目錄。有好幾張時每張卡依序號挑一張；
+# 沒有照片時用內建的底圖。照片會被裁成 14:9（1680×1080）
+backgrounds = "assets/backgrounds"
+# 字型檔。留空會自己找：中文用蘋方、呼號與數字用 DIN Alternate、序號用 SF Mono
+font_cjk = ""
+font_latin = ""
+font_mono = ""
+
+[c2pa]
+# 在卡片裡嵌入 C2PA（Content Credentials）的資料，由同一張簽章憑證簽署。需要 c2pa-python 套件
+enabled = true
+
+[paths]
+# 根憑證、簽章憑證與它們的私鑰（data/keys/）、發過的卡、資料庫都放在這裡。不進版本控制，要自己備份
+data = "data"

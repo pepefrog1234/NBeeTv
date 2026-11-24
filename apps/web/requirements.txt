@@ -1,0 +1,11 @@
+# 收聽卡網站用的 Python 套件（Python 3.11 以上）。版本是開發時測過的那一組。
+fastapi==0.165.0
+uvicorn==0.54.0
+httpx==0.28.1
+numpy==2.5.5
+scipy==1.18.1
+pillow==13.0.0
+cryptography==50.0.2
+qrcode==8.2
+# C2PA（Content Credentials）。不要的話可以不裝，並把設定檔的 [c2pa] enabled 設成 false
+c2pa-python==0.39.0

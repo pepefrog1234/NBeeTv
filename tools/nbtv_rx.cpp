@@ -1,4 +1,5 @@
 // nbtv-rx：解 WAV 檔裡的訊號，把收到的畫面存成 PPM。
+#include <cmath>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -17,8 +18,37 @@
 using namespace nbtv;
 using namespace nbtv::tools;
 
+namespace {
+
+// --json 用：數字印成 JSON 的值（不是有限的數印 null）、字串加上引號並跳脫
+std::string json_number(double v, const char* format) {
+    if (!std::isfinite(v)) return "null";
+    char text[32];
+    std::snprintf(text, sizeof text, format, v);
+    return text;
+}
+
+std::string json_string(const std::string& s) {
+    std::string out = "\"";
+    for (const char c : s) {
+        if (c == '"' || c == '\\') {
+            out += '\\';
+            out += c;
+        } else if (static_cast<unsigned char>(c) < 0x20) {
+            char escaped[8];
+            std::snprintf(escaped, sizeof escaped, "\\u%04x", c);
+            out += escaped;
+        } else {
+            out += c;
+        }
+    }
+    return out + "\"";
+}
+
+}  // namespace
+
 int main(int argc, char** argv) {
-    const Args args(argc, argv, {"trace", "help", "merge"});
+    const Args args(argc, argv, {"trace", "help", "merge", "json"});
     if (args.positional.empty() || args.has("help")) {
         std::printf(
             "用法：nbtv-rx [選項] 錄音.wav\n"
@@ -28,6 +58,8 @@ int main(int argc, char** argv) {
             "  --merge          解每一幀之前把前面幾幀收到的值合進來：畫面沒變的地方比較清楚，訊號弱時差別最大。\n"
             "                   用的是 models/ 裡各個模型配的權重；沒有配的模式照原來的方式解\n"
             "  --trace          印出同步與解碼的過程\n"
+            "  --json           給程式讀的輸出：每一幀印一行 JSON、印完立刻送出，最後一行是總數\n"
+            "                   （frame 是第幾幀，存檔時檔名是 frame_<frame>.ppm；標頭沒解出來時 callsign 是 null）\n"
             "WAV 的取樣率必須是 12000 或 48000。\n");
         return args.has("help") ? 0 : 2;
     }
@@ -83,16 +115,28 @@ int main(int argc, char** argv) {
         }
         rx.tuning().learned_merge = true;
     }
+    const bool json = args.has("json");
     int index = 0, good = 0;
     auto drain = [&] {
         RxFrame f;
         while (rx.poll(f)) {
             const double at = static_cast<double>(f.start_sample) / kSampleRate;
-            std::printf("%7.2f 秒  模式 %2d  %s  呼號 %-9s 序號 %3d  訊雜比 %5.1f dB  頻偏 %+6.1f Hz", at, f.mode_id,
-                        f.decoded ? "有畫面" : "沒畫面", f.header_ok ? f.callsign.c_str() : "?", f.sequence, f.snr_db, f.freq_offset_hz);
-            if (f.model_missing) std::printf("  沒有模型，或權重和對方的不同");
             if (!dir.empty() && f.decoded) write_ppm(dir + "/frame_" + std::to_string(index) + ".ppm", f.rgb, kImageWidth, kImageHeight);
-            std::printf("\n");
+            if (json) {
+                // 畫面先存好才印這一行，另一頭讀到這一行時檔案已經在了
+                std::printf("{\"frame\":%d,\"time\":%s,\"mode\":%d,\"picture\":%s,\"header\":%s,\"callsign\":%s,\"sequence\":%d,"
+                            "\"snr_db\":%s,\"offset_hz\":%s,\"model_missing\":%s}\n",
+                            index, json_number(at, "%.3f").c_str(), f.mode_id, f.decoded ? "true" : "false",
+                            f.header_ok ? "true" : "false", f.header_ok ? json_string(f.callsign).c_str() : "null", f.sequence,
+                            json_number(f.snr_db, "%.2f").c_str(), json_number(f.freq_offset_hz, "%.2f").c_str(),
+                            f.model_missing ? "true" : "false");
+                std::fflush(stdout);
+            } else {
+                std::printf("%7.2f 秒  模式 %2d  %s  呼號 %-9s 序號 %3d  訊雜比 %5.1f dB  頻偏 %+6.1f Hz", at, f.mode_id,
+                            f.decoded ? "有畫面" : "沒畫面", f.header_ok ? f.callsign.c_str() : "?", f.sequence, f.snr_db, f.freq_offset_hz);
+                if (f.model_missing) std::printf("  沒有模型，或權重和對方的不同");
+                std::printf("\n");
+            }
             good += f.decoded ? 1 : 0;
             ++index;
         }
@@ -101,6 +145,7 @@ int main(int argc, char** argv) {
         rx.push(std::span<const float>(audio).subspan(pos, std::min<std::size_t>(1200, audio.size() - pos)));
         drain();
     }
-    std::printf("共 %d 幀，%d 幀有畫面\n", index, good);
+    if (json) std::printf("{\"end\":true,\"frames\":%d,\"pictures\":%d}\n", index, good);
+    else std::printf("共 %d 幀，%d 幀有畫面\n", index, good);
     return 0;
 }

@@ -23,3 +23,14 @@ xcuserdata/
 
 # clangd 的索引
 /.cache/
+
+# 收聽卡網站（apps/web）：Python 環境、設定檔（裡面有 Turnstile 的 secret key）、
+# 資料（簽章的私鑰、發過的卡）、電台主人放的底圖照片。
+# 設定檔不管取什麼名字都不進版本控制，只有範例例外
+/apps/web/.venv/
+/apps/web/*.toml
+!/apps/web/config.example.toml
+/apps/web/data/
+/apps/web/assets/backgrounds/*
+!/apps/web/assets/backgrounds/README.md
+__pycache__/

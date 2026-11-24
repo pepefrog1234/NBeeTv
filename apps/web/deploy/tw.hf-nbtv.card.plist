@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  登入之後自動啟動收聽卡網站、當掉自動重開（launchd 的使用者代理）。這份範本沒有實際裝起來試過。
+
+  用法：把下面四處的 /Users/你的帳號/Documents/hf-nbtv 改成專案實際的位置，然後
+    cp tw.hf-nbtv.card.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/tw.hf-nbtv.card.plist
+  停掉並移除：
+    launchctl bootout gui/$(id -u)/tw.hf-nbtv.card
+    rm ~/Library/LaunchAgents/tw.hf-nbtv.card.plist
+
+  注意：專案放在「文件」「桌面」「下載項目」底下時，macOS 的隱私權保護可能不讓背景程式讀那裡的檔案
+  （會跳出要求同意的視窗，或直接讀不到）。遇到的話，把專案搬到別的地方（例如 ~/hf-nbtv），或改用終端機啟動。
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>tw.hf-nbtv.card</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/你的帳號/Documents/hf-nbtv/apps/web/.venv/bin/python</string>
+    <string>-m</string>
+    <string>nbtvweb</string>
+    <string>serve</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/你的帳號/Documents/hf-nbtv/apps/web</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/你的帳號/Documents/hf-nbtv/apps/web/data/server.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/你的帳號/Documents/hf-nbtv/apps/web/data/server.log</string>
+</dict>
+</plist>

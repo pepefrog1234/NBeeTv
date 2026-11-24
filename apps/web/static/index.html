@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title data-i18n="doc.index">NBTV 收聽卡</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/i18n.js" defer></script>
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/">
+    <span class="call" id="station">NBTV</span>
+    <span class="brand-title" data-i18n="title">NBTV 收聽卡</span>
+  </a>
+  <nav class="top-nav">
+    <a href="/verify" data-i18n="nav.verify">查驗收聽卡</a>
+    <button type="button" class="lang" id="lang" aria-label="Switch language">EN</button>
+  </nav>
+</header>
+
+<main>
+  <section class="intro">
+    <h1 data-i18n="intro.heading">上傳錄到的訊號，領一張收聽卡</h1>
+    <p class="lead" data-i18n="intro.body"></p>
+    <p class="notice" id="notice" hidden></p>
+  </section>
+
+  <form id="form" novalidate>
+    <section class="panel">
+      <h2><span class="step">1</span><span data-i18n="form.file.legend">錄音檔</span></h2>
+      <label class="drop" id="drop" for="file">
+        <input type="file" id="file" accept=".wav,.wave,audio/wav,audio/x-wav,audio/wave">
+        <svg class="drop-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7 9m5-5 5 5M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2"/></svg>
+        <span class="drop-text" id="drop-text" data-i18n="form.file.drop">選擇 WAV 檔，或把檔案拖到這裡</span>
+        <span class="drop-meta" id="file-meta"></span>
+      </label>
+      <p class="field-error" id="file-error" role="alert" hidden></p>
+      <ul class="tips">
+        <li data-i18n="tips.usb"></li>
+        <li data-i18n="tips.format"></li>
+        <li data-i18n="tips.direct"></li>
+      </ul>
+    </section>
+
+    <section class="panel">
+      <h2><span class="step">2</span><span data-i18n="form.listener.legend">卡片上要印的資料（選填）</span></h2>
+      <p class="hint" id="listener-hint" data-i18n="form.listener.hint"></p>
+      <div class="fields">
+        <div class="field wide">
+          <label for="name" data-i18n="field.name">稱呼或呼號</label>
+          <input type="text" id="name" autocomplete="off" maxlength="40" aria-describedby="listener-hint">
+        </div>
+        <div class="field">
+          <label for="date" data-i18n="field.date">收聽日期（UTC）</label>
+          <input type="date" id="date">
+        </div>
+        <div class="field">
+          <label for="time" data-i18n="field.time">時間（UTC）</label>
+          <input type="time" id="time">
+        </div>
+        <div class="field">
+          <label for="freq" data-i18n="field.freq">頻率（kHz）</label>
+          <input type="number" id="freq" inputmode="decimal" min="10" max="30000000" step="any" placeholder="7165">
+        </div>
+        <div class="field">
+          <label for="location" data-i18n="field.location">收聽地點</label>
+          <input type="text" id="location" autocomplete="off" maxlength="60">
+        </div>
+      </div>
+    </section>
+
+    <section class="panel submit-panel">
+      <h2><span class="step">3</span><span data-i18n="form.send.legend">上傳</span></h2>
+      <div class="turnstile" id="turnstile"></div>
+      <p class="field-error" id="turnstile-error" role="alert" hidden></p>
+      <button type="submit" class="primary" id="submit" disabled data-i18n="form.submit">上傳並解碼</button>
+      <p class="field-error" id="form-error" role="alert" hidden></p>
+      <p class="hint" data-i18n="privacy"></p>
+    </section>
+  </form>
+
+  <section class="panel" id="progress" hidden>
+    <h2 id="progress-title" tabindex="-1"></h2>
+    <progress id="bar" max="100" value="0"></progress>
+    <p class="hint" id="progress-detail" aria-live="polite"></p>
+  </section>
+
+  <section class="panel" id="result" hidden>
+    <h2 id="result-title" tabindex="-1"></h2>
+    <p id="result-body"></p>
+    <ul class="tips" id="result-tips" hidden></ul>
+    <a class="card-link" id="card-link" hidden><img id="card-image" alt="" width="1680" height="1080"></a>
+    <div class="actions" id="result-actions">
+      <a class="primary" id="download" hidden data-i18n="result.download">下載收聽卡（PNG）</a>
+      <a class="secondary" id="verify-link" hidden data-i18n="result.verify">查驗頁</a>
+      <button type="button" class="secondary" id="again" data-i18n="result.again">再傳一份錄音</button>
+    </div>
+    <p class="hint" id="keep-note" hidden data-i18n="result.keep"></p>
+    <dl class="stats" id="stats" hidden></dl>
+    <div id="sheet-box" hidden>
+      <h3 data-i18n="sheet.heading">從你的錄音解出來的畫面</h3>
+      <div class="sheet"><img id="sheet" alt=""></div>
+    </div>
+  </section>
+</main>
+
+<footer class="bottom">
+  <p><span data-i18n="footer.signed">收聽卡以本台自己簽發的憑證做數位簽章。</span>
+     <a href="/verify" data-i18n="footer.how">怎麼查驗</a></p>
+</footer>
+</body>
+</html>
