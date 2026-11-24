@@ -42,7 +42,7 @@ enum Theme {
 
 /// 版面稿裡的線條圖示，照 SVG 的路徑重畫。
 enum IconKind {
-    case settings, download, camera, chevrons, lock, videoFile, pause, play, check
+    case settings, download, camera, chevrons, lock, videoFile, pause, play, check, clock
 }
 
 struct IconShape: Shape {
@@ -93,6 +93,9 @@ struct IconShape: Shape {
             p.move(to: CGPoint(x: 3, y: 1.5)); p.addLine(to: CGPoint(x: 10.5, y: 6)); p.addLine(to: CGPoint(x: 3, y: 10.5)); p.closeSubpath()
         case .check:
             p.move(to: CGPoint(x: 3, y: 8.5)); p.addLine(to: CGPoint(x: 6.5, y: 12)); p.addLine(to: CGPoint(x: 13, y: 4.5))
+        case .clock:   // 版面稿裡沒有，照同樣的線條畫的：圓框加上指著四點的兩根針
+            p.addEllipse(in: CGRect(x: 2, y: 2, width: 12, height: 12))
+            p.move(to: CGPoint(x: 8, y: 4.8)); p.addLine(to: CGPoint(x: 8, y: 8)); p.addLine(to: CGPoint(x: 10.3, y: 9.5))
         }
         let box = viewBox
         let scale = min(rect.width / box.width, rect.height / box.height)

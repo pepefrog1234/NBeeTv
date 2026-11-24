@@ -5,7 +5,8 @@
 //     --ask-camera 還沒有相機權限時向系統要求，--save-camera-frame <檔名> 把鏡頭取到的那一格存成 PPM）：
 //   1. Swift 與核心之間的收發（不經音訊裝置），包含送全黑、全白的畫面
 //   2. 影片檔來源（做一段影片、開啟、跳到指定位置、取一格），以及用影片當來源的整個發射流程
-//      （音訊輸出換成模擬的、PTT 換成記錄用的：按下發射自動播放，播完自動停止、放開 PTT）
+//      （音訊輸出換成模擬的、PTT 換成記錄用的：按下發射自動播放，播完自動停止、放開 PTT），
+//      以及定時發射（另外把時鐘換成假的：到了時間自動發射、該跳過的時候跳過、超過上限自動停止）
 //   3. rigctld 的 PTT（要給 --rig，對著真的 rigctld 測）
 //   4. 音訊輸出（需要 BlackHole 虛擬音效卡）
 //   5. 經 BlackHole 自發自收（另外需要麥克風權限）
@@ -163,6 +164,8 @@ enum SelfTest {
         testVideoFile(rocket)
         testReceivedHistory(coffee)
         testVideoTransmit(rocket)
+        testScheduleTimes()
+        testScheduledTransmit(rocket)
         if useCamera {
             testCamera(ask: arguments.contains("--ask-camera"), savePath: option("--save-camera-frame", in: arguments))
         } else {
@@ -988,6 +991,433 @@ enum SelfTest {
         report(name, reached && stayed && restarted,
                String(format: "%@；暫停之後停在 %.2f 秒%@；再播放%@從頭來", reached ? "播到了結尾" : "一直沒有播到結尾", rested,
                       stayed ? "" : "（沒有停住）", restarted ? "" : "沒有"))
+    }
+
+    // MARK: 定時發射
+
+    /// 定時發射的時刻怎麼算：對齊整點的固定間隔。
+    private static func testScheduleTimes() {
+        let name = "定時發射：下一次的時刻"
+        var problems: [String] = []
+        func calendar(_ zone: String) -> Calendar {
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = TimeZone(identifier: zone) ?? .current
+            return calendar
+        }
+        func at(_ calendar: Calendar, _ month: Int, _ day: Int, _ hour: Int, _ minute: Int, _ second: Double = 0) -> Date {
+            let whole = calendar.date(from: DateComponents(year: 2026, month: month, day: day, hour: hour, minute: minute)) ?? Date()
+            return whole.addingTimeInterval(second)
+        }
+        let taipei = calendar("Asia/Taipei")
+        let cases: [(from: Date, interval: Int, expected: Date)] = [
+            (at(taipei, 11, 24, 12, 0), 15, at(taipei, 11, 24, 12, 15)),          // 剛好在時刻上：算下一個
+            (at(taipei, 11, 24, 12, 14, 59.9), 15, at(taipei, 11, 24, 12, 15)),
+            (at(taipei, 11, 24, 12, 15, 0.1), 15, at(taipei, 11, 24, 12, 30)),
+            (at(taipei, 11, 24, 12, 59, 30), 15, at(taipei, 11, 24, 13, 0)),
+            (at(taipei, 11, 24, 23, 50), 20, at(taipei, 11, 25, 0, 0)),           // 跨過午夜
+            (at(taipei, 11, 24, 12, 7, 3), 5, at(taipei, 11, 24, 12, 10)),
+            (at(taipei, 11, 24, 12, 7, 3), 10, at(taipei, 11, 24, 12, 10)),
+            (at(taipei, 11, 24, 12, 7, 3), 20, at(taipei, 11, 24, 12, 20)),
+            (at(taipei, 11, 24, 12, 7, 3), 30, at(taipei, 11, 24, 12, 30)),
+            (at(taipei, 11, 24, 12, 7, 3), 60, at(taipei, 11, 24, 13, 0)),
+        ]
+        for item in cases {
+            let got = TransmitSchedule.nextFire(after: item.from, intervalMinutes: item.interval, calendar: taipei)
+            if abs(got.timeIntervalSince(item.expected)) > 0.001 {
+                problems.append("每 \(item.interval) 分鐘：算出 \(TransmitSchedule.clockText(got, calendar: taipei))，應該是 \(TransmitSchedule.clockText(item.expected, calendar: taipei))")
+            }
+        }
+        // 時區和世界協調時間差的不是整點的地方（印度是 +5:30）：照當地的時鐘對齊
+        let kolkata = calendar("Asia/Kolkata")
+        let india = TransmitSchedule.nextFire(after: at(kolkata, 11, 24, 12, 7), intervalMinutes: 15, calendar: kolkata)
+        if TransmitSchedule.clockText(india, calendar: kolkata) != "12:15" {
+            problems.append("印度的時區算出 \(TransmitSchedule.clockText(india, calendar: kolkata))，應該是 12:15")
+        }
+        // 連續走 30 小時，跨過日光節約時間結束的那一夜（紐約，2026-11-01 凌晨 2 點撥回 1 點）：
+        // 每一個時刻都剛好比前一個晚一個間隔，當地時鐘上的分是間隔的倍數、秒是 0
+        let newYork = calendar("America/New_York")
+        var walked = 0
+        for interval in TransmitSchedule.intervals {
+            var time = at(newYork, 10, 31, 20, 3)
+            let end = time.addingTimeInterval(30 * 3600)
+            var previous: Date?
+            var bad = 0
+            while time < end {
+                let next = TransmitSchedule.nextFire(after: time, intervalMinutes: interval, calendar: newYork)
+                let parts = newYork.dateComponents([.minute, .second], from: next)
+                let whole = abs(next.timeIntervalSinceReferenceDate - next.timeIntervalSinceReferenceDate.rounded()) < 1e-6
+                if next <= time || (parts.minute ?? 1) % interval != 0 || parts.second != 0 || !whole { bad += 1 }
+                if let previous, abs(next.timeIntervalSince(previous) - Double(interval * 60)) > 0.001 { bad += 1 }
+                previous = next
+                time = next
+                walked += 1
+            }
+            if bad > 0 { problems.append("每 \(interval) 分鐘、跨過日光節約時間結束的那一夜：有 \(bad) 個時刻不對") }
+        }
+        if TransmitSchedule.minutesText(15) != "00、15、30、45" || TransmitSchedule.minutesText(5) != "00、05、10 … 55"
+            || TransmitSchedule.minutesText(60) != "00" {
+            problems.append("列出一小時裡哪幾分的文字不對：\(TransmitSchedule.minutesText(15))／\(TransmitSchedule.minutesText(5))／\(TransmitSchedule.minutesText(60))")
+        }
+        report(name, problems.isEmpty, problems.isEmpty
+               ? "\(cases.count) 個例子、印度的時區、紐約跨過日光節約時間結束的 30 小時（\(walked) 個時刻）都對"
+               : problems.joined(separator: "；"))
+    }
+
+    /// 這個行程現在有沒有向系統宣告「不要因為閒置而睡眠」（查不到時回傳 nil）。
+    private static func holdsIdleSleepAssertion() -> Bool? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
+        process.arguments = ["-g", "assertions"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        guard (try? process.run()) != nil else { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0, let text = String(data: data, encoding: .utf8) else { return nil }
+        let mine = "pid \(getpid())("
+        return text.split(separator: "\n").contains { $0.contains(mine) && $0.contains("PreventUserIdleSystemSleep") }
+    }
+
+    /// 定時發射的整個流程。和影片來源那一項一樣，用的是 app 真正的狀態物件、模擬的音訊輸出與記錄用的 PTT，
+    /// 另外把時鐘換成假的（從某個時刻的前一秒開始，照實際經過的時間往前走），不必真的等到整點：
+    ///   * 還沒選影片、沒有呼號時到了時間不發射，原因記下來
+    ///   * 到了時間自動開始：來源是鏡頭就先換成影片檔，影片從頭播（不是從原來停的地方），
+    ///     勾了循環播放也只播一次，播完自動停止、放開 PTT，來源換回鏡頭；送出去的每一張都解得回來
+    ///   * 到了時間正在發射、或正在收別人的畫面：那一次跳過（後者可以關掉）
+    ///   * 錯過了時間（時鐘一下子跳過去，就像電腦剛睡醒）不補發；時鐘被往回調、間隔改了，下一次的時刻跟著重算
+    ///   * 影片一直沒有播完（中途被換成別的來源）：超過上限自動停止
+    ///   * 開著的時候向系統宣告不要因為閒置而睡眠，關掉就收回
+    ///   * 上次選的影片檔，啟動時自動開啟
+    private static func testScheduledTransmit(_ image: Data) {
+        let name = "定時發射：到了時間自動發射影片，播完自動停止"
+        let seconds = 3
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("nbtv-selftest-schedule-\(getpid()).mp4")
+        defer { try? FileManager.default.removeItem(at: url) }
+        guard let cg = NBTV.image(fromRGB: image), Demo.makeVideo(at: url, from: cg, seconds: seconds, fps: 10) else {
+            report(name, false, "示範影片做不出來")
+            return
+        }
+        // 影片開頭與結尾那一格縮成 96×72 的樣子，之後拿來認收到的畫面
+        let reference = VideoFileSource()
+        defer { reference.close() }
+        var referenceOpened: Bool?
+        reference.open(url) { referenceOpened = $0 }
+        guard Demo.wait(timeout: 10, until: { referenceOpened != nil }), referenceOpened == true else {
+            report(name, false, "影片無法開啟")
+            return
+        }
+        func picture(at time: Double) -> Data? {
+            var arrived = false
+            reference.player.seek(to: CMTime(seconds: time, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) { _ in
+                DispatchQueue.main.async { arrived = true }
+            }
+            guard Demo.wait(timeout: 5, until: { arrived }) else { return nil }
+            var rgb: Data?
+            _ = Demo.wait(timeout: 5) {
+                if let buffer = reference.copyCurrentFrame() { rgb = FrameScaler.scale(buffer, mode: .fill)?.rgb }
+                return rgb != nil
+            }
+            return rgb
+        }
+        guard let first = picture(at: 0), let last = picture(at: Double(seconds)), difference(first, last) > 12 else {
+            report(name, false, "取不到影片開頭與結尾的畫面，或兩者太像")
+            return
+        }
+
+        setenv("NBTV_NO_DEVICES", "1", 1)   // 不開輸入裝置，也不開鏡頭
+        let settings = AppSettings(store: nil)
+        settings.callsign = "N0CALL"
+        settings.sourceKind = .video
+        settings.loopVideo = true    // 定時發射不管這個，照樣只播一次
+        settings.txModeID = 12       // 模式 12：每張 1.04 秒
+        let ptt = RecordingPTT()
+        settings.debugPTTDriver = { ptt }
+        let model = AppModel(settings: settings, live: true)
+        let sent = SampleCollector()
+        model.debugUseSimulatedOutput { sent.append($0) }
+        let margin = AppModel.scheduleMarginSeconds
+        AppModel.scheduleMarginSeconds = 1   // 「超過上限自動停止」那一段不必等那麼久
+        model.start()
+        defer {
+            model.shutdown()
+            AppModel.scheduleMarginSeconds = margin
+        }
+
+        // 假的時鐘：從 setClock 給的時刻開始，照實際經過的時間往前走
+        let calendar = Calendar.current
+        func moment(_ hour: Int, _ minute: Int, _ second: Double = 0) -> Date {
+            (calendar.date(bySettingHour: hour, minute: minute, second: 0, of: Date()) ?? Date()).addingTimeInterval(second)
+        }
+        var base = Date(), began = Date()
+        func setClock(_ hour: Int, _ minute: Int, _ second: Double) {
+            base = moment(hour, minute, second)
+            began = Date()
+        }
+        model.clock = { base.addingTimeInterval(Date().timeIntervalSince(began)) }
+        /// 關掉、把時鐘撥到某個時刻、再打開：下一次的時刻從新的時間算起
+        func rearm(_ hour: Int, _ minute: Int, _ second: Double) {
+            model.setScheduleArmed(false)
+            setClock(hour, minute, second)
+            model.setScheduleArmed(true)
+        }
+        func next() -> String { model.scheduleNextFire.map { TransmitSchedule.clockText($0) } ?? "沒有" }
+        /// 等到「上一次」的結果是某個時刻的
+        func waitForEvent(_ label: String, timeout: Double = 4) -> String? {
+            _ = Demo.wait(timeout: timeout) { model.scheduleLastEvent?.hasPrefix(label) == true }
+            return model.scheduleLastEvent?.hasPrefix(label) == true ? model.scheduleLastEvent : nil
+        }
+        var problems: [String] = []
+        var details: [String] = []
+
+        // 1. 還沒選影片：打開之後到了時間不發射。打開的時候順便看睡眠的宣告
+        rearm(12, 14, 59.2)
+        if next() != "12:15" { problems.append("12:14:59 打開，下一次是 \(next())，應該是 12:15") }
+        if !model.scheduleSummary.contains("還沒選擇影片檔") { problems.append("還沒選影片時頂列寫的是「\(model.scheduleSummary)」") }
+        let heldWhileOn = holdsIdleSleepAssertion()
+        if let event = waitForEvent("12:15") {
+            if !event.contains("還沒選擇影片檔") { problems.append("還沒選影片：記下來的是「\(event)」") }
+        } else {
+            problems.append("還沒選影片：到了時間沒有記下任何結果")
+        }
+        if model.txPhase != .idle || !ptt.take().isEmpty { problems.append("還沒選影片卻開始發射了") }
+        if next() != "12:30" { problems.append("12:15 過了之後下一次是 \(next())，應該是 12:30") }
+
+        // 2. 開影片（循環播放，所以一開就播），再把來源換成鏡頭（沒有鏡頭可開，不影響）；影片停在快到結尾的地方
+        var opened: Bool?
+        model.openVideo(url) { opened = $0 }
+        guard Demo.wait(timeout: 10, until: { opened != nil }), opened == true else {
+            report(name, false, "影片開不起來")
+            return
+        }
+        Demo.spin(0.4)
+        model.setSourceKind(.camera)
+        model.scrubVideo(to: 2.4, editing: false)
+        Demo.spin(0.4)
+        if model.videoPlaying { problems.append("來源換成鏡頭之後影片還在播") }
+
+        // 3. 到了時間自動發射：從頭播、只播一次、播完自動停止、來源換回鏡頭
+        rearm(12, 29, 59.0)
+        _ = sent.take()
+        _ = ptt.take()
+        if Demo.wait(timeout: 4, until: { model.txPhase != .idle }) {
+            let late = model.clock().timeIntervalSince(moment(12, 30))
+            if late < 0 || late > 0.5 { problems.append(String(format: "開始的時間不對：比 12:30:00 %@ %.2f 秒", late < 0 ? "早" : "晚", abs(late))) }
+            if !model.scheduledRun || settings.sourceKind != .video || model.scheduleSummary != "定時發射中" {
+                problems.append("開始之後的狀態不對（定時發射中 \(model.scheduledRun)、來源 \(settings.sourceKind.rawValue)、頂列「\(model.scheduleSummary)」）")
+            }
+            var onAirLate: Double?
+            var played = false
+            let finished = Demo.wait(timeout: 25) {
+                if onAirLate == nil, model.isOnAir { onAirLate = model.clock().timeIntervalSince(moment(12, 30)) }
+                if model.txPhase != .idle, model.videoPlaying { played = true }
+                return model.txPhase == .idle
+            }
+            if !finished {
+                problems.append("影片播完之後沒有自動停止")
+                model.stopTransmit()
+                _ = Demo.wait(timeout: 10) { model.txPhase == .idle }
+            }
+            if !played { problems.append("開始之後影片沒有播放") }
+            Demo.spin(0.3)   // PTT 的放開在背景佇列上做
+            if ptt.take() != [true, false] { problems.append("PTT 不是「按下一次、放開一次」") }
+            let frames = Demo.receive(sent.take() + Demo.silence(seconds: 0.5)).flatMap(\.frames)
+            let good = frames.filter { $0.decoded && $0.headerOK && $0.callsign == "N0CALL" }
+            let count = model.txFramesSent
+            if count < 4 || count > 6 { problems.append("送出 \(count) 張，預期 4–6 張") }
+            if good.count != count || frames.count != count { problems.append("送出 \(count) 張，解回來 \(good.count) 張") }
+            if let head = good.first?.rgb, let tail = good.last?.rgb {
+                if difference(head, first) >= difference(head, last) { problems.append("第一張不是影片開頭的畫面（沒有從頭播）") }
+                if difference(tail, last) >= difference(tail, first) { problems.append("最後一張不是影片結尾的畫面") }
+            }
+            if settings.sourceKind != .camera { problems.append("結束之後來源沒有換回鏡頭") }
+            if model.scheduledRun || !model.scheduleArmed || next() != "12:45" {
+                problems.append("結束之後的狀態不對（定時發射中 \(model.scheduledRun)、開著 \(model.scheduleArmed)、下一次 \(next())）")
+            }
+            if model.scheduleLastEvent != "12:30 送出 \(count) 張" { problems.append("記下來的結果是「\(model.scheduleLastEvent ?? "沒有")」") }
+            if let notice = model.notice { problems.append("結束之後底列有訊息：\(notice)") }
+            details.append(String(format: "12:30:00 過了 %.2f 秒開始、%.2f 秒開始送音訊，送出 %d 張、解回 %d 張，來源換回鏡頭",
+                                  late, onAirLate ?? -1, count, good.count))
+        } else {
+            problems.append("到了 12:30 沒有開始發射（\(model.scheduleLastEvent ?? "沒有記下結果")）")
+        }
+
+        // 3b. 影片停在開頭、那一格先前已經當預覽取過了（沒有勾循環播放的影片開了之後就是這樣），來源再換成鏡頭：
+        //     到了時間手上沒有影片的畫面，影片也不必移動位置，照樣要從開頭那一格送起。順便換一個間隔（每 5 分鐘）
+        settings.loopVideo = false
+        model.setSourceKind(.video)
+        model.scrubVideo(to: 0, editing: false)
+        Demo.spin(0.5)
+        model.setSourceKind(.camera)
+        settings.scheduleIntervalMinutes = 5
+        rearm(12, 34, 59.0)
+        _ = sent.take()
+        _ = ptt.take()
+        if Demo.wait(timeout: 4, until: { model.txPhase != .idle }), Demo.wait(timeout: 25, until: { model.txPhase == .idle }) {
+            Demo.spin(0.3)
+            let frames = Demo.receive(sent.take() + Demo.silence(seconds: 0.5)).flatMap(\.frames)
+            let good = frames.filter { $0.decoded && $0.headerOK && $0.callsign == "N0CALL" }
+            let count = model.txFramesSent
+            if model.scheduleLastEvent != "12:35 送出 \(count) 張" || count < 4 || count > 6 || good.count != count {
+                problems.append("影片停在開頭、來源是鏡頭：記下來的是「\(model.scheduleLastEvent ?? "沒有")」，解回來 \(good.count) 張")
+            }
+            if let head = good.first?.rgb, difference(head, first) >= difference(head, last) {
+                problems.append("影片停在開頭、來源是鏡頭：第一張不是影片開頭的畫面")
+            }
+            if ptt.take() != [true, false] { problems.append("影片停在開頭、來源是鏡頭：PTT 不是「按下一次、放開一次」") }
+            if settings.sourceKind != .camera || next() != "12:40" {
+                problems.append("影片停在開頭、來源是鏡頭：結束之後來源是 \(settings.sourceKind.rawValue)、下一次 \(next())")
+            }
+            details.append("影片停在開頭、來源是鏡頭時（每 5 分鐘）也送出 \(count) 張")
+        } else {
+            problems.append("影片停在開頭、來源是鏡頭：到了 12:35 沒有發射，或沒有自己結束（\(model.scheduleLastEvent ?? "沒有記下結果")）")
+            model.stopTransmit()
+            _ = Demo.wait(timeout: 10) { model.txPhase == .idle }
+        }
+        settings.scheduleIntervalMinutes = 15
+        settings.loopVideo = true
+
+        // 4. 到了時間正在發射（自己按的）：那一次跳過，正在進行的發射不受影響
+        model.setSourceKind(.video)
+        Demo.spin(0.3)
+        rearm(12, 44, 59.0)
+        _ = ptt.take()
+        model.startTransmit()
+        if let event = waitForEvent("12:45") {
+            if !event.contains("正在發射") { problems.append("正在發射時到了時間：記下來的是「\(event)」") }
+        } else {
+            problems.append("正在發射時到了時間：沒有記下結果")
+        }
+        if model.txPhase == .idle || model.scheduledRun { problems.append("正在發射時到了時間：原來的發射被打斷，或被當成定時發射") }
+        _ = Demo.wait(timeout: 10) { model.txPhase == .transmitting }
+        model.stopTransmit()
+        if !Demo.wait(timeout: 10, until: { model.txPhase == .idle }) { problems.append("自己按的發射停不下來") }
+        Demo.spin(0.3)
+        if ptt.take() != [true, false] { problems.append("正在發射時到了時間：PTT 不是「按下一次、放開一次」") }
+        if next() != "13:00" { problems.append("12:45 過了之後下一次是 \(next())，應該是 13:00") }
+
+        // 5. 到了時間正在收別人的畫面：跳過；把那個選項關掉就照常發射。
+        //    這裡是對方連續送的時候兩張之間的空檔：到時間的前一秒多還同步著，那一瞬間剛好沒有
+        rearm(12, 59, 58.6)
+        var signal = RxUpdate()
+        signal.synced = true
+        signal.modeID = 12
+        model.apply(signal)
+        model.apply(RxUpdate())
+        if model.synced { problems.append("測試的前提不對：同步的狀態沒有清掉") }
+        if let event = waitForEvent("13:00") {
+            if !event.contains("正在收別人的畫面") { problems.append("正在收畫面時到了時間：記下來的是「\(event)」") }
+        } else {
+            problems.append("正在收畫面時到了時間：沒有記下結果")
+        }
+        if model.txPhase != .idle { problems.append("正在收畫面時到了時間：還是發射了") }
+        settings.scheduleSkipWhenBusy = false
+        rearm(13, 14, 59.2)
+        model.synced = true
+        if Demo.wait(timeout: 4, until: { model.txPhase == .transmitting }) {
+            model.stopTransmit()
+            _ = Demo.wait(timeout: 10) { model.txPhase == .idle }
+            if waitForEvent("13:15")?.contains("送出") != true { problems.append("選項關掉之後：記下來的是「\(model.scheduleLastEvent ?? "沒有")」") }
+        } else {
+            problems.append("「正在收畫面時不發射」關掉之後，到了時間沒有發射")
+            _ = Demo.wait(timeout: 10) { model.txPhase == .idle }
+        }
+        settings.scheduleSkipWhenBusy = true
+        model.synced = false
+        Demo.spin(0.3)
+        _ = ptt.take()
+
+        // 6. 最後一分鐘倒數；時鐘一下子跳過那個時刻（電腦剛睡醒）不補發；時鐘被往回調、改了間隔，下一次跟著重算
+        rearm(13, 29, 50.0)
+        Demo.spin(0.3)
+        if !(8...10).contains(model.scheduleCountdown ?? -1) || !model.scheduleSummary.hasSuffix("秒後發射") {
+            problems.append("最後一分鐘的倒數不對：\(model.scheduleCountdown.map { "\($0)" } ?? "沒有")，頂列「\(model.scheduleSummary)」")
+        }
+        setClock(13, 30, 30.0)
+        if let event = waitForEvent("13:30") {
+            if !event.contains("錯過了時間") { problems.append("錯過了時間：記下來的是「\(event)」") }
+        } else {
+            problems.append("錯過了時間：沒有記下結果")
+        }
+        if model.txPhase != .idle || !ptt.take().isEmpty { problems.append("錯過了時間卻補發了") }
+        if next() != "13:45" { problems.append("錯過 13:30 之後下一次是 \(next())，應該是 13:45") }
+        setClock(13, 2, 0)
+        Demo.spin(0.3)
+        if next() != "13:15" { problems.append("時鐘調回 13:02 之後下一次是 \(next())，應該是 13:15") }
+        settings.scheduleIntervalMinutes = 5
+        let five = next()
+        settings.scheduleIntervalMinutes = 60
+        let sixty = next()
+        settings.scheduleIntervalMinutes = 15
+        if five != "13:05" || sixty != "14:00" || next() != "13:15" {
+            problems.append("改間隔之後下一次的時刻不對：每 5 分鐘 \(five)、每 60 分鐘 \(sixty)、改回 15 分鐘 \(next())")
+        }
+
+        // 7. 沒有呼號：不發射
+        rearm(14, 14, 59.3)
+        settings.callsign = ""
+        if waitForEvent("14:15")?.contains("還沒設定呼號") != true { problems.append("沒有呼號：記下來的是「\(model.scheduleLastEvent ?? "沒有")」") }
+        if model.txPhase != .idle || !ptt.take().isEmpty { problems.append("沒有呼號卻發射了") }
+        settings.callsign = "N0CALL"
+
+        // 8. 影片一直沒有播完（開始之後來源被換成鏡頭，影片停住了）：超過上限自動停止
+        //    上限是影片 3 秒＋兩張 2.08 秒＋測試時改成的 1 秒
+        rearm(14, 29, 59.0)
+        _ = sent.take()
+        if Demo.wait(timeout: 5, until: { model.txPhase == .transmitting }) {
+            let began = Date()
+            model.setSourceKind(.camera)
+            let stopped = Demo.wait(timeout: 14) { model.txPhase == .idle }
+            let took = Date().timeIntervalSince(began)
+            Demo.spin(0.3)
+            if !stopped {
+                problems.append("影片沒有播完：超過上限之後沒有自動停止")
+                model.stopTransmit()
+                _ = Demo.wait(timeout: 10) { model.txPhase == .idle }
+            } else if took < 4 || took > 9 {
+                problems.append(String(format: "影片沒有播完：%.1f 秒後停止，預期 6 秒左右", took))
+            }
+            if model.scheduleLastEvent?.contains("自動停止") != true || model.notice?.contains("自動停止") != true {
+                problems.append("超過上限自動停止：記下來的是「\(model.scheduleLastEvent ?? "沒有")」，底列「\(model.notice ?? "沒有")」")
+            }
+            if ptt.take() != [true, false] { problems.append("超過上限自動停止：PTT 不是「按下一次、放開一次」") }
+            if settings.sourceKind != .camera { problems.append("發射中自己換的來源，結束之後被換掉了") }
+            details.append(String(format: "影片沒有播完時 %.1f 秒後自動停止", took))
+        } else {
+            problems.append("到了 14:30 沒有開始發射（\(model.scheduleLastEvent ?? "沒有記下結果")）")
+        }
+
+        // 9. 關掉：不再有下一次，睡眠的宣告也收回
+        model.setScheduleArmed(false)
+        if model.scheduleNextFire != nil || model.scheduleSummary != "定時發射" { problems.append("關掉之後還有下一次的時刻") }
+        let heldWhileOff = holdsIdleSleepAssertion()
+        if let heldWhileOn, let heldWhileOff {
+            if !heldWhileOn { problems.append("開著的時候沒有向系統宣告不要睡眠") }
+            if heldWhileOff { problems.append("關掉之後睡眠的宣告沒有收回") }
+            details.append("開著的時候有不要睡眠的宣告、關掉就收回")
+        } else {
+            details.append("睡眠的宣告查不到（pmset 不能用），沒有檢查")
+        }
+
+        // 10. 上次選的影片檔：啟動時自動開啟（來源是鏡頭，所以只開啟、不播放）；檔案不在了就當作沒有
+        for (path, expected) in [(url.path, true), (url.path + ".missing", false)] {
+            let again = AppSettings(store: nil)
+            again.sourceKind = .camera
+            again.videoPath = path
+            let second = AppModel(settings: again, live: true)
+            second.start()
+            let reopened = Demo.wait(timeout: expected ? 10 : 1) { second.videoName != nil }
+            Demo.spin(0.3)
+            if reopened != expected || second.videoPlaying {
+                problems.append(expected ? "上次選的影片檔啟動時沒有自動開啟（或自己播起來了）" : "不存在的影片檔被當成開啟了")
+            }
+            second.shutdown()
+        }
+        details.append("上次選的影片檔啟動時自動開啟")
+
+        report(name, problems.isEmpty, problems.isEmpty
+               ? details.joined(separator: "；") + "；沒有影片、沒有呼號、正在發射、正在收畫面、錯過時間的那幾次都沒有發射"
+               : problems.joined(separator: "；"))
     }
 
     // MARK: 序列埠

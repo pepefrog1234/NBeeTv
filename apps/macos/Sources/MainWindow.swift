@@ -56,6 +56,7 @@ struct HeaderBar: View {
                 Text(model.settings.callsign.isEmpty ? "未設定" : model.settings.callsign)
                     .font(Theme.mono(13, .semibold))
                     .foregroundColor(model.settings.callsign.isEmpty ? Theme.tertiary : Theme.text)
+                ScheduleButton().padding(.leading, 6)
                 Button {
                     openWindow(id: "settings")
                 } label: {
@@ -65,7 +66,6 @@ struct HeaderBar: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .padding(.leading, 6)
                 .accessibilityLabel("設定")
             }
             .frame(maxWidth: .infinity, alignment: .trailing)

@@ -23,6 +23,13 @@ final class AppSettings: ObservableObject {
     @Published var scaleMode: ScaleMode { didSet { store?.set(scaleMode.rawValue, forKey: "scaleMode") } }
     @Published var cameraID: String { didSet { store?.set(cameraID, forKey: "cameraID") } }
     @Published var loopVideo: Bool { didSet { store?.set(loopVideo, forKey: "loopVideo") } }
+    /// 上次選的影片檔的路徑（空字串：沒有）。下次啟動時自動開啟；定時發射播的就是這個影片
+    @Published var videoPath: String { didSet { store?.set(videoPath, forKey: "videoPath") } }
+    /// 定時發射：每隔幾分鐘一次，對齊整點（15 就是每小時的 00、15、30、45 分）。
+    /// 開關本身不存在這裡：每次開 app 都是關的，要自己再打開（見 AppModel.scheduleArmed）
+    @Published var scheduleIntervalMinutes: Int { didSet { store?.set(scheduleIntervalMinutes, forKey: "scheduleIntervalMinutes") } }
+    /// 定時發射：到了時間正在收別人的畫面時，那一次不發射
+    @Published var scheduleSkipWhenBusy: Bool { didSet { store?.set(scheduleSkipWhenBusy, forKey: "scheduleSkipWhenBusy") } }
     /// 在收到的畫面與縮圖的左上角標出那一張的訊雜比
     @Published var showFrameSNR: Bool { didSet { store?.set(showFrameSNR, forKey: "showFrameSNR") } }
     /// 接收時把最近幾幀合起來解：畫面沒變的地方雜訊被平均掉，訊號弱時比較清楚也比較穩定
@@ -48,6 +55,10 @@ final class AppSettings: ObservableObject {
         scaleMode = ScaleMode(rawValue: store?.string(forKey: "scaleMode") ?? "") ?? .fill
         cameraID = store?.string(forKey: "cameraID") ?? ""
         loopVideo = (store?.object(forKey: "loopVideo") as? Bool) ?? true
+        videoPath = store?.string(forKey: "videoPath") ?? ""
+        let interval = (store?.object(forKey: "scheduleIntervalMinutes") as? Int) ?? TransmitSchedule.defaultInterval
+        scheduleIntervalMinutes = TransmitSchedule.intervals.contains(interval) ? interval : TransmitSchedule.defaultInterval
+        scheduleSkipWhenBusy = (store?.object(forKey: "scheduleSkipWhenBusy") as? Bool) ?? true
         showFrameSNR = (store?.object(forKey: "showFrameSNR") as? Bool) ?? false
         mergeFrames = (store?.object(forKey: "mergeFrames") as? Bool) ?? true
     }

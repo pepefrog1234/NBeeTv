@@ -206,6 +206,7 @@ struct SidePanel: View {
     }
 
     private var buttonNote: String {
+        if model.txPhase != .idle, model.scheduledRun { return "定時發射：影片播完會自動停止，也可以隨時按停止" }
         if model.txPhase == .transmitting, model.videoPlaysOnce { return "影片播完會自動停止，也可以隨時按停止" }
         if model.txPhase != .idle { return "送完目前這張後放開 PTT，自動回到接收" }
         if model.settings.callsign.isEmpty { return "還沒設定呼號，請先到設定裡填寫" }

@@ -105,8 +105,10 @@ private struct OpenSettingsCommand: View {
 /// 開發用的環境變數，用來在沒有人操作的情況下驗證真的 app（不是離屏算圖）：
 ///   NBTV_DEBUG_SETTINGS="鍵=值;…"   用暫時的設定啟動，不讀也不寫 UserDefaults。可用的鍵：
 ///       callsign、input、output（音訊裝置名稱的一部分）、ptt（none／serial／rigctld）、rig（主機:連接埠）、
-///       mode（發射模式編號）、source（camera／video）、loop（0／1：影片循環播放）、snr（0／1：在收到的畫面上標示訊雜比）
+///       mode（發射模式編號）、source（camera／video）、loop（0／1：影片循環播放）、snr（0／1：在收到的畫面上標示訊雜比）、
+///       merge（0／1：合併最近幾幀）、every（定時發射每隔幾分鐘）、busy（0／1：定時發射遇到正在收畫面時跳過）
 ///   NBTV_DEBUG_VIDEO=<影片檔>        啟動後開啟這個影片檔當發射來源
+///   NBTV_DEBUG_SIMULATED_OUTPUT=1    發射時不開音訊輸出裝置：取樣由模擬的輸出照實際的時間取走、丟掉（不會真的送出聲音）
 ///   NBTV_DEBUG_DUMP=<目錄>           dump 動作把視窗的 PNG 存在這裡（沒設就只印狀態）
 ///   NBTV_DEBUG_SCRIPT="秒:動作;…"    主視窗出現後，在指定的秒數執行動作，並把收發流程的轉折印出來。動作：
 ///       tx、stop、toggle             開始發射、停止發射、按一下發射鈕
@@ -120,6 +122,8 @@ private struct OpenSettingsCommand: View {
 ///       savepanel                    存檔或開檔的對話框開著時：印出預設的檔名，然後按取消
 ///                                    （對話框是系統另一個行程畫的，沒辦法從這裡替使用者按下「儲存」）
 ///       modes                        打開發射模式選單
+///       schedule=on|off|menu         打開、關掉定時發射；menu 是打開它的面板
+///                                    （注意：開著的時候到了時間真的會發射，音訊送到設定的輸出裝置）
 ///       select=<n>                   點「最近收到」的第 n 張（1 起算）
 ///       dump                         印出狀態，並把每個視窗的內容存成 PNG
 ///       quit                         結束 app（走正常的結束流程，會放開 PTT）
@@ -159,6 +163,9 @@ enum DebugOptions {
             case "loop": settings.loopVideo = value != "0"
             case "snr": settings.showFrameSNR = value != "0"
             case "merge": settings.mergeFrames = value != "0"
+            case "every":
+                if let minutes = Int(value), TransmitSchedule.intervals.contains(minutes) { settings.scheduleIntervalMinutes = minutes }
+            case "busy": settings.scheduleSkipWhenBusy = value != "0"
             default: print("[debug] 不認得的設定：\(parts[0])")
             }
         }
@@ -168,6 +175,14 @@ enum DebugOptions {
     static func run(_ model: AppModel) {
         setvbuf(stdout, nil, _IOLBF, 0)
         _ = launch   // 時間從這裡起算
+        // 起算的這一刻是時鐘上的幾點：對照定時發射實際開始的時間用
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        log("現在是 \(formatter.string(from: launch))")
+        if environment["NBTV_DEBUG_SIMULATED_OUTPUT"] != nil {
+            model.debugUseSimulatedOutput(sink: nil)
+            log("發射時不開音訊輸出裝置（模擬的輸出）")
+        }
         if let path = environment["NBTV_DEBUG_VIDEO"] {
             model.openVideo(URL(fileURLWithPath: path)) { ok in log("開啟影片檔：\(ok ? "成功" : "失敗")") }
         }
@@ -290,6 +305,14 @@ enum DebugOptions {
         case "modes":
             log("打開發射模式選單")
             model.showModeMenu = true
+        case "schedule":
+            if value == "menu" {
+                log("打開定時發射的面板")
+                model.showScheduleMenu = true
+            } else {
+                log("定時發射改成 \(value)")
+                model.setScheduleArmed(value == "on")
+            }
         case "select":
             if let index = Int(value), index >= 1, index <= model.history.count {
                 log("點最近收到的第 \(index) 張")
@@ -337,6 +360,9 @@ enum DebugOptions {
         log("設定：發射模式 \(model.settings.txModeID)，縮放 \(model.settings.scaleMode.rawValue)，來源 \(model.settings.sourceKind.rawValue)，"
             + "PTT \(model.settings.pttSummary)，輸出音量 \(Int(model.settings.outputLevelDb)) dB，循環播放 \(model.settings.loopVideo)，"
             + "模式選單\(model.showModeMenu ? "開著" : "關著")")
+        log("定時發射：\(model.scheduleArmed ? "開著" : "關著")，每 \(model.settings.scheduleIntervalMinutes) 分鐘，"
+            + "下一次 \(model.scheduleNextFire.map { TransmitSchedule.clockText($0) } ?? "—")，頂列的字「\(model.scheduleSummary)」，"
+            + "上一次：\(model.scheduleLastEvent ?? "無")，面板\(model.showScheduleMenu ? "開著" : "關著")")
         log("狀態：\(phase)，同步 \(model.synced)，收到 \(model.history.count) 張，輸入音量 \(String(format: "%.1f", model.inputLevelDb)) dB，"
             + "發射第 \(model.txFrameNumber) 張／已送出 \(model.txFramesSent) 張，輸入「\(model.inputDeviceName)」，輸出「\(model.outputDeviceName)」，"
             + "影片 \(model.videoPlaying ? "播放中" : "暫停") \(String(format: "%.1f", model.videoPosition))／\(String(format: "%.1f", model.videoDuration)) 秒，"

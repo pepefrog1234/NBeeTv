@@ -22,6 +22,8 @@ set(NBTV_APP_SOURCES
   Sources/SidePanel.swift
   Sources/SettingsWindow.swift
   Sources/ModeMenu.swift
+  Sources/Schedule.swift
+  Sources/ScheduleMenu.swift
   Sources/Demo.swift
   Sources/DebugTap.swift
   Sources/Snapshot.swift

@@ -1,4 +1,5 @@
-// 開發用：--snapshot <目錄>。不開音訊裝置、不要求權限，把五張版面各算成一張 PNG，用來對照版面稿。
+// 開發用：--snapshot <目錄>。不開音訊裝置、不要求權限，把五張版面各算成一張 PNG，用來對照版面稿；
+// 第六張是版面稿裡沒有的定時發射面板。
 // 畫面、縮圖、狀態與瀑布圖都是把內附的測試圖真的經過核心收發算出來的。
 import AppKit
 import SwiftUI
@@ -63,8 +64,10 @@ enum SnapshotRunner {
         render(MainWindowView(placeholderControls: true).environmentObject(transmitting), width: 1280, height: 840,
                to: directory.appendingPathComponent("2-transmitting.png"))
 
-        // 3. 待機接收＋影片檔來源
+        // 3. 待機接收＋影片檔來源。開發用：NBTV_SNAPSHOT_SCHEDULE=1 時定時發射是開著的（頂列的按鈕變成橘色、寫下一次的時刻）
         let idle = makeIdleModel(rocket: rocket, workDirectory: directory)
+        idle.clock = { time(14, 32, 7) }   // 示範的鐘點：下一次是 14:45
+        if ProcessInfo.processInfo.environment["NBTV_SNAPSHOT_SCHEDULE"] != nil { idle.setScheduleArmed(true) }
         render(MainWindowView(placeholderControls: true).environmentObject(idle), width: 1280, height: 840,
                to: directory.appendingPathComponent("3-idle-video.png"))
 
@@ -79,6 +82,16 @@ enum SnapshotRunner {
             .frame(width: 400, height: menuHeight, alignment: .top)
             .background(Theme.background)
         render(menu, width: 400, height: menuHeight, to: directory.appendingPathComponent("5-mode-menu.png"))
+
+        // 6. 定時發射的面板（開著、已經選好影片的樣子）
+        idle.setScheduleArmed(true)
+        let scheduleHeight: CGFloat = 430
+        let schedule = ScheduleMenuView(standalone: true)
+            .environmentObject(idle)
+            .padding(16)
+            .frame(width: 372, height: scheduleHeight, alignment: .top)
+            .background(Theme.background)
+        render(schedule, width: 372, height: scheduleHeight, to: directory.appendingPathComponent("6-schedule.png"))
 
         print(failures == 0 ? "[snapshot] 完成：\(directory.path)" : "[snapshot] 有 \(failures) 張沒有算出來")
         return failures == 0 ? 0 : 1

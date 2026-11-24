@@ -223,6 +223,9 @@ final class VideoFileSource {
     /// 最近一次要它播（play）還是要它停（pause、rewind）。循環播放的影片剛好在播到結尾的那一瞬間被暫停時，
     /// 「播完了」的通知還在路上；靠這個知道不要再從頭播。
     private var wantsPlay = false
+    /// 最近一次取到的那一格（copyCurrentFrame）。同一格只給一次，所以影片停著、那一格已經取過之後再問會拿不到；
+    /// 這時候它就是目前位置的畫面（位置要是動過，新位置的那一格會是「新的」，問得到）。
+    private(set) var lastFrame: CVPixelBuffer?
 
     init() {
         player.isMuted = true  // 影片的聲音不能混進發射的音訊
@@ -286,6 +289,7 @@ final class VideoFileSource {
         quarterTurns = 0
         reachedEnd = false
         wantsPlay = false
+        lastFrame = nil
     }
 
     var isPlaying: Bool { player.rate != 0 }
@@ -329,6 +333,8 @@ final class VideoFileSource {
         guard let output else { return nil }
         let time = player.currentTime()
         guard output.hasNewPixelBuffer(forItemTime: time) else { return nil }
-        return output.copyPixelBuffer(forItemTime: time, itemTimeForDisplay: nil)
+        let buffer = output.copyPixelBuffer(forItemTime: time, itemTimeForDisplay: nil)
+        if let buffer { lastFrame = buffer }
+        return buffer
     }
 }

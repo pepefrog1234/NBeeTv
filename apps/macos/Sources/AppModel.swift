@@ -106,6 +106,20 @@ final class AppModel: ObservableObject {
     @Published var videoPosition = 0.0
     @Published var videoPlaying = false
 
+    // 定時發射（流程見後面「定時發射」那一段）
+    /// 開關。不存進設定：每次開 app 都是關的，要自己再打開，重開 app 之後才不會在沒有人注意的時候自己發射。
+    @Published private(set) var scheduleArmed = false
+    /// 下一次的時刻；沒開的時候是 nil
+    @Published private(set) var scheduleNextFire: Date?
+    /// 離下一次還有幾秒。只在最後一分鐘裡有值（畫面上倒數用）
+    @Published private(set) var scheduleCountdown: Int?
+    /// 最近一次到時間的結果：「12:00 送出 37 張」「12:15 沒有發射：正在發射」。開關關掉之後也留著
+    @Published private(set) var scheduleLastEvent: String?
+    /// 目前這一次發射是定時發射開始的
+    @Published private(set) var scheduledRun = false
+    /// 定時發射的面板是否開著
+    @Published var showScheduleMenu = false
+
     // 裝置
     @Published var inputDevices: [AudioDevice] = []
     @Published var outputDevices: [AudioDevice] = []
@@ -178,6 +192,21 @@ final class AppModel: ObservableObject {
     private var txTap: DebugTap.Stream?        // 除錯用：排進輸出佇列的取樣原樣記到檔案（見 DebugTap）
     private var txTapLogged = Date.distantPast
 
+    // 定時發射
+    /// 現在幾點。測試時換成假的時鐘，不必真的等到整點。
+    var clock: () -> Date = { Date() }
+    private var scheduleLabel = ""                   // 這一次定時發射的時刻（「12:15」）
+    private var scheduleRestoreSource: SourceKind?   // 定時發射結束後要換回去的來源；不必換時是 nil
+    private var scheduleLimit: Double?               // 這一次定時發射最多送幾秒；超過就自動停止（見 fireSchedule）
+    private var scheduleCutShort = false             // 這一次是超過上限、自動停下來的
+    private var scheduleActivity: NSObjectProtocol?  // 開著的時候握著：不讓電腦因為閒置而睡眠
+    private var lastSignalTime = Date.distantPast    // 接收機最近一次同步著（或交出畫面）是什麼時候，見 receivingSomeone
+    /// 到了時間卻晚了這麼久才輪到（電腦剛從睡眠醒來、時鐘被往前調）：那一次不發射
+    static let scheduleLateLimit = 5.0
+    /// 定時發射最多送「影片的長度＋兩張＋這麼多秒」。正常是影片播完再送一到兩張就結束；影片卡住、
+    /// 或中途被換成別的來源時，旁邊沒有人按停止，靠這個上限收尾。（測試時改小）
+    static var scheduleMarginSeconds = 5.0
+
     static let pttLeadSeconds = 0.3      // 按下 PTT 後等多久才開始送音訊
     static let prepareLeadSeconds = 0.6  // 目前這張剩多久時開始準備下一張（至少）
     /// 最近準備一張（取畫面＋編碼）花了多久；偶爾特別慢的一次會讓它維持高一陣子。
@@ -195,6 +224,8 @@ final class AppModel: ObservableObject {
         txModeID = settings.txModeID
         // 設定改了，用到設定的畫面也要重畫
         settings.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }.store(in: &cancellables)
+        // 定時發射開著的時候改了間隔：下一次的時刻重新算
+        settings.$scheduleIntervalMinutes.dropFirst().sink { [weak self] value in self?.rescheduleNext(interval: value) }.store(in: &cancellables)
         guard live, let engine else { return }
 
         engine.onRxUpdate = { [weak self] update in self?.queuedUpdates.append(update) }
@@ -219,7 +250,10 @@ final class AppModel: ObservableObject {
         settings.$outputLevelDb.sink { [weak self] value in
             self?.engine?.output.gain = Float(pow(10.0, value / 20.0))
         }.store(in: &cancellables)
-        settings.$loopVideo.sink { [weak self] value in self?.video.loop = value }.store(in: &cancellables)
+        settings.$loopVideo.sink { [weak self] value in
+            guard let self else { return }
+            self.video.loop = value && !self.scheduledRun   // 定時發射中一律只播一次
+        }.store(in: &cancellables)
         settings.$mergeFrames.sink { [weak self] value in self?.engine?.setMergeFrames(value) }.store(in: &cancellables)
         settings.$txModeID.sink { [weak self] value in
             if self?.txPhase == .idle { self?.txModeID = value }
@@ -237,6 +271,7 @@ final class AppModel: ObservableObject {
             requestAudioAccessAndReceive()
             restartSource()
         }
+        reopenLastVideo()
         let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in self?.uiTick() }
         RunLoop.main.add(timer, forMode: .common)
         uiTimer = timer
@@ -257,6 +292,10 @@ final class AppModel: ObservableObject {
         engine?.stopReceiving()
         camera.stop()
         video.close()
+        if let activity = scheduleActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            scheduleActivity = nil
+        }
     }
 
     // MARK: - 裝置
@@ -341,6 +380,7 @@ final class AppModel: ObservableObject {
 
     func apply(_ update: RxUpdate) {
         guard txPhase == .idle || !live else { return }
+        if update.synced || !update.frames.isEmpty { lastSignalTime = clock() }
         inputLevelDb = update.inputLevelDb
         for frame in update.frames { add(frame, time: Date()) }
         if update.synced {
@@ -425,6 +465,7 @@ final class AppModel: ObservableObject {
 
     func setSourceKind(_ kind: SourceKind) {
         guard settings.sourceKind != kind else { return }
+        scheduleRestoreSource = nil   // 定時發射中使用者自己換了來源：結束後就不再換回去
         settings.sourceKind = kind
         restartSource()
     }
@@ -470,6 +511,11 @@ final class AppModel: ObservableObject {
     }
 
     private func startCamera() {
+        // 開發用：設了 NBTV_NO_DEVICES 就完全不開鏡頭（也就不會跳出相機權限的詢問）
+        guard ProcessInfo.processInfo.environment["NBTV_NO_DEVICES"] == nil else {
+            sourceMessage = "沒有開鏡頭（NBTV_NO_DEVICES）"
+            return
+        }
         let begin = { [weak self] in
             // 等使用者回答權限的這段時間裡可能已經改選影片檔了，那就不要開鏡頭
             guard let self, self.settings.sourceKind == .camera else { return }
@@ -497,30 +543,48 @@ final class AppModel: ObservableObject {
         panel.allowedContentTypes = [.movie, .video, .mpeg4Movie, .quickTimeMovie]
         panel.allowsMultipleSelection = false
         panel.begin { [weak self] response in
-            if response == .OK, let url = panel.url { self?.openVideo(url) }
+            guard response == .OK, let url = panel.url else { return }
+            // 使用者自己選的影片記下來，下次啟動時自動開啟（見 reopenLastVideo）
+            self?.openVideo(url) { ok in if ok { self?.settings.videoPath = url.path } }
         }
     }
 
+    /// 上次選的影片檔還在的話，啟動時自動開啟：定時發射播的就是它，不必每次開 app 都重選。
+    private func reopenLastVideo() {
+        let path = settings.videoPath
+        guard !path.isEmpty, video.url == nil, FileManager.default.fileExists(atPath: path) else { return }
+        openVideo(URL(fileURLWithPath: path))
+    }
+
     /// autoplay 是 nil 時照「循環播放」的設定：循環的影片開了就播；不循環的停在開頭，按下發射才開始播、播完自動停止發射。
+    /// 來源不是影片檔的時候（從定時發射的面板選影片）只開啟，不播放。
     func openVideo(_ url: URL, autoplay: Bool? = nil, completion: ((Bool) -> Void)? = nil) {
-        sourceMessage = nil
-        if settings.sourceKind == .video { clearSourceFrame() }
-        video.loop = settings.loopVideo
+        if settings.sourceKind == .video {
+            sourceMessage = nil
+            clearSourceFrame()
+        }
+        video.loop = settings.loopVideo && !scheduledRun
         video.open(url) { [weak self] ok in
             guard let self else { return }
             if ok {
                 self.videoName = url.lastPathComponent
                 self.videoDuration = self.video.duration
                 self.videoPosition = 0
-                if autoplay ?? self.settings.loopVideo {
+                let isSource = self.settings.sourceKind == .video
+                if autoplay ?? (self.settings.loopVideo && isSource) {
                     self.video.play()
-                } else if autoplay == nil {
+                } else if autoplay == nil, isSource {
                     self.video.seek(to: 0)   // 停在開頭；移一下位置，開頭那一格才會送出來當預覽
                 }
             } else {
                 self.videoName = nil
                 self.videoDuration = 0
-                self.sourceMessage = "無法播放這個影片檔"
+                // 來源是鏡頭時，預覽那一格是鏡頭的地方，訊息改放底列
+                if self.settings.sourceKind == .video {
+                    self.sourceMessage = "無法播放這個影片檔"
+                } else {
+                    self.notice = "無法播放影片檔「\(url.lastPathComponent)」"
+                }
             }
             completion?(ok)
         }
@@ -545,6 +609,7 @@ final class AppModel: ObservableObject {
             for update in queuedUpdates where update.generation == engine.generation { apply(update) }
         }
         queuedUpdates.removeAll()
+        scheduleTick()   // 定時發射：到時間了嗎（排在接收的更新後面，「正在收別人的畫面」才是最新的）
         // 發射：送出去的訊號的頻譜，以及目前這張的進度
         if !queuedMonitorRows.isEmpty {
             if isOnAir { appendSpectrum(queuedMonitorRows, reference: .transmit) }
@@ -552,8 +617,9 @@ final class AppModel: ObservableObject {
         }
         publishTransmitDisplay()
         // 發射來源
-        if settings.sourceKind == .video, video.url != nil {
-            if let buffer = video.copyCurrentFrame() { latestFrame.set(buffer, turns: video.quarterTurns) }
+        if video.url != nil {
+            // 畫面只在來源是影片檔時才取；播放的位置與狀態隨時照實更新（來源是鏡頭時影片也可能開著，定時發射要用）
+            if settings.sourceKind == .video, let buffer = video.copyCurrentFrame() { latestFrame.set(buffer, turns: video.quarterTurns) }
             let position = video.position, playing = video.isPlaying
             if !scrubbing, position != videoPosition { videoPosition = position }
             if playing != videoPlaying { videoPlaying = playing }
@@ -641,7 +707,8 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func startTransmit() {
+    /// fromStart：來源是影片檔時先回到開頭再開始（定時發射用）；平常是從影片目前的位置接著播。
+    func startTransmit(fromStart: Bool = false) {
         guard live, txPhase == .idle, let mode = Modes.find(settings.txModeID) else { return }
         guard !settings.callsign.isEmpty else {
             notice = "還沒設定呼號，不能發射"
@@ -691,33 +758,42 @@ final class AppModel: ObservableObject {
                 }
             }
         }
-        if settings.sourceKind == .video, video.url != nil, video.hasEnded {
-            // 影片上一次播完停在結尾：先回到開頭，等開頭那一格出來，第一張才不會是結尾的畫面
-            DebugTap.log("影片停在結尾：回到開頭再發射")
-            video.rewind { [weak self] in self?.waitForVideoFrame(session: session, attempts: 25, then: encodeFirst) }
+        // 要不要先回到開頭：影片上一次播完停在結尾；或是指定要從頭來，而影片不是停在開頭
+        let rewind = video.hasEnded || (fromStart && (video.isPlaying || video.position > 0.01))
+        if settings.sourceKind == .video, video.url != nil, rewind {
+            // 先回到開頭，等開頭那一格出來，第一張才不會是原來那個位置的畫面
+            DebugTap.log(video.hasEnded ? "影片停在結尾：回到開頭再發射" : "影片回到開頭再發射")
+            video.rewind { [weak self] in
+                guard let self else { return }
+                self.waitForVideoFrame(session: session, since: self.latestFrame.get().version, attempts: 25, then: encodeFirst)
+            }
         } else {
             encodeFirst()
         }
     }
 
     /// 影片的位置剛移過（rewind）：新位置的那一格要一點時間才解得出來。每 20 毫秒看一次，拿到了（或等了半秒）就繼續。
-    private func waitForVideoFrame(session: Int, attempts: Int, then: @escaping () -> Void) {
+    /// since：位置移過去那時候來源畫面的版本。等的這段時間裡，每 0.1 秒一次的畫面更新（uiTick）可能先把新的那一格取走；
+    /// 版本變了就表示已經有了，不必再等。
+    private func waitForVideoFrame(session: Int, since version: Int, attempts: Int, then: @escaping () -> Void) {
         guard session == txSession else { return }
         if let buffer = video.copyCurrentFrame() {
             latestFrame.set(buffer, turns: video.quarterTurns)
+            then()
+        } else if latestFrame.get().buffer != nil, latestFrame.get().version != version {
             then()
         } else if attempts <= 0 {
             then()
         } else {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
-                self?.waitForVideoFrame(session: session, attempts: attempts - 1, then: then)
+                self?.waitForVideoFrame(session: session, since: version, attempts: attempts - 1, then: then)
             }
         }
     }
 
-    /// 來源是不循環的影片，而且已經播完、停在最後一格。
+    /// 來源是只播一次的影片（沒有勾循環播放，或這一次是定時發射），而且已經播完、停在最後一格。
     private var videoFinished: Bool {
-        settings.sourceKind == .video && video.url != nil && !settings.loopVideo && video.hasEnded
+        settings.sourceKind == .video && video.url != nil && (!settings.loopVideo || scheduledRun) && video.hasEnded
     }
 
     /// 測試用：之後的發射不開音訊裝置，改由模擬的輸出照實際的時間把取樣取走（見 AudioOutput.simulated），
@@ -839,6 +915,15 @@ final class AppModel: ObservableObject {
                                 Double(position) / rate, Double(txEnd) / rate, Double(engine.output.queuedSamples) / rate,
                                 engine.output.renderedFrames, engine.output.silentFrames, engine.output.underruns,
                                 txPhase == .transmitting ? "發射中" : "停止中", txPreparing ? "、正在準備下一張" : ""))
+        }
+
+        // 定時發射：超過上限還沒結束（影片卡住、中途被換成別的來源）就自己停下來，和按下停止一樣收尾
+        if scheduledRun, txPhase == .transmitting, let limit = scheduleLimit, Double(position - txLead) / Double(NBTV.sampleRate) > limit {
+            scheduleLimit = nil
+            scheduleCutShort = true
+            notice = "定時發射 \(scheduleLabel) 超過影片的長度還沒結束，已自動停止"
+            AppModel.trace?("定時發射超過上限：自動停止")
+            stopTransmit()
         }
 
         // 把已經送出去的部分交給頻譜分析
@@ -1003,18 +1088,18 @@ final class AppModel: ObservableObject {
     private func finishTransmit() {
         publishTransmitDisplay()
         AppModel.trace?("發射結束：共送出 \(txFramesSent) 張，輸出佇列中途空掉 \(max(0, (engine?.output.underruns ?? 0) - 1)) 次")
-        endTransmit()
+        endTransmit(failure: nil)
     }
 
     private func failTransmit(_ message: String?) {
         if let message { notice = message }
         DebugTap.log(message.map { "發射中止：\($0)" } ?? "發射取消")
         AppModel.trace?(message.map { "發射中止：\($0)" } ?? "發射取消")
-        endTransmit()
+        endTransmit(failure: message ?? "還沒開始送就取消了")
     }
 
-    /// 停止輸出、放開 PTT、回到接收。
-    private func endTransmit() {
+    /// 停止輸出、放開 PTT、回到接收。failure：不是正常送完的話，原因是什麼（定時發射記錄結果用）。
+    private func endTransmit(failure: String?) {
         if let engine {
             DebugTap.log(String(format: "發射結束：已播 %.2f 秒、已排到 %.2f 秒、送出 %d 張、裝置取了 %lld 格（其中靜音 %lld 格）、佇列空掉 %d 次",
                                 Double(engine.output.playedSamples) / Double(NBTV.sampleRate), Double(txEnd) / Double(NBTV.sampleRate),
@@ -1039,6 +1124,7 @@ final class AppModel: ObservableObject {
         txPreview = nil
         // 接收在開始送音訊時停掉了（還沒走到那一步就取消的話，接收一直沒停）
         if engine?.isReceiving == false { startReceiving() }
+        if scheduledRun { finishScheduledRun(failure: failure) }
     }
 
     private func releasePTT() {
@@ -1053,6 +1139,144 @@ final class AppModel: ObservableObject {
                 DispatchQueue.main.async { self.notice = "放開 PTT 失敗：\(error.localizedDescription)" }
             }
         }
+    }
+
+    // MARK: - 定時發射
+    //
+    // 開著的時候，每到時鐘上對齊整點的時刻（每 15 分鐘就是每小時的 00、15、30、45 分整），自動把影片檔從頭發射一次：
+    // 來源不是影片檔的話先換過去 → 影片回到開頭 → 走和按下發射一樣的流程 → 影片播完自動停止（不管有沒有勾循環播放）
+    // → 換回原來的來源。到了時間卻不能發射（正在發射、沒有影片、沒有呼號、正在收別人的畫面）就跳過那一次，
+    // 原因寫在底列與面板裡。
+    //
+    // 時刻由每 0.1 秒一次的 uiTick 對照時鐘，不另外設計時器：電腦睡過頭、時鐘被調整的時候，比一下現在的時間
+    // 就知道那一次該不該發，醒來之後不會補發。
+
+    func setScheduleArmed(_ on: Bool) {
+        guard on != scheduleArmed else { return }
+        scheduleArmed = on
+        scheduleCountdown = nil
+        scheduleNextFire = on ? TransmitSchedule.nextFire(after: clock(), intervalMinutes: settings.scheduleIntervalMinutes) : nil
+        let text = scheduleNextFire.map { "打開定時發射：每 \(settings.scheduleIntervalMinutes) 分鐘，下一次 \(TransmitSchedule.clockText($0))" } ?? "關掉定時發射"
+        DebugTap.log(text)
+        AppModel.trace?(text)
+        // 開著的時候不讓電腦因為閒置而睡眠（螢幕照常可以關）：睡著了，到時間就不會發射
+        if on, live, scheduleActivity == nil {
+            scheduleActivity = ProcessInfo.processInfo.beginActivity(options: .idleSystemSleepDisabled, reason: "定時發射開著，到了時間要自動發射")
+        } else if !on, let activity = scheduleActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            scheduleActivity = nil
+        }
+    }
+
+    private func rescheduleNext(interval: Int) {
+        guard scheduleArmed else { return }
+        scheduleCountdown = nil
+        scheduleNextFire = TransmitSchedule.nextFire(after: clock(), intervalMinutes: interval)
+    }
+
+    /// 每 0.1 秒一次（uiTick）：到時間了嗎？
+    private func scheduleTick() {
+        guard scheduleArmed, let due = scheduleNextFire else { return }
+        let now = clock()
+        let remaining = due.timeIntervalSince(now)
+        let interval = settings.scheduleIntervalMinutes
+        if remaining > Double(interval * 60) + 1 {
+            rescheduleNext(interval: interval)   // 時鐘被往回調了：從現在的時間重新算
+            return
+        }
+        if remaining > 0 {
+            let seconds = remaining <= 60 ? Int(remaining.rounded(.up)) : nil
+            if seconds != scheduleCountdown { scheduleCountdown = seconds }
+            return
+        }
+        scheduleCountdown = nil
+        scheduleNextFire = TransmitSchedule.nextFire(after: now, intervalMinutes: interval)
+        let label = TransmitSchedule.clockText(due)
+        if -remaining > AppModel.scheduleLateLimit {
+            skipSchedule(label, "錯過了時間（電腦剛從睡眠醒來，或時鐘被調整過）")
+        } else {
+            fireSchedule(label)
+        }
+    }
+
+    /// 到時間了：把影片檔從頭發射一次。不能發射就跳過這一次。
+    private func fireSchedule(_ label: String) {
+        guard txPhase == .idle else { return skipSchedule(label, "正在發射") }
+        if let problem = scheduleProblem { return skipSchedule(label, problem) }
+        if settings.scheduleSkipWhenBusy, receivingSomeone { return skipSchedule(label, "正在收別人的畫面") }
+        guard let mode = Modes.find(settings.txModeID) else { return skipSchedule(label, "app 裡沒有這個發射模式的模型") }
+
+        DebugTap.log("定時發射 \(label)：開始")
+        AppModel.trace?("定時發射 \(label)：開始")
+        scheduledRun = true
+        scheduleLabel = label
+        scheduleCutShort = false
+        scheduleRestoreSource = nil
+        if settings.sourceKind != .video {
+            // 來源是鏡頭：這一次改用影片檔，結束後換回去（finishScheduledRun）
+            scheduleRestoreSource = settings.sourceKind
+            settings.sourceKind = .video
+            sourceMessage = nil
+            clearSourceFrame()
+            camera.stop()
+            // 影片目前位置的那一格。先前取過的話不會再給一次，那就是最近取到的那一格（見 VideoFileSource.lastFrame）
+            if let buffer = video.copyCurrentFrame() ?? video.lastFrame { latestFrame.set(buffer, turns: video.quarterTurns) }
+        }
+        video.loop = false   // 不管有沒有勾循環播放，定時發射只播一次；結束時改回來
+        scheduleLimit = video.duration + 2 * mode.frameSeconds + AppModel.scheduleMarginSeconds
+        startTransmit(fromStart: true)
+        // 不應該發生（能不能發射上面都檢查過了）：真的沒有開始的話，把狀態收乾淨
+        if txPhase == .idle { finishScheduledRun(failure: notice ?? "沒有開始", sent: 0) }
+    }
+
+    /// 頻率上有人正在送這個 app 的訊號：接收機現在同步著，或 3 秒內還同步著
+    /// （連續送的時候，兩張之間同步會斷一下；只看這一瞬間的話，剛好落在空檔就會蓋到對方）。
+    private var receivingSomeone: Bool {
+        let since = clock().timeIntervalSince(lastSignalTime)
+        return synced || (since >= 0 && since < 3)
+    }
+
+    private func skipSchedule(_ label: String, _ reason: String) {
+        scheduleLastEvent = "\(label) 沒有發射：\(reason)"
+        notice = "定時發射 \(label) 沒有發射：\(reason)"
+        DebugTap.log("定時發射 \(label) 沒有發射：\(reason)")
+        AppModel.trace?("定時發射 \(label) 沒有發射：\(reason)")
+    }
+
+    /// 定時發射的那一次結束了（送完、被停止，或沒送成）：記下結果，把借用的東西還回去。
+    private func finishScheduledRun(failure: String?, sent: Int? = nil) {
+        scheduledRun = false
+        scheduleLimit = nil
+        video.loop = settings.loopVideo
+        let sent = sent ?? txFramesSent
+        if let failure {
+            scheduleLastEvent = sent > 0 ? "\(scheduleLabel) 送出 \(sent) 張後中止：\(failure)" : "\(scheduleLabel) 沒有發射：\(failure)"
+        } else {
+            scheduleLastEvent = "\(scheduleLabel) 送出 \(sent) 張" + (scheduleCutShort ? "（超過影片的長度，自動停止）" : "")
+        }
+        DebugTap.log("定時發射 " + (scheduleLastEvent ?? ""))
+        AppModel.trace?("定時發射 " + (scheduleLastEvent ?? ""))
+        if let previous = scheduleRestoreSource {
+            scheduleRestoreSource = nil
+            settings.sourceKind = previous
+            restartSource()
+        }
+    }
+
+    /// 定時發射到了時間也發射不了的原因；沒有問題時是 nil。
+    var scheduleProblem: String? {
+        if settings.callsign.isEmpty { return "還沒設定呼號" }
+        if videoName == nil { return "還沒選擇影片檔" }
+        return nil
+    }
+
+    /// 頂列「定時發射」鈕上的字。
+    var scheduleSummary: String {
+        if scheduledRun { return "定時發射中" }
+        guard scheduleArmed, let next = scheduleNextFire else { return "定時發射" }
+        if let problem = scheduleProblem { return "定時發射：\(problem)" }
+        if let seconds = scheduleCountdown { return "\(seconds) 秒後發射" }
+        return "定時 \(TransmitSchedule.clockText(next))"
     }
 
     // MARK: - 顯示用的文字
@@ -1074,8 +1298,8 @@ final class AppModel: ObservableObject {
     /// 音量條的長度：−50 dB 以下是空的，0 dB 是滿的。
     static func levelFraction(_ db: Double, floor: Double = -50) -> Double { min(max((db - floor) / -floor, 0), 1) }
 
-    /// 發射來源是不循環的影片檔：按下發射才開始播，播完自動停止發射。
-    var videoPlaysOnce: Bool { settings.sourceKind == .video && videoName != nil && !settings.loopVideo }
+    /// 發射來源是只播一次的影片檔（沒有勾循環播放，或這一次是定時發射）：按下發射才開始播，播完自動停止發射。
+    var videoPlaysOnce: Bool { settings.sourceKind == .video && videoName != nil && (!settings.loopVideo || scheduledRun) }
 
     /// 「12.3 dB」「−1.4 dB」：標在收到的畫面上的訊雜比，取到小數一位。
     static func snrText(_ db: Double) -> String {
