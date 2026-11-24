@@ -154,6 +154,7 @@ void Receiver::reset() {
     total_in_ = 0;
     level_ = 0.0;
     frames_.clear();
+    earlier_.clear();
     frames_decoded_ = 0;
     frames_failed_ = 0;
     mode_ = nullptr;
@@ -697,6 +698,68 @@ bool Receiver::pilots_present(std::int64_t t0, double cfo, const Mode& mode) con
     return pilot_coherence(demodulate(t0, cfo, rows), 0, rows - kPreambleSymbols) > kPresenceThreshold;
 }
 
+void Receiver::set_merge(std::shared_ptr<const LearnedMerge> merge) {
+    earlier_.clear();
+    if (merge == nullptr) {
+        merges_.clear();
+        return;
+    }
+    for (auto& have : merges_) {
+        if (have->model_id() == merge->model_id()) {
+            have = std::move(merge);
+            return;
+        }
+    }
+    merges_.push_back(std::move(merge));
+}
+
+const LearnedMerge* Receiver::find_merge(std::uint32_t model_id) const {
+    for (const auto& merge : merges_)
+        if (merge->model_id() == model_id) return merge.get();
+    return nullptr;
+}
+
+int Receiver::merge_earlier(const LearnedMerge& merge, const Mode& mode, const LearnedUnpacked& frame, const RxFrame& info,
+                            LearnedUnpacked& merged) const {
+    if (frame.values.size() != static_cast<std::size_t>(merge.value_count())) return 0;
+    const int slots = merge.frames() - 1;
+    std::vector<LearnedMerge::Earlier> earlier(static_cast<std::size_t>(slots));
+    const double frame_samples = static_cast<double>(mode.frame_samples());
+    int used = 0;
+    for (const Earlier& e : earlier_) {
+        if (e.mode_id != mode.id || e.model_id != merge.model_id() || e.values.size() != frame.values.size()) continue;
+        // 是幾幀之前的：由幀開頭的位置算。同一次發射的幀一個接一個，定時修正頂多差幾十個取樣；
+        // 對不上整數幀的是另一次發射。
+        const double apart = static_cast<double>(info.start_sample - e.start) / frame_samples;
+        const long back = std::lround(apart);
+        if (back < 1 || back > slots || std::fabs(apart - static_cast<double>(back)) > 0.2) continue;
+        // 兩邊的標頭都解出來時再核對：呼號相同、幀序號剛好差這麼多
+        if (e.header_ok && frame.header_ok && (e.callsign != info.callsign || ((e.sequence + back) & 0xFF) != info.sequence)) continue;
+        LearnedMerge::Earlier& slot = earlier[static_cast<std::size_t>(back - 1)];
+        if (!slot.values.empty()) continue;
+        slot.values = e.values;
+        slot.noise_var = e.noise_var;
+        ++used;
+    }
+    if (used == 0) return 0;
+    merged = frame;
+    return merge.merge(frame.values, frame.noise_var, earlier, merged.values, merged.noise_var) ? used : 0;
+}
+
+void Receiver::remember(const LearnedMerge& merge, const Mode& mode, const LearnedUnpacked& frame, const RxFrame& info) {
+    Earlier e;
+    e.mode_id = mode.id;
+    e.model_id = merge.model_id();
+    e.start = info.start_sample;
+    e.header_ok = frame.header_ok;
+    e.sequence = info.sequence;
+    e.callsign = info.callsign;
+    e.values = frame.values;
+    e.noise_var = frame.noise_var;
+    earlier_.push_front(std::move(e));
+    while (earlier_.size() > static_cast<std::size_t>(merge.frames() - 1)) earlier_.pop_back();
+}
+
 void Receiver::process_frame() {
     const Mode& mode = *mode_;
     const int rows = mode.frame_symbols();
@@ -786,8 +849,15 @@ void Receiver::process_frame() {
         options.median_snr = tuning_.learned_median_snr;
         options.attenuate = tuning_.learned_attenuate;
         options.floor = tuning_.learned_floor;
-        const float told = learned_picture(*model, l, options, frame.rgb);
-        if (trace_) std::fprintf(stderr, "[rx]   告訴解碼器的訊雜比 %.1f dB\n", told);
+        // 合併最近幾幀（要打開、而且這個模型有合併用的權重）：畫面沒變的地方把前面幾幀收到的值合進來。
+        // 記下來的是這一幀原來收到的值，不是合併後的：每一幀都只和實際收到的東西合。
+        const LearnedMerge* merge = tuning_.learned_merge ? find_merge(model->model_id()) : nullptr;
+        LearnedUnpacked merged;
+        const int used = merge != nullptr ? merge_earlier(*merge, mode, l, frame, merged) : 0;
+        const float told = learned_picture(*model, used > 0 ? merged : l, options, frame.rgb);
+        if (merge != nullptr) remember(*merge, mode, l, frame);
+        else earlier_.clear();
+        if (trace_) std::fprintf(stderr, "[rx]   告訴解碼器的訊雜比 %.1f dB（合併了前面 %d 幀）\n", told, used);
     }
     // 沒有畫面的幀：前導符號確認過、從頭到尾都有導頻、中途也沒有出現別的前導符號，才回報「有一幀沒解出來」。
     // 只有開頭一段有導頻的，是對方送到一半就停了，或是誤認的前導符號剛好落在別人的酬載裡。

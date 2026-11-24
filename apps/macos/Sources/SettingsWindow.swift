@@ -1,11 +1,11 @@
-// 設定視窗：呼號、音訊裝置、輸出音量、PTT 控制、顯示的選項。改了立刻生效並存進 UserDefaults。
+// 設定視窗：呼號、音訊裝置、輸出音量、PTT 控制、接收與顯示的選項。改了立刻生效並存進 UserDefaults。
 import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject var model: AppModel
     var placeholderControls = false
-    /// 整個設定視窗的高度：版面稿是 700，後來多了「顯示」那一組，加高到 800。
-    static let windowHeight: CGFloat = 800
+    /// 整個設定視窗的高度：版面稿是 700，後來多了「接收」與「顯示」兩組，加高到 900。
+    static let windowHeight: CGFloat = 900
     /// 排版區的高度。真的視窗裡內容會往上延伸到標題列底下，所以要比 windowHeight 少一個標題列的高度。
     var height: CGFloat = SettingsView.windowHeight
 
@@ -17,6 +17,7 @@ struct SettingsView: View {
                 section("電台") { station }
                 section("音訊") { audio }
                 section("PTT 控制") { ptt }
+                section("接收") { receive }
                 section("顯示") { display }
                 Spacer(minLength: 0)
             }
@@ -111,6 +112,17 @@ struct SettingsView: View {
         return row("在收到的畫面上標示訊雜比", "畫面與縮圖的左上角，標出收到那一張當下的訊雜比", first: true) {
             CheckBox(isOn: Binding(get: { settings.showFrameSNR }, set: { settings.showFrameSNR = $0 }), title: "")
                 .accessibilityLabel("在收到的畫面上標示訊雜比")
+        }
+    }
+
+    // MARK: 接收
+
+    private var receive: some View {
+        let settings = model.settings
+        return row("合併最近幾幀", "畫面沒變的地方合併前面幾張，訊號弱時比較清楚；對方不必設定",
+                   first: true) {
+            CheckBox(isOn: Binding(get: { settings.mergeFrames }, set: { settings.mergeFrames = $0 }), title: "")
+                .accessibilityLabel("合併最近幾幀")
         }
     }
 

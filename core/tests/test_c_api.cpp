@@ -34,8 +34,8 @@ void test_helpers() {
     CHECK_EQ(nbtv_rx_poll_frame(nullptr, nullptr), 0);
 }
 
-// 專案 models/ 底下的權重檔；找不到時回傳 NULL
-nbtv_model* load_model(const char* name) {
+// 專案 models/ 底下的檔案；找不到時是空的
+std::vector<std::uint8_t> read_weights(const char* name) {
     std::vector<std::uint8_t> file;
     const std::string path = std::string(NBTV_MODEL_DIR) + "/" + name + ".bin";
     if (std::FILE* f = std::fopen(path.c_str(), "rb")) {
@@ -43,10 +43,14 @@ nbtv_model* load_model(const char* name) {
         for (std::size_t n = 0; (n = std::fread(chunk, 1, sizeof chunk, f)) > 0;) file.insert(file.end(), chunk, chunk + n);
         std::fclose(f);
     }
-    if (file.empty()) {
-        std::printf("  找不到權重檔 %s，略過用到它的測試\n", path.c_str());
-        return nullptr;
-    }
+    if (file.empty()) std::printf("  找不到權重檔 %s，略過用到它的測試\n", path.c_str());
+    return file;
+}
+
+// 專案 models/ 底下的模型；找不到時回傳 NULL
+nbtv_model* load_model(const char* name) {
+    const std::vector<std::uint8_t> file = read_weights(name);
+    if (file.empty()) return nullptr;
     nbtv_model* model = nbtv_model_load(file.data(), file.size());
     CHECK(model != nullptr);
     return model;
@@ -375,6 +379,124 @@ void test_model_handling(int mode_id, const char* weights, double min_psnr) {
 }
 
 // 兩個模式各有自己的模型：發射機、接收機都設定兩個，一次發射裡換模式，各用各的模型
+// 合併最近幾幀：同一張畫面在很弱的訊號下連續送 5 幀，接收機打開合併之後，後面的幀比不合併的接近原圖。
+// 這個測試只用 C API，雜訊自己產生（固定的種子，每次的結果相同）。
+void test_merging(int mode_id, const char* weights, const char* merge_weights) {
+    // 沒有權重、不是這種權重檔、空指標
+    CHECK(nbtv_merge_load(nullptr, 0) == nullptr);
+    const std::uint8_t junk[64] = {};
+    CHECK(nbtv_merge_load(junk, sizeof junk) == nullptr);
+    nbtv_merge_destroy(nullptr);
+    CHECK_EQ(nbtv_merge_model_id(nullptr), 0);
+    CHECK_EQ(nbtv_merge_frames(nullptr), 0);
+    nbtv_rx_set_merge(nullptr, nullptr);
+    nbtv_rx_set_merging(nullptr, 1);
+
+    const std::vector<std::uint8_t> merge_file = read_weights(merge_weights);
+    nbtv_model* model = merge_file.empty() ? nullptr : load_model(weights);
+    if (model == nullptr) return;
+    // 畫面模型的權重檔不是合併用的
+    const std::vector<std::uint8_t> model_file = read_weights(weights);
+    CHECK(nbtv_merge_load(model_file.data(), model_file.size()) == nullptr);
+    nbtv_merge* merge = nbtv_merge_load(merge_file.data(), merge_file.size());
+    CHECK(merge != nullptr);
+    if (merge == nullptr) {
+        nbtv_model_destroy(model);
+        return;
+    }
+    CHECK_EQ(nbtv_merge_model_id(merge), nbtv_model_id(model));  // 配的就是這個模式的模型
+    CHECK_EQ(nbtv_merge_frames(merge), 4);
+
+    const std::vector<std::uint8_t> rgb = test_images::load("cat");
+    const int rate = 12000, count = 5;
+    nbtv_tx* tx = nbtv_tx_create(rate);
+    nbtv_tx_set_callsign(tx, "n0call");
+    CHECK_EQ(nbtv_tx_set_mode(tx, mode_id), 0);
+    nbtv_tx_set_model(tx, model);
+    const int frame_samples = nbtv_tx_frame_samples(tx);
+    std::vector<float> frame(static_cast<std::size_t>(frame_samples)), signal;
+    for (int i = 0; i < count; ++i) {
+        CHECK_EQ(nbtv_tx_encode_image(tx, rgb.data(), frame.data(), frame_samples, nullptr, nullptr), frame_samples);
+        signal.insert(signal.end(), frame.begin(), frame.end());
+    }
+    nbtv_tx_destroy(tx);
+    // 白雜訊，訊雜比 3 dB（訊號的平均功率 ÷ 3 kHz 頻寬內的雜訊功率）
+    double power = 0;
+    for (float v : signal) power += static_cast<double>(v) * v;
+    power /= static_cast<double>(signal.size());
+    const double sigma = std::sqrt(power / std::pow(10.0, 0.3) * (rate / 2.0) / 3000.0);
+    std::vector<float> audio(static_cast<std::size_t>(rate / 4), 0.0f);
+    audio.insert(audio.end(), signal.begin(), signal.end());
+    audio.insert(audio.end(), static_cast<std::size_t>(rate / 2), 0.0f);
+    std::uint64_t state = 0x9E3779B97F4A7C15ull;
+    const auto uniform = [&state] {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        return (static_cast<double>(state >> 11) + 0.5) / 9007199254740992.0;
+    };
+    for (float& v : audio) v += static_cast<float>(sigma * std::sqrt(-2.0 * std::log(uniform())) * std::cos(2.0 * kPi * uniform()));
+
+    // 同一段音訊收一次，回傳各幀的畫面（沒解出來的是空的）
+    const auto receive = [&](nbtv_rx* rx) {
+        std::vector<std::vector<std::uint8_t>> pictures;
+        const std::size_t chunk = static_cast<std::size_t>(rate / 50);
+        for (std::size_t pos = 0; pos < audio.size(); pos += chunk) {
+            nbtv_rx_push(rx, audio.data() + pos, static_cast<int>(std::min(chunk, audio.size() - pos)));
+            nbtv_rx_frame f;
+            while (nbtv_rx_poll_frame(rx, &f))
+                pictures.push_back(f.decoded ? std::vector<std::uint8_t>(f.rgb, f.rgb + NBTV_IMAGE_RGB_BYTES) : std::vector<std::uint8_t>());
+        }
+        return pictures;
+    };
+    // 第 4 幀起（前面 3 幀都在）對原圖的 PSNR 的平均；幀數不對或有沒解出來的回傳 0
+    const auto late_psnr = [&](const std::vector<std::vector<std::uint8_t>>& pictures) {
+        if (static_cast<int>(pictures.size()) != count) return 0.0;
+        double total = 0;
+        for (int i = 3; i < count; ++i) {
+            if (pictures[static_cast<std::size_t>(i)].empty()) return 0.0;
+            total += test_images::psnr(pictures[static_cast<std::size_t>(i)], rgb);
+        }
+        return total / (count - 3);
+    };
+
+    nbtv_rx* rx = nbtv_rx_create(rate);
+    nbtv_rx_set_model(rx, model);
+    nbtv_model_destroy(model);
+    const auto plain = receive(rx);
+    CHECK_EQ(static_cast<int>(plain.size()), count);
+    CHECK(late_psnr(plain) > 0.0);
+
+    // 設定了權重但沒有打開：和原來一模一樣
+    nbtv_rx_set_merge(rx, merge);
+    nbtv_merge_destroy(merge);  // 接收機自己留著，之後照樣能用
+    nbtv_rx_reset(rx);
+    CHECK(receive(rx) == plain);
+
+    // 打開：第一幀前面沒有東西可以合，和原來一樣；後面的幀比較接近原圖
+    nbtv_rx_set_merging(rx, 1);
+    nbtv_rx_reset(rx);
+    const auto merged = receive(rx);
+    CHECK_EQ(static_cast<int>(merged.size()), count);
+    if (!plain.empty() && !merged.empty()) CHECK(merged[0] == plain[0]);
+    CHECK(late_psnr(merged) > late_psnr(plain) + 0.3);
+    // 重設不會改變這個設定，只會忘掉前面收到的幀：再收一次，結果相同
+    nbtv_rx_reset(rx);
+    CHECK(receive(rx) == merged);
+
+    // 關掉、或把權重拿掉：又和原來一樣
+    nbtv_rx_set_merging(rx, 0);
+    nbtv_rx_reset(rx);
+    CHECK(receive(rx) == plain);
+    nbtv_rx_set_merging(rx, 1);
+    nbtv_rx_set_merge(rx, nullptr);
+    nbtv_rx_reset(rx);
+    CHECK(receive(rx) == plain);
+    std::printf("  C API 合併最近幾幀：模式 %d、白雜訊 3 dB、同一張畫面，第 4–5 幀對原圖 PSNR %.2f dB（不合併 %.2f dB）\n", mode_id,
+                late_psnr(merged), late_psnr(plain));
+    nbtv_rx_destroy(rx);
+}
+
 void test_two_models() {
     nbtv_model* models[2] = {load_model("261123-1"), load_model("261122-3")};
     if (models[0] == nullptr || models[1] == nullptr) {
@@ -523,11 +645,13 @@ int main() {
     loopback(12000, 11, "261123-1", "coffee", 28.3);
     loopback(48000, 12, "261122-3", "rocket", 24.8);
     loopback(48000, 13, "261122-4", "coffee", 29.2);
-    loopback(12000, 14, "261123-3", "rocket", 23.4);
+    loopback(12000, 14, "261123-4", "rocket", 23.7);
     test_model_handling(11, "261123-1", 28.3);
     test_model_handling(12, "261122-3", 23.5);
     test_model_handling(13, "261122-4", 29.4);
-    test_model_handling(14, "261123-3", 21.8);
+    test_model_handling(14, "261123-4", 22.0);
+    test_merging(14, "261123-4", "261124-7");
+    test_merging(12, "261122-3", "261124-8");
     test_two_models();
     test_two_widths();
     test_spectrum();

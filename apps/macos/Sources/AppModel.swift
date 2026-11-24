@@ -220,6 +220,7 @@ final class AppModel: ObservableObject {
             self?.engine?.output.gain = Float(pow(10.0, value / 20.0))
         }.store(in: &cancellables)
         settings.$loopVideo.sink { [weak self] value in self?.video.loop = value }.store(in: &cancellables)
+        settings.$mergeFrames.sink { [weak self] value in self?.engine?.setMergeFrames(value) }.store(in: &cancellables)
         settings.$txModeID.sink { [weak self] value in
             if self?.txPhase == .idle { self?.txModeID = value }
         }.store(in: &cancellables)

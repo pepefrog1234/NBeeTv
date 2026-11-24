@@ -31,6 +31,10 @@
 # 所以起點算出來的和舊模型完全相同，多出來的容量從這裡開始學。--init 給的權重檔本來就是這種寬度的話，直接接著訓練。
 # C++ 的推論由權重檔裡張量的形狀看出寬度；哪個模式用哪種寬度的模型寫在核心的模式表（模式 13、14 用 64,128,256,384）。
 #
+# 增加潛在通道（實驗）：--latent 比 --init 那份權重的多時，瓶頸兩側的三個張量預設是從頭學。加上 --grow 的話，
+# 舊的通道照搬，新增的通道從很小的值開始；起點算出來的和舊模型在「每個值的訊雜比高 10·log10(新÷舊) dB」時幾乎一樣
+# （新通道還沒送東西，同樣的功率集中在舊通道上），多出來的通道從這裡開始學。各層的寬度要和 --init 的相同。
+#
 # 長時間的訓練：
 #  - --ema 0.999：另外留一份「權重的移動平均」（每一步往當下的權重靠近千分之一）。學習率高的時候，當下的權重在好的位置
 #    附近晃動，驗證的數字會比真正學到的程度低（先前接續訓練時，前三分之二都比起點低 1 dB 以上，學習率降下來才回升）；
@@ -62,6 +66,7 @@ p.add_argument("--latent", type=int, required=True)       # 潛在張量的通�
 p.add_argument("--arch", type=int, default=2)             # 模型的結構編號，見 model.py
 p.add_argument("--widths", default="")                    # 各層的寬度：四個數用逗號隔開；不給就是 model.DEFAULT_WIDTHS
 p.add_argument("--init", default="")                      # 從這份權重檔（export.py 的 .bin）接著訓練；結構 1 的、潛在通道數不同的、比較窄的都可以
+p.add_argument("--grow", action="store_true")             # 配 --init：潛在通道比那份權重多時，舊的通道照搬、新增的從很小的值開始
 p.add_argument("--steps", type=int, default=30000)
 p.add_argument("--batch", type=int, default=64)
 p.add_argument("--lr", type=float, default=2e-4)
@@ -182,15 +187,48 @@ def embed(name, old, new):
     return True
 
 
+def grow_latent(name, old, new, old_latent, new_latent):
+    """潛在通道變多時瓶頸兩側的三個張量（就地修改 new）：舊的通道照搬，新增的通道一開始幾乎不送東西。放不進去回傳 False。
+    編碼器的輸出是整張一起正規化的：新增的通道幾乎是 0 時，舊通道的值會放大 sqrt(新÷舊) 倍，
+    所以解碼器讀舊通道的權重縮小同樣的倍數。解碼器讀新通道的權重從 0 開始，新通道一開始不影響畫面。"""
+    if name == "enc.head.bias":
+        new.zero_()
+        new[:old_latent] = old
+    elif name == "enc.head.weight":
+        if old.shape[1:] != new.shape[1:]:
+            return False
+        fresh_rms = new[old_latent:].pow(2).mean().sqrt().clamp_min(1e-12)
+        new[old_latent:] *= 0.1 * old.pow(2).mean().sqrt() / fresh_rms    # 新通道的功率約是舊通道的 1%
+        new[:old_latent] = old
+    else:
+        # dec.inp.weight：輸入依序是各個通道的值，接著（結構 2）是各個通道的可靠程度
+        groups = new.shape[1] // new_latent
+        if old.shape[0] != new.shape[0] or old.shape[1] != groups * old_latent:
+            return False
+        new.zero_()
+        new[:, :old_latent] = old[:, :old_latent] * math.sqrt(old_latent / new_latent)
+        if groups == 2:
+            new[:, new_latent:new_latent + old_latent] = old[:, old_latent:]
+    return True
+
+
+if args.grow and not args.init:
+    raise SystemExit("--grow 要配 --init")
 if args.init and resumed is None:
     from export import read_weights
     state, latent, _, _ = read_weights(args.init)
+    if args.grow and args.latent <= latent:
+        raise SystemExit(f"--grow 是潛在通道變多時用的：{args.init} 有 {latent} 個，--latent 是 {args.latent}")
     own = model.state_dict()                               # 和模型的參數共用記憶體
-    fresh, widened = [], False
+    fresh, widened, grown = [], False, False
     with torch.no_grad():
         for name, value in state.items():
             if own[name].shape == value.shape:
                 own[name].copy_(value)
+            elif args.grow and name in ("enc.head.weight", "enc.head.bias", "dec.inp.weight"):
+                if not grow_latent(name, value, own[name], latent, args.latent):
+                    raise SystemExit(f"--grow：{name} 的形狀接不上（各層的寬度、結構要和 {args.init} 的相同）")
+                grown = True
             elif latent != args.latent and name in ("enc.head.weight", "enc.head.bias", "dec.inp.weight"):
                 fresh.append(name)                         # 潛在通道數不同：瓶頸兩側的這幾層接不上，留著剛初始化的值從頭學
             elif embed(name, value, own[name]):
@@ -199,6 +237,8 @@ if args.init and resumed is None:
             else:
                 raise SystemExit(f"{name} 的形狀接不上")
     notes = []
+    if grown:
+        notes.append(f"潛在通道 {latent} → {args.latent}：舊的通道照搬，新增的 {args.latent - latent} 個從很小的值開始")
     if fresh:
         notes.append(f"潛在通道 {latent} → {args.latent}：{'、'.join(fresh)} 從頭學")
     if widened:

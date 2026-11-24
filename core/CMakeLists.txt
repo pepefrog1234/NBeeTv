@@ -11,6 +11,7 @@ add_library(nbtvcore STATIC
   src/frame_map.cpp
   src/learned_codec.cpp
   src/learned_frame.cpp
+  src/learned_merge.cpp
   src/ofdm_tx.cpp
   src/receiver.cpp
   src/spectrum.cpp

@@ -15,6 +15,7 @@
 #include "chanest.hpp"
 #include "dsp.hpp"
 #include "learned_frame.hpp"
+#include "learned_merge.hpp"
 #include "modes.hpp"
 #include "types.hpp"
 
@@ -74,6 +75,9 @@ struct RxTuning {
     bool learned_median_snr = true;
     bool learned_attenuate = true;
     bool learned_floor = true;
+    // 解這一幀之前，把前面幾幀收到的值合進來（learned_merge.hpp）：訊號弱、畫面平靜時畫面比較清楚也比較穩定。
+    // 要另外設定合併用的權重（Receiver::set_merge）；這一幀的模型沒有對應的權重時，和關掉一樣。
+    bool learned_merge = false;
 };
 
 class Receiver {
@@ -86,6 +90,10 @@ public:
     // 兩者都相同的再設定一次會取代前一個，傳空指標表示全部拿掉。某個模式沒有模型時，它的幀只回報
     // 「收到一幀，但沒有畫面」。reset() 不會清掉模型。
     void set_model(std::shared_ptr<const LearnedCodec> model) { models_.set(std::move(model)); }
+
+    // 合併最近幾幀用的權重，每個畫面模型各一份（以它記的模型識別碼對應）。同一個模型的再設定一次會取代前一個，
+    // 傳空指標表示全部拿掉。要 tuning().learned_merge 打開才會用。reset() 不會清掉權重，只清掉記下來的前幾幀。
+    void set_merge(std::shared_ptr<const LearnedMerge> merge);
 
     void reset();
     void push(std::span<const float> samples);  // 12 kHz
@@ -131,6 +139,11 @@ private:
     };
     PilotCheck verify_pilots(std::int64_t t0, double cfo, const Mode& mode) const;
     void process_frame();
+    const LearnedMerge* find_merge(std::uint32_t model_id) const;
+    // 把前面幾幀合進這一幀。回傳用了幾幀；0 表示沒有可以用的（merged 不能用）。
+    int merge_earlier(const LearnedMerge& merge, const Mode& mode, const LearnedUnpacked& frame, const RxFrame& info,
+                      LearnedUnpacked& merged) const;
+    void remember(const LearnedMerge& merge, const Mode& mode, const LearnedUnpacked& frame, const RxFrame& info);
     void confirm_next();
     void enter_search(std::int64_t from);
     void start_scan(std::int64_t from, std::int64_t limit);
@@ -140,6 +153,19 @@ private:
 
     RxTuning tuning_;
     LearnedModels models_;
+    std::vector<std::shared_ptr<const LearnedMerge>> merges_;
+    // 最近解出畫面的幾幀收到的值（新的在前），合併用。只在合併打開、而且那一幀的模型有合併用的權重時才記。
+    struct Earlier {
+        int mode_id = -1;
+        std::uint32_t model_id = 0;
+        std::int64_t start = 0;  // 幀開頭的取樣編號
+        bool header_ok = false;
+        int sequence = -1;
+        std::string callsign;
+        std::vector<float> values;
+        std::vector<float> noise_var;
+    };
+    std::deque<Earlier> earlier_;
     AnalyticFilter analytic_;
     ChannelEstimator chanest_;
     std::vector<cf> buf_;

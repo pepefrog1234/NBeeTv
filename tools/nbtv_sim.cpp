@@ -13,6 +13,7 @@
 #include "channel.hpp"
 #include "learned_codec.hpp"
 #include "learned_frame.hpp"
+#include "learned_merge.hpp"
 #include "model_file.hpp"
 #include "modes.hpp"
 #include "ppm.hpp"
@@ -43,6 +44,7 @@ double psnr(const std::vector<std::uint8_t>& a, const std::vector<std::uint8_t>&
 
 bool g_noise_map = true;
 std::shared_ptr<const LearnedCodec> g_model;  // 載入後不再改變，各執行緒共用
+std::shared_ptr<const LearnedMerge> g_merge;  // 不是空的：接收機把最近幾幀合起來解
 bool g_learned_median = true, g_learned_attenuate = true, g_learned_floor = true;
 
 Totals run_round(const Mode& mode, sim::ChannelParams params, int burst, const std::vector<std::uint8_t>& image, std::uint64_t seed,
@@ -76,6 +78,10 @@ Totals run_round(const Mode& mode, sim::ChannelParams params, int burst, const s
     rx.tuning().learned_attenuate = g_learned_attenuate;
     rx.tuning().learned_floor = g_learned_floor;
     rx.set_model(g_model);
+    if (g_merge != nullptr) {
+        rx.set_merge(g_merge);
+        rx.tuning().learned_merge = true;
+    }
     Totals t;
     t.sent = burst;
     for (std::size_t pos = 0; pos < received.size(); pos += 1024) {
@@ -97,7 +103,7 @@ Totals run_round(const Mode& mode, sim::ChannelParams params, int burst, const s
 }  // namespace
 
 int main(int argc, char** argv) {
-    const Args args(argc, argv, {"help", "flat-noise", "learned-mean", "learned-plain", "learned-nofloor"});
+    const Args args(argc, argv, {"help", "flat-noise", "learned-mean", "learned-plain", "learned-nofloor", "merge"});
     g_noise_map = !args.has("flat-noise");
     g_learned_median = !args.has("learned-mean");
     g_learned_attenuate = !args.has("learned-plain");
@@ -118,6 +124,8 @@ int main(int argc, char** argv) {
             "  --learned-mean    告訴解碼器的訊雜比用各格點雜訊的平均值，不用中位數（比較用）\n"
             "  --learned-plain   雜訊特別大的格點不壓小（比較用）\n"
             "  --learned-nofloor 訊雜比低於解碼器認得的下限時不另外處理（比較用）\n"
+            "  --merge           接收機把最近幾幀合起來解（每次連續發射的是同一張畫面，所以量到的是畫面靜止時的效果；\n"
+            "                    --burst 給大一點才看得出來）；--merge-file 檔名 指定合併用的權重檔\n"
             "  --papr dB         包絡峰均比目標（0 用預設值，負值不削波）\n"
             "  --flat-noise      接收機不用逐符號、逐載波的雜訊估計（比較用）\n"
             "  --threads N       執行緒數（預設用全部核心）\n"
@@ -168,9 +176,20 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "需要權重檔 %s：%s\n", model_path.c_str(), g_model == nullptr ? error.c_str() : "不是給這個模式用的");
             return 2;
         }
+        if (args.has("merge") || args.has("merge-file")) {
+            const std::string merge_path = args.str("merge-file", default_merge_path(mode->id));
+            std::vector<std::uint8_t> merge_bytes;
+            error = merge_path.empty() ? "這個模式沒有預設的" : "讀不到檔案";
+            if (!merge_path.empty() && read_file(merge_path, merge_bytes)) g_merge = LearnedMerge::load(merge_bytes, &error);
+            if (g_merge == nullptr || g_merge->model_id() != g_model->model_id()) {
+                std::fprintf(stderr, "需要合併用的權重檔 %s：%s\n", merge_path.c_str(), g_merge == nullptr ? error.c_str() : "不是配這個模型的");
+                return 2;
+            }
+        }
     }
 
     std::printf("模式 %d，通道 %s", mode->id, channel_name.c_str());
+    if (g_merge != nullptr) std::printf("，合併最近 %d 幀", g_merge->frames());
     if (params.freq_offset_hz != 0.0) std::printf("，頻偏 %+.1f Hz", params.freq_offset_hz);
     if (params.clock_ppm != 0.0) std::printf("，時脈 %+.0f ppm", params.clock_ppm);
     if (params.tone_hz > 0.0) std::printf("，載波干擾 %.0f Hz／%+.0f dB", params.tone_hz, params.tone_db);

@@ -91,6 +91,28 @@ int nbtv_model_values(const nbtv_model *model);
 /* 模型第一層的通道數（愈大的模型愈寬，運算量也愈大）；要和模式的 learned_width 相同才能用在那個模式。 */
 int nbtv_model_width(const nbtv_model *model);
 
+/* ------------------------------------------------------------------ 合併最近幾幀 */
+
+/*
+ * 接收端可以在解每一幀之前，把前面幾幀收到的值合進來：畫面沒變的地方雜訊被平均掉，畫面變了的地方只用這一幀。
+ * 訊號弱、畫面平靜時畫面比較清楚也比較穩定；訊號很好或畫面一直在變時和不合併幾乎一樣。
+ * 發射端與空中格式都不變，對方不需要知道。
+ * 判斷畫面變了多少的是一個小網路，權重放在獨立的檔案裡（models/ 底下），每個畫面模型各配一份。
+ * 用法和模型一樣：把檔案內容交給 nbtv_merge_load，設定給接收機（nbtv_rx_set_merge），之後就可以 nbtv_merge_destroy。
+ * 另外要用 nbtv_rx_set_merging 打開（預設是關的）。
+ */
+typedef struct nbtv_merge nbtv_merge;
+
+/* data 是權重檔的內容，呼叫之後可以釋放。不是這種權重檔、檔案損壞或版本不認得時回傳 NULL。 */
+nbtv_merge *nbtv_merge_load(const uint8_t *data, size_t size);
+void nbtv_merge_destroy(nbtv_merge *merge);
+
+/* 它配的是哪一個畫面模型（nbtv_model_id）。 */
+uint32_t nbtv_merge_model_id(const nbtv_merge *merge);
+
+/* 一共看幾幀：現在這一幀，加上前面幾幀。 */
+int nbtv_merge_frames(const nbtv_merge *merge);
+
 /* ------------------------------------------------------------------ 呼號 */
 
 /*
@@ -174,6 +196,15 @@ void nbtv_rx_reset(nbtv_rx *rx);
  * 那個模式的幀照樣會回報（呼號、訊雜比都有），但沒有畫面：decoded = 0、model_missing = 1。
  */
 void nbtv_rx_set_model(nbtv_rx *rx, const nbtv_model *model);
+
+/*
+ * 合併最近幾幀用的權重。可以設定好幾個（每個畫面模型各一份；同一個模型的取代前一個），merge 是 NULL 表示全部拿掉。
+ * 設定了還要用 nbtv_rx_set_merging 打開才會用。某個模式的模型沒有對應的權重時，那個模式照原來的方式解。
+ */
+void nbtv_rx_set_merge(nbtv_rx *rx, const nbtv_merge *merge);
+
+/* 打開（非 0）或關掉（0）合併最近幾幀；預設是關的。nbtv_rx_reset 不會改變這個設定，只會忘掉前面收到的幀。 */
+void nbtv_rx_set_merging(nbtv_rx *rx, int enabled);
 
 /* 推入收到的音訊。同步、解調與解碼都在這個呼叫裡完成，一幀結束時可能花幾十毫秒。 */
 void nbtv_rx_push(nbtv_rx *rx, const float *samples, int count);

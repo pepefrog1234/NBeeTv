@@ -149,7 +149,13 @@ enum SelfTest {
             print("[selftest] 1 項失敗")
             return 1
         }
+        // 合併最近幾幀用的權重：每一份都載入得了，而且配的是 app 裡有的模型
+        let merges = zip(MergeWeights.loaded, MergeWeights.modelIDs).map { String(format: "%@（配模型 %08X）", $0.name, $1) }
+        report("合併最近幾幀的權重", MergeWeights.loaded.count == MergeWeights.resourceNames.count
+                   && MergeWeights.modelIDs.allSatisfy { LearnedModel.ids.contains($0) },
+               merges.isEmpty ? "app 裡沒有" : merges.joined(separator: "；"))
         testCoreLoopback(coffee)
+        testMergeFrames(coffee)
         testFlatPictures()
         testExport(coffee)
         testDroppedFrameTail(coffee, rocket)
@@ -202,6 +208,58 @@ enum SelfTest {
             let worst = zip(good, previews).map { difference($0.rgb ?? Data(), $1) }.max() ?? 255
             report("核心收發（\(mode.label)）", good.count == 2 && worst < 3,
                    String(format: "收到 %d/2 張，和預覽平均差 %.1f／255", good.count, worst))
+        }
+    }
+
+    /// 合併最近幾幀：同一張畫面在很弱的訊號下連續送 6 張。打開合併之後，後面幾張要比不合併的接近原圖；
+    /// 第一張前面沒有東西可以合，兩者一模一樣。雜訊是固定種子的亂數，每次的結果相同。
+    private static func testMergeFrames(_ image: Data) {
+        for mode in Modes.all {
+            guard let modelID = LearnedModel.id(values: mode.learnedValues, width: mode.learnedWidth),
+                  MergeWeights.covers(modelID: modelID) else {
+                report("合併最近幾幀（\(mode.label)）", nil, "這個模式的模型沒有配合併用的權重")
+                continue
+            }
+            let tx = CoreTransmitter()
+            tx.setMode(mode.id)
+            tx.setCallsign("n0call")
+            var signal: [Float] = []
+            for _ in 0..<6 {
+                guard let frame = tx.encode(rgb: image) else {
+                    report("合併最近幾幀（\(mode.label)）", false, "編碼失敗")
+                    return
+                }
+                signal += frame.samples
+            }
+            signal += tx.finish()
+            // 白雜訊：訊雜比 3 dB（訊號的平均功率 ÷ 3 kHz 頻寬內的雜訊功率）
+            let power = signal.reduce(0.0) { $0 + Double($1) * Double($1) } / Double(max(signal.count, 1))
+            let sigma = (power / pow(10.0, 0.3) * (Double(NBTV.sampleRate) / 2) / 3000).squareRoot()
+            var audio = Demo.silence(seconds: 0.3) + signal + Demo.silence(seconds: 0.5)
+            var state: UInt64 = 0x9E37_79B9_7F4A_7C15
+            func uniform() -> Double {
+                state ^= state << 13
+                state ^= state >> 7
+                state ^= state << 17
+                return (Double(state >> 11) + 0.5) / 9_007_199_254_740_992.0
+            }
+            for i in audio.indices {
+                audio[i] += Float(sigma * (-2 * log(uniform())).squareRoot() * cos(2 * Double.pi * uniform()))
+            }
+            func pictures(merging: Bool) -> [Data] {
+                let receiver = CoreReceiver()
+                receiver.setMerging(merging)
+                return Demo.receive(audio, receiver: receiver).flatMap(\.frames).filter { $0.decoded && $0.modeID == mode.id }.compactMap(\.rgb)
+            }
+            let plain = pictures(merging: false), merged = pictures(merging: true)
+            guard plain.count == 6, merged.count == 6 else {
+                report("合併最近幾幀（\(mode.label)）", false, "收到 \(plain.count)／\(merged.count) 張，應該各 6 張")
+                continue
+            }
+            let before = plain[3...].map { difference($0, image) }.reduce(0, +) / 3
+            let after = merged[3...].map { difference($0, image) }.reduce(0, +) / 3
+            report("合併最近幾幀（\(mode.label)）", plain[0] == merged[0] && after < before,
+                   String(format: "訊雜比 3 dB、同一張畫面：第 4–6 張和原圖平均差 %.1f／255，不合併是 %.1f", after, before))
         }
     }
 

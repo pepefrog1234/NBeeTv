@@ -7,6 +7,7 @@
 #include "args.hpp"
 #include "dsp.hpp"
 #include "learned_codec.hpp"
+#include "learned_merge.hpp"
 #include "model_file.hpp"
 #include "modes.hpp"
 #include "ppm.hpp"
@@ -17,13 +18,15 @@ using namespace nbtv;
 using namespace nbtv::tools;
 
 int main(int argc, char** argv) {
-    const Args args(argc, argv, {"trace", "help"});
+    const Args args(argc, argv, {"trace", "help", "merge"});
     if (args.positional.empty() || args.has("help")) {
         std::printf(
             "用法：nbtv-rx [選項] 錄音.wav\n"
             "  --out-dir 目錄   收到的畫面存到這裡（預設不存檔，只列出結果）\n"
             "  --model 檔名     權重檔，取代專案 models/ 裡給同一個模式的那一份\n"
             "                   （沒有給的話每個模式都用 models/ 裡的，找不到就不解那個模式的畫面）\n"
+            "  --merge          解每一幀之前把前面幾幀收到的值合進來：畫面沒變的地方比較清楚，訊號弱時差別最大。\n"
+            "                   用的是 models/ 裡各個模型配的權重；沒有配的模式照原來的方式解\n"
             "  --trace          印出同步與解碼的過程\n"
             "WAV 的取樣率必須是 12000 或 48000。\n");
         return args.has("help") ? 0 : 2;
@@ -58,6 +61,28 @@ int main(int argc, char** argv) {
     };
     for (const Mode& m : kModes) load_model(default_model_path(m.id), false);
     if (args.has("model") && !load_model(args.str("model", ""), true)) return 1;
+    if (args.has("merge")) {
+        // 合併最近幾幀用的權重，每個模式的模型各配一份；接收機依權重裡記的模型識別碼對應
+        int merges = 0;
+        for (const Mode& m : kModes) {
+            const std::string path = default_merge_path(m.id);
+            std::vector<std::uint8_t> bytes;
+            if (path.empty() || !read_file(path, bytes)) continue;
+            std::string error;
+            std::shared_ptr<const LearnedMerge> merge = LearnedMerge::load(bytes, &error);
+            if (merge == nullptr) {
+                std::fprintf(stderr, "%s：%s\n", path.c_str(), error.c_str());
+                continue;
+            }
+            rx.set_merge(std::move(merge));
+            ++merges;
+        }
+        if (merges == 0) {
+            std::fprintf(stderr, "找不到合併最近幾幀用的權重檔（專案的 models/ 底下）\n");
+            return 1;
+        }
+        rx.tuning().learned_merge = true;
+    }
     int index = 0, good = 0;
     auto drain = [&] {
         RxFrame f;

@@ -39,7 +39,7 @@ enum LearnedModel {
     /// Resources 裡的權重檔（不含副檔名）。檔名就是模型的名稱：「訓練完成的年月日-當天第幾個完成的」。
     /// 哪一份給哪個模式用由核心決定：模型的實數個數與寬度都和模式的相同就是。
     /// 依序是模式 11、12、13、14 用的；後兩份是加寬的大型網路（各 46 MB）。
-    static let resourceNames = ["261123-1", "261122-3", "261122-4", "261123-3"]
+    static let resourceNames = ["261123-1", "261122-3", "261122-4", "261123-4"]
 
     /// 載入成功的模型與它的名稱。找不到或損壞的那一份不在裡面：對應的模式不會列在選單裡，收到那種幀也不會有畫面。
     static let loaded: [(name: String, handle: OpaquePointer)] = resourceNames.compactMap { name in
@@ -57,10 +57,36 @@ enum LearnedModel {
     static func handle(values: Int, width: Int) -> OpaquePointer? { find(values: values, width: width)?.handle }
     /// 那個模型的名稱，例如「261123-1」
     static func name(values: Int, width: Int) -> String? { find(values: values, width: width)?.name }
+    /// 載入成功的各個模型的識別碼（順序同 loaded）
+    static let ids: [UInt32] = handles.map { nbtv_model_id($0) }
+    /// 那個模型的識別碼；沒有的話是 nil
+    static func id(values: Int, width: Int) -> UInt32? { handle(values: values, width: width).map { nbtv_model_id($0) } }
     /// 那個模型的權重檔識別碼；收發兩邊要相同才解得出畫面
     static func idText(values: Int, width: Int) -> String? {
         handle(values: values, width: width).map { String(format: "%08X", nbtv_model_id($0)) }
     }
+}
+
+/// 接收端「合併最近幾幀」用的權重（核心的 nbtv_merge）：解每一幀之前，畫面沒變的地方把前面幾幀收到的值合進來，
+/// 訊號弱時畫面比較清楚也比較穩定。每個畫面模型各配一份，放在 app 的 Resources 裡；和模型一樣第一次用到時載入，
+/// 之後所有的接收機共用。少了哪一份，用那個模型的模式就照原來的方式解。
+enum MergeWeights {
+    /// Resources 裡的權重檔（不含副檔名）。檔名是它自己的名稱（訓練完成的年月日-當天第幾個完成的）；
+    /// 配的是哪一個畫面模型記在檔案裡，由核心對應。
+    static let resourceNames = ["261124-10", "261124-8", "261124-9", "261124-7"]
+
+    static let loaded: [(name: String, handle: OpaquePointer)] = resourceNames.compactMap { name in
+        guard let url = Bundle.main.url(forResource: name, withExtension: "bin"),
+              let data = try? Data(contentsOf: url, options: .mappedIfSafe),
+              let handle = data.withUnsafeBytes({ nbtv_merge_load($0.bindMemory(to: UInt8.self).baseAddress, $0.count) }) else { return nil }
+        return (name, handle)
+    }
+    static let handles: [OpaquePointer] = loaded.map(\.handle)
+
+    /// 各份權重配的畫面模型的識別碼（順序同 loaded）
+    static let modelIDs: [UInt32] = handles.map { nbtv_merge_model_id($0) }
+    /// 這個畫面模型（以識別碼表示）有沒有配合併用的權重
+    static func covers(modelID: UInt32) -> Bool { modelIDs.contains(modelID) }
 }
 
 /// 一個傳輸模式，資料取自 nbtv_mode_at()。
@@ -152,6 +178,7 @@ final class CoreReceiver {
         handle = h
         frame = f
         for model in LearnedModel.handles { nbtv_rx_set_model(handle, model) }
+        for merge in MergeWeights.handles { nbtv_rx_set_merge(handle, merge) }
     }
 
     deinit {
@@ -160,6 +187,9 @@ final class CoreReceiver {
     }
 
     func reset() { nbtv_rx_reset(handle) }
+
+    /// 要不要把最近幾幀合起來解（預設不要）。只對有配合併用權重的模型有作用；重設不會改變這個設定。
+    func setMerging(_ on: Bool) { nbtv_rx_set_merging(handle, on ? 1 : 0) }
 
     func push(_ samples: [Float]) {
         samples.withUnsafeBufferPointer { nbtv_rx_push(handle, $0.baseAddress, Int32($0.count)) }

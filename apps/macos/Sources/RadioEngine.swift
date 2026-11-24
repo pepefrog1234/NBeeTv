@@ -66,6 +66,11 @@ final class RadioEngine {
 
     var isReceiving: Bool { input.isRunning }
 
+    /// 接收時要不要把最近幾幀合起來解（設定視窗的「合併最近幾幀」）。隨時可以改，下一幀起生效。
+    func setMergeFrames(_ on: Bool) {
+        coreQueue.async { self.receiver.setMerging(on) }
+    }
+
     /// 從指定的輸入裝置開始接收；接收機會先清成初始狀態。
     func startReceiving(deviceID: AudioDeviceID) throws {
         generation += 1

@@ -25,6 +25,8 @@ final class AppSettings: ObservableObject {
     @Published var loopVideo: Bool { didSet { store?.set(loopVideo, forKey: "loopVideo") } }
     /// 在收到的畫面與縮圖的左上角標出那一張的訊雜比
     @Published var showFrameSNR: Bool { didSet { store?.set(showFrameSNR, forKey: "showFrameSNR") } }
+    /// 接收時把最近幾幀合起來解：畫面沒變的地方雜訊被平均掉，訊號弱時比較清楚也比較穩定
+    @Published var mergeFrames: Bool { didSet { store?.set(mergeFrames, forKey: "mergeFrames") } }
     /// 測試用：不是 nil 時，發射用它給的 PTT 驅動，不看 pttMode（自我測試用來確認 PTT 有按下、有放開）。
     var debugPTTDriver: (() -> PTTDriver)?
 
@@ -47,6 +49,7 @@ final class AppSettings: ObservableObject {
         cameraID = store?.string(forKey: "cameraID") ?? ""
         loopVideo = (store?.object(forKey: "loopVideo") as? Bool) ?? true
         showFrameSNR = (store?.object(forKey: "showFrameSNR") as? Bool) ?? false
+        mergeFrames = (store?.object(forKey: "mergeFrames") as? Bool) ?? true
     }
 
     /// 底列與設定視窗顯示的 PTT 說明

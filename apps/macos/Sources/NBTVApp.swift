@@ -158,6 +158,7 @@ enum DebugOptions {
             case "source": settings.sourceKind = SourceKind(rawValue: value) ?? .camera
             case "loop": settings.loopVideo = value != "0"
             case "snr": settings.showFrameSNR = value != "0"
+            case "merge": settings.mergeFrames = value != "0"
             default: print("[debug] 不認得的設定：\(parts[0])")
             }
         }

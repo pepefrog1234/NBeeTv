@@ -11,6 +11,7 @@
 #include "callsign.hpp"
 #include "dsp.hpp"
 #include "learned_codec.hpp"
+#include "learned_merge.hpp"
 #include "modes.hpp"
 #include "receiver.hpp"
 #include "spectrum.hpp"
@@ -49,6 +50,10 @@ std::span<const std::uint8_t> rgb_span(const std::uint8_t* rgb) { return {rgb, s
 
 struct nbtv_model {
     std::shared_ptr<const nbtv::LearnedCodec> codec;
+};
+
+struct nbtv_merge {
+    std::shared_ptr<const nbtv::LearnedMerge> merge;
 };
 
 struct nbtv_tx {
@@ -147,6 +152,23 @@ uint32_t nbtv_model_id(const nbtv_model* model) { return model != nullptr ? mode
 int nbtv_model_values(const nbtv_model* model) { return model != nullptr ? model->codec->value_count() : 0; }
 
 int nbtv_model_width(const nbtv_model* model) { return model != nullptr ? model->codec->base_width() : 0; }
+
+/* ---- 合併最近幾幀 ---- */
+
+nbtv_merge* nbtv_merge_load(const uint8_t* data, size_t size) {
+    if (data == nullptr || size == 0) return nullptr;
+    std::unique_ptr<nbtv::LearnedMerge> loaded = nbtv::LearnedMerge::load({data, size});
+    if (loaded == nullptr) return nullptr;
+    nbtv_merge* merge = new nbtv_merge;
+    merge->merge = std::move(loaded);
+    return merge;
+}
+
+void nbtv_merge_destroy(nbtv_merge* merge) { delete merge; }
+
+uint32_t nbtv_merge_model_id(const nbtv_merge* merge) { return merge != nullptr ? merge->merge->model_id() : 0; }
+
+int nbtv_merge_frames(const nbtv_merge* merge) { return merge != nullptr ? merge->merge->frames() : 0; }
 
 /* ---- 呼號 ---- */
 
@@ -255,6 +277,14 @@ void nbtv_rx_reset(nbtv_rx* rx) {
 
 void nbtv_rx_set_model(nbtv_rx* rx, const nbtv_model* model) {
     if (rx != nullptr) rx->rx.set_model(model != nullptr ? model->codec : nullptr);
+}
+
+void nbtv_rx_set_merge(nbtv_rx* rx, const nbtv_merge* merge) {
+    if (rx != nullptr) rx->rx.set_merge(merge != nullptr ? merge->merge : nullptr);
+}
+
+void nbtv_rx_set_merging(nbtv_rx* rx, int enabled) {
+    if (rx != nullptr) rx->rx.tuning().learned_merge = enabled != 0;
 }
 
 void nbtv_rx_push(nbtv_rx* rx, const float* samples, int count) {
