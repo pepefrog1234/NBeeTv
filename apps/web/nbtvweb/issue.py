@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from . import card as cardlib
-from .cardfile import RECORD_TYPE, RECORD_VERSION, canonical_json, encode_png, pixels_sha256
+from .cardfile import RECORD_TYPE, RECORD_VERSION, attach, canonical_json, encode_image, image_sha256, pixels_sha256
 from .config import Config
 from .provenance import C2paEmbedder, ProvenanceError
 from .rules import Verdict
@@ -93,6 +93,8 @@ class Issuer:
             )
             background = cardlib.load_background(cardlib.pick_background(self.cfg.backgrounds, serial))
             image = cardlib.render(content, background, self.fonts)
+            # 先把圖壓成 PNG：紀錄裡要記的是這個圖檔本身的雜湊，簽完之後只加文字區塊，不再重新壓一次
+            picture = encode_image(image)
             record = {
                 "v": RECORD_VERSION,
                 "type": RECORD_TYPE,
@@ -120,9 +122,11 @@ class Issuer:
                     "frequency_khz": listener.freq_khz,
                     "location": listener.location,
                 },
+                # image_sha256：整個圖檔（簽章資料以外的每個區塊）；pixels_sha256：解開之後的像素。
                 # c2pa：這個檔案發出去的時候有沒有附 C2PA 的資料（有的話被拿掉也看得出來）
                 "card": {
-                    "width": image.width, "height": image.height, "pixels_sha256": pixels_sha256(image),
+                    "width": image.width, "height": image.height,
+                    "image_sha256": image_sha256(picture), "pixels_sha256": pixels_sha256(image),
                     "c2pa": self.embedder is not None,
                 },
                 "signature": {
@@ -133,7 +137,7 @@ class Issuer:
             }
             text = canonical_json(record)
             signature = self.signer.sign(text.encode("utf-8"))
-            png = encode_png(image, text, signature, self.signer.chain_pem)
+            png = attach(picture, text, signature, self.signer.chain_pem)
             if self.embedder is not None:
                 # C2PA 記的是整個檔案的雜湊，所以放在最後：上面的三個文字區塊都寫好了才加
                 try:
@@ -141,6 +145,10 @@ class Issuer:
                 except ProvenanceError as e:
                     log.error("%s", e)
                     raise IssueError("internal") from None
+            # 發出去之前照查驗的方式再算一次：後面的步驟如果動到了圖檔的區塊，這張卡到別人手上會驗不過
+            if image_sha256(png) != record["card"]["image_sha256"]:
+                log.error("卡片 %s：加上簽章資料之後，圖檔的雜湊和紀錄裡的不一樣", serial)
+                raise IssueError("internal")
             stored = StoredCard(
                 serial=serial, issued_at=record["issued_at"], record_text=text,
                 signature_b64=base64.b64encode(signature).decode("ascii"), audio_sha256=audio_sha256,

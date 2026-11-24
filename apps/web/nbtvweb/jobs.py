@@ -29,6 +29,10 @@ log = logging.getLogger(__name__)
 
 UPLOAD_START_SECONDS = 90          # 開了工作之後，這麼久還沒開始上傳就作廢（頁面是馬上接著傳的）
 UPLOAD_DEADLINE_SECONDS = 10 * 60  # 一次上傳最多傳這麼久
+UPLOAD_STALL_SECONDS = 30          # 傳到一半，這麼久沒有新的資料進來就中斷
+UPLOAD_GRACE_SECONDS = 30          # 開始上傳這麼久之後才看速度
+UPLOAD_MIN_RATE = 8 * 1024         # ……之後的平均速度不能低於這個值（每秒位元組數）：再慢的話，五分鐘的錄音在時限內本來就傳不完
+UPLOAD_SLOTS_PER_QUEUE = 4         # 同時可以有幾個工作在上傳：排隊名額的這麼多倍
 RESULT_KEEP_SECONDS = 30 * 60      # 結果留這麼久給頁面查詢
 ACTIVE_PER_OWNER = 2               # 同一個來源同時最多有幾個還沒結束的工作
 
@@ -90,8 +94,12 @@ class JobManager:
     def refusal(self, owner: str) -> JobError | None:
         """現在能不能再開一個工作；不能的話回傳原因。"""
         unfinished = [j for j in self.jobs.values() if j.state not in ("done", "failed")]
-        # 還沒開始解的工作排滿了（開了工作但還在上傳的也算，免得傳完才發現排不進去）
-        if sum(1 for j in unfinished if j.state != "decoding") >= self.cfg.queue:
+        # 等著解的工作排滿了
+        if sum(1 for j in unfinished if j.state == "queued") >= self.cfg.queue:
+            return JobError("busy", 503)
+        # 還在上傳的（含開了工作還沒開始傳的）另外算，名額比排隊的多：上傳只佔一點磁碟空間，
+        # 不該因為有幾個人傳得很慢——或是故意慢慢傳——別人就連工作都開不了
+        if sum(1 for j in unfinished if j.state in ("created", "uploading")) >= UPLOAD_SLOTS_PER_QUEUE * self.cfg.queue:
             return JobError("busy", 503)
         # 同一個來源不能一個人把名額佔滿
         if owner and sum(1 for j in unfinished if j.owner == owner) >= ACTIVE_PER_OWNER:
@@ -117,13 +125,23 @@ class JobManager:
         job.directory = Path(tempfile.mkdtemp(prefix=f"job-{job.id[:8]}-", dir=self.cfg.tmp_dir))
         digest = hashlib.sha256()
         total = 0
+        started = time.monotonic()
+        pieces = stream.__aiter__()
         try:
             async with asyncio.timeout(UPLOAD_DEADLINE_SECONDS):
                 with open(job.directory / "upload.wav", "wb") as f:
-                    async for chunk in stream:
+                    while True:
+                        # 停住不傳、或是慢到不像在傳檔案的連線不讓它一直佔著名額（逾時當成上傳中斷）
+                        try:
+                            chunk = await asyncio.wait_for(pieces.__anext__(), UPLOAD_STALL_SECONDS)
+                        except StopAsyncIteration:
+                            break
                         total += len(chunk)
                         if total > self.cfg.max_upload_bytes:
                             raise JobError("too_large", 413)
+                        elapsed = time.monotonic() - started
+                        if elapsed > UPLOAD_GRACE_SECONDS and total < (elapsed - UPLOAD_GRACE_SECONDS) * UPLOAD_MIN_RATE:
+                            raise TimeoutError("上傳太慢")
                         digest.update(chunk)
                         f.write(chunk)
             if total == 0:

@@ -6,6 +6,9 @@
 from __future__ import annotations
 
 import sqlite3
+import stat
+import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -13,6 +16,7 @@ from pathlib import Path
 import httpx
 import numpy as np
 
+from nbtvweb import jobs as jobs_module
 from nbtvweb import provenance
 from nbtvweb.cardfile import decode_png
 from nbtvweb.signing import certificate_fingerprint, issued_by, load_certificate, load_certificates, verify
@@ -109,7 +113,8 @@ class EndToEndTests(unittest.TestCase):
         self.assertTrue(verify(leaf, card.record_text.encode(), card.signature))
         record = card.record
         self.assertEqual(card.size, (1680, 1080))
-        self.assertEqual(record["card"], {"width": 1680, "height": 1080, "pixels_sha256": card.pixels_sha256, "c2pa": True})
+        self.assertEqual(record["card"], {"width": 1680, "height": 1080, "image_sha256": card.image_sha256,
+                                          "pixels_sha256": card.pixels_sha256, "c2pa": True})
         config = self.site.http.get("/api/config").json()
         self.assertEqual(config["root_sha256"], certificate_fingerprint(root))
         self.assertEqual(record["signature"], {"algorithm": "ECDSA-P256-SHA256", "certificate_sha256": certificate_fingerprint(leaf),
@@ -125,15 +130,21 @@ class EndToEndTests(unittest.TestCase):
         # 用離線查驗工具從頭驗一次
         import subprocess
         import sys
-        import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "card.png").write_bytes(png.content)
             (Path(tmp) / "root.pem").write_bytes(published.content)
-            checked = subprocess.run([sys.executable, str(util.WEB_DIR / "verify_card.py"), str(Path(tmp) / "card.png"),
-                                      "--cert", str(Path(tmp) / "root.pem")], capture_output=True, text=True)
+            command = [str(util.WEB_DIR / "verify_card.py"), str(Path(tmp) / "card.png"), "--cert", str(Path(tmp) / "root.pem")]
+            checked = subprocess.run([sys.executable, *command], capture_output=True, text=True)
+            # 只有 Python 與 openssl 的電腦（-S：虛擬環境裡的套件都載不到）也驗得了，包括畫面
+            bare = subprocess.run([sys.executable, "-S", *command], capture_output=True, text=True)
+            unanchored = subprocess.run([sys.executable, *command[:2]], capture_output=True, text=True)
         self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
         for line in ("簽章：正確", "畫面：和簽章時的一樣", "C2PA：正確", "結果：通過"):
             self.assertIn(line, checked.stdout)
+        self.assertEqual(bare.returncode, 0, bare.stdout + bare.stderr)
+        for line in ("簽章：正確", "畫面：和簽章時的一樣", "C2PA：沒有檢查", "結果：通過"):
+            self.assertIn(line, bare.stdout)
+        self.assertEqual(unanchored.returncode, 2, unanchored.stdout)      # 沒指定根憑證：不算通過
         self.assertEqual((record["serial"], record["station"], record["type"]), (serial, "BX4ACP", "nbtv-reception-card"))
         self.assertEqual(record["reception"]["frames"], 14)
         import hashlib
@@ -152,7 +163,26 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual(found.json()["record"], record)
         download = self.site.http.get(result["card"]["png"], params={"download": 1})
         self.assertIn(f'filename="BX4ACP-NBTV-{serial}.png"', download.headers["content-disposition"])
+        self.assertEqual(download.content, png.content)
         self.assertEqual(self.site.http.get(f"/v/{serial}").status_code, 200)
+
+        # 圖檔只有這兩個網址。序號的其他寫法、多出來的參數都只回一個轉址，不直接給圖：
+        # 不然每換一種寫法，前面的快取就失效一次，圖就要從這台電腦重新送一次
+        canonical = result["card"]["png"]
+        self.assertEqual(canonical, f"/card/{serial}.png")
+        for odd, target in (
+            (canonical + "?x=1", canonical), (canonical + "?", canonical), (canonical + "?download=2", canonical),
+            (canonical + "?download=1&x=1", canonical + "?download=1"), (canonical + "?x=1&download=1", canonical + "?download=1"),
+            (f"/card/{serial.lower()}.png", canonical), (f"/card/{serial.replace('-', '')}.png", canonical),
+            (f"/card/{serial.lower()}.png?download=1", canonical + "?download=1"),
+        ):
+            response = self.site.http.get(odd)
+            if odd.endswith("?"):                                          # 只有一個問號、沒有參數：和不帶參數一樣
+                self.assertEqual(response.status_code, 200, odd)
+                continue
+            self.assertEqual((response.status_code, response.headers.get("location")), (301, target), odd)
+            self.assertLess(len(response.content), 300, odd)
+            self.assertIn("max-age", response.headers["cache-control"])
 
         # 錄音不留：暫存目錄是空的，資料庫裡只有雜湊
         self.assertEqual(list(self.server.cfg.tmp_dir.iterdir()), [])
@@ -240,6 +270,22 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(tool.status_code, 200)
         self.assertIn("離線查驗", tool.text)
 
+    def test_pages_and_files_take_no_query_string(self):
+        # 頁面與靜態檔帶了參數：只回一個轉址，轉到不帶參數的網址（理由和卡片圖檔一樣）
+        for path in ("/?utm_source=x", "/verify?x", "/v/7KQ2-M9XD-4TFA?fbclid=abc", "/static/app.js?v=2", "/static/style.css?1",
+                     "/root.pem?a=b", "/verify_card.py?x=y", "/robots.txt?z"):
+            response = self.site.http.get(path)
+            self.assertEqual((response.status_code, response.headers.get("location")), (301, path.split("?")[0]), path)
+            self.assertEqual(response.headers["x-content-type-options"], "nosniff")
+            self.assertEqual(response.content, b"")
+        # 轉址的目的地一定是本站的路徑，不會被帶到別的網站
+        for path in ("//evil.example/static/x?y=1", "/%2F%2Fevil.example/?x=1", "//evil.example/?x=1", "/\\evil.example/v/x?x=1"):
+            response = self.site.http.get(path)
+            location = response.headers.get("location", "/")
+            self.assertTrue(location.startswith("/") and not location.startswith("//") and "\\" not in location, (path, location))
+        # 查詢用的網址不受影響
+        self.assertEqual(self.site.http.get("/api/config?x=1").status_code, 200)
+
 
 @unittest.skipUnless(util.have_tools(), "要先建好 build/tools 裡的命令列工具")
 class LimitTests(unittest.TestCase):
@@ -267,11 +313,80 @@ class LimitTests(unittest.TestCase):
         self.assertEqual(site.http.get(f"/api/jobs/{job['id']}").json()["error"]["code"], "too_large")
         self.assertEqual(list(site.server.cfg.tmp_dir.iterdir()), [])  # 收到一半的檔案也刪掉了
 
-    def test_queue_limit(self):
-        site = self.serve(**{"limits.queue": 1})
-        self.assertEqual(site.create().status_code, 201)   # 開了工作但還沒上傳，也佔一個位置
-        full = site.create()
+    def slow_decoder(self, seconds: float) -> str:
+        """假的解碼器：等幾秒之後回報「沒有收到任何一幀」。用來讓工作在解碼與排隊的狀態停留一下。"""
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        script = Path(directory.name) / "nbtv-rx"
+        script.write_text(f"#!/bin/sh\n[ \"$1\" = --help ] && echo ' --json' && exit 0\nsleep {seconds}\n"
+                          "echo '{\"end\":true,\"frames\":0,\"pictures\":0}'\n")
+        script.chmod(script.stat().st_mode | stat.S_IXUSR)
+        return str(script)
+
+    def test_decode_queue_limit(self):
+        site = self.serve(**{"limits.queue": 1, "limits.workers": 1, "decoder.nbtv_rx": self.slow_decoder(2.0),
+                             "server.behind_cloudflare": True})
+        wav = util.make_wav(np.zeros(12000), 12000)
+        one, two = {"cf-connecting-ip": "203.0.113.1"}, {"cf-connecting-ip": "203.0.113.2"}
+        first, second = site.create(headers=one).json(), site.create(headers=one).json()
+        self.assertEqual(site.upload(first, wav).status_code, 202)        # 這一份正在解
+        self.assertEqual(site.upload(second, wav).status_code, 202)       # 這一份在排隊
+        self.assertEqual(site.http.get(f"/api/jobs/{second['id']}").json(), {"id": second["id"], "state": "queued", "position": 1})
+        full = site.create(headers=two)                                   # 排隊的名額（1 個）滿了
         self.assertEqual((full.status_code, full.json()["error"]), (503, "busy"))
+        site.wait(first["id"])
+        site.wait(second["id"])
+        self.assertEqual(site.create(headers=two).status_code, 201)
+
+    def test_uploads_in_progress_do_not_fill_the_decode_queue(self):
+        # 還在上傳的（含開了工作還沒開始傳的）不佔排隊的名額，另外算，名額是排隊的四倍：
+        # 幾個傳得很慢的人不會讓別人連工作都開不了
+        site = self.serve(**{"limits.queue": 1, "server.behind_cloudflare": True})
+        for n in range(1, 5):
+            self.assertEqual(site.create(headers={"cf-connecting-ip": f"203.0.113.{n}"}).status_code, 201, n)
+        full = site.create(headers={"cf-connecting-ip": "203.0.113.5"})
+        self.assertEqual((full.status_code, full.json()["error"]), (503, "busy"))
+
+    def test_stalled_and_crawling_uploads_are_cut_off(self):
+        site = self.serve()
+        saved = (jobs_module.UPLOAD_STALL_SECONDS, jobs_module.UPLOAD_GRACE_SECONDS, jobs_module.UPLOAD_MIN_RATE)
+
+        def restore():
+            jobs_module.UPLOAD_STALL_SECONDS, jobs_module.UPLOAD_GRACE_SECONDS, jobs_module.UPLOAD_MIN_RATE = saved
+
+        self.addCleanup(restore)
+        jobs_module.UPLOAD_STALL_SECONDS, jobs_module.UPLOAD_GRACE_SECONDS, jobs_module.UPLOAD_MIN_RATE = 1.0, 1.0, 50_000
+
+        def stalls():                    # 傳了一點就停住不動
+            yield b"RIFF" + bytes(2000)
+            time.sleep(5)
+            yield bytes(2000)
+
+        def crawls():                    # 一直有在傳，但慢得不像在傳檔案（每秒 2.5 KB）
+            for _ in range(40):
+                yield bytes(500)
+                time.sleep(0.2)
+
+        for label, body in (("stalls", stalls), ("crawls", crawls)):
+            job = site.create().json()
+
+            def send():
+                try:
+                    with httpx.Client(base_url=site.server.url, timeout=30) as http:
+                        http.put(job["upload"], content=body())
+                except httpx.HTTPError:
+                    pass                 # 伺服器已經把連線關了
+
+            sender = threading.Thread(target=send)
+            started = time.monotonic()
+            sender.start()
+            status = site.wait(job["id"], limit=10)
+            took = time.monotonic() - started
+            self.assertEqual((status["state"], status["error"]["code"]), ("failed", "upload_interrupted"), label)
+            self.assertLess(took, 4.0, label)                              # 不必等它傳完（或等到十分鐘的上限）
+            sender.join()
+        self.assertEqual(list(site.server.cfg.tmp_dir.iterdir()), [])     # 收到一半的檔案都刪掉了
+        self.assertEqual(site.create().status_code, 201)                  # 名額也還回來了
 
     def test_rate_limit_per_address(self):
         site = self.serve(**{"limits.jobs_per_ip": 2, "server.behind_cloudflare": True})

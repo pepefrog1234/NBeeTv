@@ -11,9 +11,10 @@ import re
 import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 from starlette.requests import ClientDisconnect
@@ -80,6 +81,31 @@ class SecurityHeaders:
             await send(message)
 
         await self.app(scope, receive, send_with_headers)
+
+
+# 頁面與靜態檔的網址都不吃參數。前面的 Cloudflare 是照整個網址（含 ? 後面的參數）快取的：隨便加一個參數，
+# 每一次請求都會回到這台電腦重新讀一次檔案，等於不花力氣就能耗掉這裡的上傳頻寬。
+# 所以帶了參數的請求只回一個轉址（幾百個位元組），轉到不帶參數的網址。卡片圖檔的網址在它自己的函式裡處理。
+NO_QUERY_PATHS = ("/", "/verify", "/robots.txt", "/root.pem", "/verify_card.py")
+NO_QUERY_PREFIXES = ("/static/", "/v/")
+REDIRECT_CACHE = "public, max-age=86400"
+
+
+class CanonicalUrls:
+    """不吃參數的網址帶了參數：轉到不帶參數的那一個。"""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["method"] in ("GET", "HEAD") and scope.get("query_string"):
+            path = scope["path"]
+            # 這些路徑都是一個斜線開頭，轉址的目的地不會被當成別的網站
+            if path in NO_QUERY_PATHS or path.startswith(NO_QUERY_PREFIXES):
+                response = RedirectResponse(quote(path), status_code=301, headers={"cache-control": REDIRECT_CACHE})
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
 
 
 def error(status: int, code: str, **detail) -> JSONResponse:
@@ -153,7 +179,8 @@ def create_app(cfg: Config) -> FastAPI:
 
     app = FastAPI(title="NBTV 收聽卡", version=__version__, lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
-    app.add_middleware(SecurityHeaders)
+    app.add_middleware(CanonicalUrls)
+    app.add_middleware(SecurityHeaders)  # 最後加的在最外層：轉址的回應也會有安全標頭
     app.state.jobs = jobs
     app.state.store = store
 
@@ -341,13 +368,21 @@ def create_app(cfg: Config) -> FastAPI:
         }
 
     @app.get("/card/{name}", include_in_schema=False)
-    async def card_png(name: str, download: int = 0):
+    async def card_png(name: str, request: Request):
         normal = normalize_serial(name[:-4]) if name.endswith(".png") else None
         if normal is None or store.get(normal) is None:
             return error(404, "not_found")
         path = store.card_path(normal)
         if not path.is_file():
             return error(404, "not_found")
+        # 一張卡的圖檔只有兩個網址：序號照標準寫法的那一個，以及它加上 ?download=1（下載用）。
+        # 序號的其他寫法（小寫、沒有連字號）與其他的參數都只回一個轉址：圖檔有幾百 KB 到幾 MB，
+        # 如果每一種寫法都直接給圖，換個寫法就能讓 Cloudflare 的快取失效、每次都從這台電腦重新送一次。
+        query = request.url.query
+        download = query == "download=1"
+        if name != f"{normal}.png" or (query and not download):
+            wanted = "?download=1" if "download=1" in query.split("&") else ""
+            return RedirectResponse(f"/card/{normal}.png{wanted}", status_code=301, headers={"cache-control": REDIRECT_CACHE})
         headers = {"cache-control": "public, max-age=31536000, immutable"}
         if download:
             headers["content-disposition"] = f'attachment; filename="{cfg.callsign}-NBTV-{normal}.png"'

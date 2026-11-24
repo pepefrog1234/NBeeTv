@@ -107,7 +107,11 @@ class C2paReport:
 def inspect(png: bytes, root_pem: bytes | None = None) -> C2paReport:
     """讀出並驗證 png 裡的 C2PA 資料。root_pem 是要當成信任錨點的根憑證；不給就不信任任何簽署者。"""
     c2pa = _library()
-    settings = c2pa.Settings.from_dict({"trust": {"user_anchors": root_pem.decode("ascii")}} if root_pem else {})
+    # 不照檔案裡寫的網址去抓「放在別處的 manifest」，也不連憑證的撤銷查詢：驗一個檔案不該讓這台電腦連到任何地方
+    options: dict = {"verify": {"remote_manifest_fetch": False, "ocsp_fetch": False}}
+    if root_pem:
+        options["trust"] = {"user_anchors": root_pem.decode("ascii")}
+    settings = c2pa.Settings.from_dict(options)
     try:
         with c2pa.Context(settings) as context:
             reader = c2pa.Reader.try_create(PNG, io.BytesIO(png), context=context)
