@@ -77,7 +77,7 @@ Primer uso:
 1. Haz clic en el botón de ajustes de arriba a la derecha (o pulsa ⌘,). Escribe tu indicativo, elige los dispositivos de entrada y salida de audio y elige cómo se acciona el PTT:
    sin control (se usa el VOX del equipo), RTS o DTR de un puerto serie, comandos CAT o un rigctld que ya esté en marcha. Los dos últimos necesitan tener [Hamlib](https://github.com/Hamlib/Hamlib) instalado aparte.
 2. macOS pide acceso al micrófono (la recepción lee del dispositivo de entrada de audio) y, si eliges la cámara como fuente de transmisión, acceso a la cámara.
-3. Al volver a la ventana principal ya está recibiendo. Elige la fuente de transmisión (cámara o archivo de video) y el modo de transmisión en la barra lateral y haz clic en «Transmitir».
+3. Al volver a la ventana principal ya está recibiendo. Elige la fuente de transmisión (cámara, archivo de video o una serie de imágenes) y el modo de transmisión en la barra lateral y haz clic en «Transmitir».
 
 La app también puede transmitir a horas programadas, imprimir una línea de texto sobre la imagen (Lienzo) y guardar las imágenes recibidas como imagen o como video. La interfaz está en chino tradicional, chino simplificado, japonés, español e inglés, y sigue el idioma del sistema.
 La guía completa está en [apps/macos/README.md](apps/macos/README.md).

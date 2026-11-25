@@ -1,9 +1,11 @@
-// 示範圖（--snapshot）與自我測試（--selftest）共用的工具：內附的測試圖、模擬電台收到的音訊、示範影片。
+// 示範圖（--snapshot）與自我測試（--selftest）共用的工具：內附的測試圖、模擬電台收到的音訊、示範影片、存圖片檔。
 // 影像與瀑布圖都是核心真的算出來的，這裡只負責準備輸入。
 import Accelerate
 import AVFoundation
 import CoreGraphics
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 
 enum Demo {
     /// bundle 裡的測試圖（96×72 的 PPM）：coffee、rocket、cat。
@@ -233,6 +235,28 @@ enum Demo {
         writer.finishWriting { done.signal() }
         done.wait()
         return writer.status == .completed
+    }
+
+    /// 把一張圖存成圖片檔，類型照副檔名（png、jpg、tiff、heic…）；這台電腦寫不出那種類型時回傳 false。
+    /// scale：先放大幾倍（不內插，一個像素變成一格）。orientation：寫進檔案的顯示方向（EXIF 的 1–8；
+    /// 手機直拍的相片是 6：存的像素是橫的，看的時候要順時針轉 90 度）。
+    @discardableResult
+    static func writeImage(_ image: CGImage, to url: URL, scale: Int = 1, orientation: Int? = nil) -> Bool {
+        var output = image
+        if scale > 1, let space = CGColorSpace(name: CGColorSpace.sRGB),
+           let context = CGContext(data: nil, width: image.width * scale, height: image.height * scale, bitsPerComponent: 8, bytesPerRow: 0,
+                                   space: space, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) {
+            context.interpolationQuality = .none
+            context.draw(image, in: CGRect(x: 0, y: 0, width: image.width * scale, height: image.height * scale))
+            output = context.makeImage() ?? image
+        }
+        let type = UTType(filenameExtension: url.pathExtension) ?? .png
+        try? FileManager.default.removeItem(at: url)
+        guard let destination = CGImageDestinationCreateWithURL(url as CFURL, type.identifier as CFString, 1, nil) else { return false }
+        var properties: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: 0.95]
+        if let orientation { properties[kCGImagePropertyOrientation] = orientation }
+        CGImageDestinationAddImage(destination, output, properties as CFDictionary)
+        return CGImageDestinationFinalize(destination)
     }
 
     /// 讓主執行緒的事件迴圈跑一下（等非同步的回呼、讓 SwiftUI 排版）。

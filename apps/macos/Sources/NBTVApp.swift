@@ -106,27 +106,34 @@ private struct OpenSettingsCommand: View {
 ///   NBTV_DEBUG_SETTINGS="鍵=值;…"   用暫時的設定啟動，不讀也不寫 UserDefaults。可用的鍵：
 ///       callsign、input、output（音訊裝置名稱的一部分）、ptt（none／serial／cat／rigctld）、rig（主機:連接埠）、
 ///       rigmodel（用 CAT 指令時的電台型號，Hamlib 的編號；1 是不接電台的示範機）、baud（CAT 的序列速率，0 是預設）、
-///       mode（發射模式編號）、source（camera／video）、loop（0／1：影片循環播放）、snr（0／1：在收到的畫面上標示訊雜比）、
+///       mode（發射模式編號）、source（camera／video／images）、loop（0／1：影片循環播放）、
+///       loopimages（0／1：圖片序列循環播放）、snr（0／1：在收到的畫面上標示訊雜比）、
+///       stampsnr（0／1：存成影片時在每一張的左上角印上訊雜比）、
 ///       volume（輸出音量，dB）、canvas（畫布要印的字；給了就打開畫布）、canvaspos（top／bottom）、
 ///       every（定時發射每隔幾分鐘）、busy（0／1：定時發射遇到正在收畫面時跳過）
 ///   NBTV_DEBUG_VIDEO=<影片檔>        啟動後開啟這個影片檔當發射來源
+///   NBTV_DEBUG_IMAGES=<資料夾或圖片檔> 啟動後把它（資料夾的話是裡面的圖片）當成圖片序列；不會記到設定裡
 ///   NBTV_DEBUG_SIMULATED_OUTPUT=1    發射時不開音訊輸出裝置：取樣由模擬的輸出照實際的時間取走、丟掉（不會真的送出聲音）
 ///                                    寫成 stall=<秒> 的話，模擬的輸出取了這麼多秒之後就不再取（重現輸出裝置在發射中沒有回應）
 ///   NBTV_DEBUG_DUMP=<目錄>           dump 動作把視窗的 PNG 存在這裡（沒設就只印狀態）
 ///   NBTV_DEBUG_SCRIPT="秒:動作;…"    主視窗出現後，在指定的秒數執行動作，並把收發流程的轉折印出來。動作：
 ///       tx、stop、toggle             開始發射、停止發射、按一下發射鈕
 ///       input=<名稱>、output=<名稱>   換音訊裝置（名稱的一部分；找不到就是系統預設）
-///       source=camera|video、mode=<編號>、scale=fill|fit
+///       source=camera|video|images、mode=<編號>、scale=fill|fit
+///       image=<n>                    圖片序列：下一張要送的改成第 n 張（1 起算）
 ///       settings                     執行功能表的「設定…」
 ///       resize=<寬>x<高>             把主視窗改成這個大小
 ///       click=<x>,<y>[,<視窗>]       在視窗裡按一下滑鼠（座標從視窗左上角算；視窗是 main、settings 或 popover，預設 main）
 ///       drag=<x1>,<y1>,<x2>,<y2>[,<視窗>]  按住滑鼠從第一點拖到第二點再放開（拉滑桿用），約 0.3 秒
 ///       menu=<文字>                  之後跳出的下拉選單（音訊裝置、序列埠、鏡頭）不真的跳出來，直接選標題含這段文字的那一項
-///       savepanel                    存檔或開檔的對話框開著時：印出預設的檔名，然後按取消
+///       savepanel                    存檔或開檔的對話框開著時：印出預設的檔名（存影片的對話框還有「印上訊雜比」勾了沒有），然後按取消
 ///                                    （對話框是系統另一個行程畫的，沒辦法從這裡替使用者按下「儲存」）
+///       savepanel=stamp              同上，但取消之前先按一下存影片對話框裡的「印上訊雜比」
 ///       modes                        打開發射模式選單
 ///       schedule=on|off|menu         打開、關掉定時發射；menu 是打開它的面板
 ///                                    （注意：開著的時候到了時間真的會發射，音訊送到設定的輸出裝置）
+///       receive=<n>                  假裝剛剛連續收到 n 張（內附的測試圖真的經過核心編碼、解碼一次，呼號 N0CALL、模式 12），
+///                                    不必真的有訊號就能看「最近收到」與存影片
 ///       select=<n>                   點「最近收到」的第 n 張（1 起算）
 ///       savevideo                    按「儲存影片」（會跳出存檔的對話框；接著用 savepanel 看預設檔名並取消）
 ///       canvas=<文字>                 改畫布要印的字並打開畫布；空的就是關掉
@@ -178,7 +185,9 @@ enum DebugOptions {
             case "mode": settings.txModeID = Int(value).flatMap { Modes.find($0)?.id } ?? Modes.defaultID
             case "source": settings.sourceKind = SourceKind(rawValue: value) ?? .camera
             case "loop": settings.loopVideo = value != "0"
+            case "loopimages": settings.loopImages = value != "0"
             case "snr": settings.showFrameSNR = value != "0"
+            case "stampsnr": settings.stampVideoSNR = value != "0"
             case "every":
                 if let minutes = Int(value), TransmitSchedule.intervals.contains(minutes) { settings.scheduleIntervalMinutes = minutes }
             case "busy": settings.scheduleSkipWhenBusy = value != "0"
@@ -202,6 +211,10 @@ enum DebugOptions {
         }
         if let path = environment["NBTV_DEBUG_VIDEO"] {
             model.openVideo(URL(fileURLWithPath: path)) { ok in log("開啟影片檔：\(ok ? "成功" : "失敗")") }
+        }
+        if let path = environment["NBTV_DEBUG_IMAGES"] {
+            let count = model.openImages([URL(fileURLWithPath: path)])
+            log("圖片序列：\(count) 張" + (count > 0 ? "，依序是 " + model.imageFiles.map(\.lastPathComponent).joined(separator: "、") : ""))
         }
         guard let script = environment["NBTV_DEBUG_SCRIPT"] else { return }
         AppModel.trace = { log($0) }
@@ -237,6 +250,9 @@ enum DebugOptions {
         case "source":
             log("發射來源改成 \(value)")
             model.setSourceKind(SourceKind(rawValue: value) ?? .camera)
+        case "image":
+            log("圖片序列：下一張要送的改成第 \(value) 張")
+            if let number = Int(value) { model.selectImage(number - 1) }
         case "mode":
             log("發射模式改成 \(value)")
             if let id = Int(value), Modes.find(id) != nil { model.settings.txModeID = id }
@@ -317,7 +333,14 @@ enum DebugOptions {
                 log("沒有開著的存檔或開檔對話框")
                 return
             }
-            log("\(panel is NSOpenPanel ? "開檔" : "存檔")對話框開著，預設檔名「\(panel.nameFieldStringValue)」；按取消")
+            // 存影片的對話框下方有我們自己加的核取方塊（「在每一張的左上角印上訊雜比」）
+            let box = panel.accessoryView?.subviews.compactMap { $0 as? NSButton }.first
+            if let box, value == "stamp" {
+                box.performClick(nil)
+                log("按了一下「\(box.title)」")
+            }
+            log("\(panel is NSOpenPanel ? "開檔" : "存檔")對話框開著，預設檔名「\(panel.nameFieldStringValue)」"
+                + (box.map { "，選項「\($0.title)」\($0.state == .on ? "勾著" : "沒有勾")" } ?? "") + "；按取消")
             panel.cancel(nil)
         case "modes":
             log("打開發射模式選單")
@@ -330,6 +353,22 @@ enum DebugOptions {
                 log("定時發射改成 \(value)")
                 model.setScheduleArmed(value == "on")
             }
+        case "receive":
+            // 測試圖輪流送：送出去的聲音直接交給另一個接收機解回來，一張一張照時間加進「最近收到」（最後一張是現在收到的）
+            let pictures = ["coffee", "rocket", "cat"].compactMap(Demo.testImage)
+            let count = max(1, Int(value) ?? 3)
+            guard !pictures.isEmpty, let mode = Modes.find(12) ?? Modes.all.first else { return }
+            let tx = CoreTransmitter()
+            tx.setMode(mode.id)
+            tx.setCallsign("N0CALL")
+            var audio = Demo.silence(seconds: 0.3)
+            for index in 0..<count { audio += tx.encode(rgb: pictures[index % pictures.count])?.samples ?? [] }
+            audio += tx.finish() + Demo.silence(seconds: 0.5)
+            let frames = Demo.receive(audio).flatMap(\.frames)
+            for (index, frame) in frames.enumerated() {
+                model.add(frame, time: Date().addingTimeInterval(-Double(frames.count - 1 - index) * mode.frameSeconds))
+            }
+            log("假裝收到 \(frames.count) 張（\(mode.label)，N0CALL）")
         case "select":
             if let index = Int(value), index >= 1, index <= model.history.count {
                 log("點最近收到的第 \(index) 張")
@@ -404,6 +443,7 @@ enum DebugOptions {
         log("設定：發射模式 \(model.settings.txModeID)，縮放 \(model.settings.scaleMode.rawValue)，來源 \(model.settings.sourceKind.rawValue)，"
             + "PTT \(model.settings.pttSummary)，輸出音量 \(Int(model.settings.outputLevelDb)) dB，循環播放 \(model.settings.loopVideo)，"
             + "畫布 \(model.settings.canvasStyle.map { "「\($0.text)」（\($0.position.rawValue)）" } ?? "關")，"
+            + "存影片時印上訊雜比 \(model.settings.stampVideoSNR)，"
             + "模式選單\(model.showModeMenu ? "開著" : "關著")")
         log("定時發射：\(model.scheduleArmed ? "開著" : "關著")，每 \(model.settings.scheduleIntervalMinutes) 分鐘，"
             + "下一次 \(model.scheduleNextFire.map { TransmitSchedule.clockText($0) } ?? "—")，頂列的字「\(model.scheduleSummary)」，"
@@ -411,6 +451,7 @@ enum DebugOptions {
         log("狀態：\(phase)，同步 \(model.synced)，收到 \(model.history.count) 張（主畫面那一段 \(model.displayedSequence.count) 張），輸入音量 \(String(format: "%.1f", model.inputLevelDb)) dB，"
             + "發射第 \(model.txFrameNumber) 張／已送出 \(model.txFramesSent) 張，輸入「\(model.inputDeviceName)」，輸出「\(model.outputDeviceName)」，"
             + "影片 \(model.videoPlaying ? "播放中" : "暫停") \(String(format: "%.1f", model.videoPosition))／\(String(format: "%.1f", model.videoDuration)) 秒，"
+            + "圖片序列 \(model.imageFiles.count) 張" + (model.nextImage.map { "（下一張第 \(model.imageIndex + 1) 張「\($0.lastPathComponent)」，循環播放 \(model.settings.loopImages)）" } ?? "") + "，"
             + "訊息：\(model.notice ?? "無")，來源訊息：\(model.sourceMessage ?? "無")，PTT 的警告：\(model.pttWarning ?? "無")")
         for frame in model.history.prefix(6) {
             log("  收到：\(Modes.find(frame.modeID)?.label ?? "?")，呼號 \(frame.callsign)，第 \(frame.sequence + 1) 張\(model.isDisplayed(frame) ? "（主畫面顯示中）" : "")")

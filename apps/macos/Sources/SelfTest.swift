@@ -7,7 +7,9 @@
 //   2. 影片檔來源（做一段影片、開啟、跳到指定位置、取一格），以及用影片當來源的整個發射流程
 //      （音訊輸出換成模擬的、PTT 換成記錄用的：按下發射自動播放，播完自動停止、放開 PTT），
 //      以及定時發射（另外把時鐘換成假的：到了時間自動發射、該跳過的時候跳過、超過上限自動停止）
-//      把一段收到的畫面存成影片（讀回來檢查格式與每一格）、畫布（印在送出畫面上的字，含經過整個發射流程）
+//      把一段收到的畫面存成影片（讀回來檢查格式與每一格；勾了的話每一張的左上角印著它的訊雜比）、
+//      畫布（印在送出畫面上的字，含經過整個發射流程）、
+//      圖片序列（挑圖片檔與排序、照記載的方向轉正，以及用它當來源的整個發射流程：依序送、送完自動停止、沒送出去的下次再送）
 //   3. rigctld 的 PTT（要給 --rig，對著真的 rigctld 測）；用 CAT 指令的 PTT 用 Hamlib 不接電台的示範機測
 //      （自己開的 rigctld，只聽本機的臨時連接埠，不碰任何序列埠；這台電腦沒有裝 Hamlib 就略過）
 //   4. 音訊輸出（需要 BlackHole 虛擬音效卡）
@@ -176,7 +178,10 @@ enum SelfTest {
         run("videofile") { testVideoFile(rocket) }
         run("history") { testReceivedHistory(coffee) }
         run("sequence") { testSequenceVideo(coffee, rocket) }
+        run("sequence-stamp") { testVideoStamp(coffee, rocket) }
         run("videotransmit") { testVideoTransmit(rocket) }
+        run("images") { testImageFiles(coffee) }
+        run("images-transmit") { testImageTransmit([coffee, rocket, Demo.testImage("cat") ?? coffee, colorBars()]) }
         run("canvas") { testCanvas(coffee) }
         run("canvas-onair") { testCanvasOnAir(rocket) }
         run("schedule") { testScheduleTimes() }
@@ -751,7 +756,9 @@ enum SelfTest {
     // MARK: 把一段畫面存成影片
 
     /// 讀回一個影片檔：編碼格式（四個字元的代碼）、畫面大小、格率、長度，以及每一格解出來的畫面（每 10×10 取中間那一點，縮回 96×72 的 RGB）。
-    private static func readVideo(_ url: URL) -> (codec: String, size: CGSize, frameRate: Float, seconds: Double, frames: [Data])? {
+    /// corner 不是 nil 時，corners 是每一格左上角那麼大的一塊、原尺寸的 RGB（看印在左上角的字用）。
+    private static func readVideo(_ url: URL, corner: (width: Int, height: Int)? = nil)
+        -> (codec: String, size: CGSize, frameRate: Float, seconds: Double, frames: [Data], corners: [Data])? {
         let asset = AVURLAsset(url: url)
         var loaded: (track: AVAssetTrack, codec: String, size: CGSize, rate: Float, seconds: Double)?
         var finished = false
@@ -777,6 +784,7 @@ enum SelfTest {
         reader.add(output)
         guard reader.startReading() else { return nil }
         var frames: [Data] = []
+        var corners: [Data] = []
         while let sample = output.copyNextSampleBuffer() {
             guard let buffer = CMSampleBufferGetImageBuffer(sample) else { continue }
             CVPixelBufferLockBaseAddress(buffer, .readOnly)
@@ -799,8 +807,18 @@ enum SelfTest {
                 }
             }
             frames.append(rgb)
+            if let corner {
+                var block = Data(capacity: corner.width * corner.height * 3)
+                for y in 0..<corner.height {
+                    for x in 0..<corner.width {
+                        let source = pixels + y * stride + x * 4   // BGRA
+                        block.append(contentsOf: [source[2], source[1], source[0]])
+                    }
+                }
+                corners.append(block)
+            }
         }
-        return (loaded.codec, loaded.size, loaded.rate, loaded.seconds, frames)
+        return (loaded.codec, loaded.size, loaded.rate, loaded.seconds, frames, corners)
     }
 
     /// 「儲存影片」：哪些畫面算同一段（同一個呼號、空檔不到 10 秒），以及存出來的影片檔。
@@ -896,6 +914,136 @@ enum SelfTest {
         report(name, false, problems.joined(separator: "；"))
     }
 
+    /// 一張影像左上角 width×height 那一塊的 RGB（由上往下、由左往右）。影像要是 SequenceVideo.frameImage 做出來的那種（BGRA）。
+    private static func cornerRGB(of image: CGImage?, width: Int, height: Int) -> Data? {
+        guard let image, image.width >= width, image.height >= height, image.bitsPerPixel == 32,
+              let data = image.dataProvider?.data as Data? else { return nil }
+        var rgb = Data(capacity: width * height * 3)
+        for y in 0..<height {
+            for x in 0..<width {
+                let offset = y * image.bytesPerRow + x * 4   // B、G、R、A
+                rgb.append(contentsOf: [data[offset + 2], data[offset + 1], data[offset]])
+            }
+        }
+        return rgb
+    }
+
+    /// 兩塊同樣大小（寬 width）的 RGB 在 rect 那個範圍裡平均每個值差多少。
+    private static func difference(_ a: Data, _ b: Data, width: Int, in rect: CGRect) -> Double {
+        guard a.count == b.count, width > 0, a.count % (width * 3) == 0 else { return 255 }
+        let height = a.count / (width * 3)
+        let xs = max(0, Int(rect.minX))..<min(width, Int(rect.maxX.rounded(.up)))
+        let ys = max(0, Int(rect.minY))..<min(height, Int(rect.maxY.rounded(.up)))
+        guard !xs.isEmpty, !ys.isEmpty else { return 255 }
+        var total = 0
+        for y in ys {
+            for index in (3 * (y * width + xs.lowerBound))..<(3 * (y * width + xs.upperBound)) { total += abs(Int(a[index]) - Int(b[index])) }
+        }
+        return Double(total) / Double(xs.count * ys.count * 3)
+    }
+
+    /// 存成影片時「在每一張的左上角印上訊雜比」。影片實際寫出來再讀回：
+    ///   * 勾了：每一張的左上角是它自己的訊雜比（和預期的樣子比，而且比「印上別張的訊雜比」像得多），那一塊以外的畫面不受影響
+    ///   * 沒勾：左上角就是原來的畫面
+    ///   * 存檔對話框裡的核取方塊照設定顯示，按一下就改設定
+    private static func testVideoStamp(_ coffee: Data, _ rocket: Data) {
+        let name = "存成影片時在每一張的左上角印上訊雜比"
+        guard let cat = Demo.testImage("cat"), let mode = Modes.find(12) ?? Modes.all.first else {
+            report(name, false, "少了測試圖或模式")
+            return
+        }
+        let pictures = [coffee, rocket, cat]
+        let images = pictures.compactMap { NBTV.image(fromRGB: $0) }
+        guard images.count == 3 else {
+            report(name, false, "測試圖轉不成影像")
+            return
+        }
+        // 三張各隔一秒收到，訊雜比都不一樣（有一張是負的）
+        let levels = [12.3, -4.7, 28.0]
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+        let frames = (0..<3).map {
+            AppModel.ReceivedFrame(image: images[$0], modeID: mode.id, callsign: "N0CALL", sequence: $0, time: base.addingTimeInterval(Double($0)), snrDb: levels[$0])
+        }
+        var problems: [String] = []
+        let labels = AppModel.videoTimeline(for: frames, stampSNR: true).pictures.map { $0.label ?? "（沒有）" }
+        if labels != ["SNR 12.3 dB", "SNR −4.7 dB", "SNR 28.0 dB"] { problems.append("要印的字是 \(labels.joined(separator: "、"))") }
+        if AppModel.videoTimeline(for: frames).pictures.contains(where: { $0.label != nil }) { problems.append("沒有要印的時候時間軸裡卻有字") }
+
+        // 那一塊字佔的位置：在左上角、不大（蓋住的畫面不到 4%）
+        let cornerWidth = 400, cornerHeight = 100
+        let rects = labels.map { SequenceVideo.stampRect(for: $0) }
+        for (label, rect) in zip(labels, rects) where rect.minX < 4 || rect.minY < 4 || rect.maxX > CGFloat(cornerWidth) || rect.maxY > CGFloat(cornerHeight)
+            || rect.width * rect.height > 0.04 * CGFloat(SequenceVideo.width * SequenceVideo.height) {
+            problems.append("「\(label)」那一塊的位置是 \(Int(rect.minX)),\(Int(rect.minY)) 起 \(Int(rect.width))×\(Int(rect.height))")
+        }
+
+        let settings = AppSettings(store: nil)
+        let model = AppModel(settings: settings, live: false)
+        if settings.stampVideoSNR { problems.append("預設就會印訊雜比") }
+        /// 照設定存一次影片再讀回來：每一格縮回 96×72 的畫面，以及每一格左上角那一塊原尺寸的畫面
+        func export(stamp: Bool) -> (frames: [Data], corners: [Data])? {
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("nbtv-selftest-stamp-\(getpid())-\(stamp ? 1 : 0).mp4")
+            defer { try? FileManager.default.removeItem(at: url) }
+            settings.stampVideoSNR = stamp
+            var result: Result<SequenceVideo.Summary, Error>?
+            model.exportSequence(frames, to: url) { result = $0 }
+            guard Demo.wait(timeout: 60, until: { result != nil }), case .success? = result,
+                  let video = readVideo(url, corner: (cornerWidth, cornerHeight)), video.frames.count == video.corners.count else { return nil }
+            return (video.frames, video.corners)
+        }
+        guard let stamped = export(stamp: true), let plain = export(stamp: false), stamped.frames.count == plain.frames.count,
+              stamped.frames.count >= 2 * 24 + 12 else {
+            report(name, false, (problems + ["影片存不出來或讀不回來"]).joined(separator: "；"))
+            return
+        }
+        var details: [String] = []
+        for index in 0..<3 {
+            let at = 24 * index + 12   // 這一張顯示到一半的那一格
+            func expected(_ label: String?) -> Data? {
+                cornerRGB(of: SequenceVideo.frameImage(SequenceVideo.Picture(image: images[index], start: 0, label: label)), width: cornerWidth, height: cornerHeight)
+            }
+            guard let own = expected(labels[index]), let bare = expected(nil) else {
+                problems.append("第 \(index + 1) 張預期的樣子算不出來")
+                continue
+            }
+            let rect = rects[index]
+            let match = difference(stamped.corners[at], own, width: cornerWidth, in: rect)
+            let unstamped = difference(stamped.corners[at], bare, width: cornerWidth, in: rect)
+            // 印上別張的訊雜比會是什麼樣子：兩塊字佔的範圍合起來比
+            var confused = 255.0
+            for other in 0..<3 where other != index {
+                guard let wrong = expected(labels[other]) else { continue }
+                let both = rect.union(rects[other])
+                confused = min(confused, difference(stamped.corners[at], wrong, width: cornerWidth, in: both)
+                                   - difference(stamped.corners[at], own, width: cornerWidth, in: both))
+            }
+            if match > 12 || unstamped < 20 || confused < 5 {
+                problems.append(String(format: "第 %d 張左上角不是「%@」（和預期的平均差 %.1f、和沒印字的差 %.1f、印成別張的話多差 %.1f）", index + 1, labels[index],
+                                       match, unstamped, confused))
+            }
+            // 沒勾的那一份：左上角是原來的畫面
+            let clean = difference(plain.corners[at], bare, width: cornerWidth, in: rect)
+            if clean > 12 { problems.append(String(format: "沒有勾的時候第 %d 張的左上角也被改了（和原來的畫面平均差 %.1f）", index + 1, clean)) }
+            // 那一塊以外：和原圖一樣，勾不勾沒有差別（那一塊在 96×72 的畫面裡不超過最上面 8 列）
+            let rest = difference(stamped.frames[at], pictures[index], rows: 8..<NBTV.imageHeight)
+            let same = difference(stamped.frames[at], plain.frames[at], rows: 8..<NBTV.imageHeight)
+            if rest > 8 || same > 3 { problems.append(String(format: "第 %d 張印字以外的地方變了（和原圖平均差 %.1f、和沒勾的差 %.1f）", index + 1, rest, same)) }
+            details.append(String(format: "第 %d 張「%@」和預期的平均差 %.1f／255（沒印字的話 %.0f）", index + 1, labels[index], match, unstamped))
+        }
+
+        // 存檔對話框裡的核取方塊：照設定顯示；按一下，設定跟著改（下次存影片時沿用）
+        settings.stampVideoSNR = true
+        let options = VideoSaveOptions(settings: settings)
+        if options.stampBox.state != .on { problems.append("設定是要印，核取方塊卻沒有勾") }
+        options.stampBox.performClick(nil)
+        if settings.stampVideoSNR || options.stampBox.state != .off { problems.append("按了核取方塊，設定沒有跟著改") }
+        if VideoSaveOptions(settings: settings).stampBox.state != .off { problems.append("設定是不印，新開的對話框卻勾著") }
+        let box = options.stampBox.frame
+        if box.width < options.stampBox.fittingSize.width || !options.view.bounds.contains(box) { problems.append("核取方塊的字放不下") }
+        report(name, problems.isEmpty, problems.isEmpty ? details.joined(separator: "；") + "；沒勾的時候左上角是原來的畫面；核取方塊按了會改設定"
+                   : problems.joined(separator: "；"))
+    }
+
     // MARK: 影片來源的發射流程
 
     /// 記錄用的 PTT：把每一次按下、放開記下來，不碰任何硬體。
@@ -904,8 +1052,11 @@ enum SelfTest {
         private var states: [Bool] = []
         /// 放開要花幾秒（像真的 PTT 要等電台回覆那樣）；用來分辨「有等放開做完」和「只是把放開排進佇列」
         var releaseDelay = 0.0
+        /// 按下要花幾秒：這段時間裡發射停在「準備中」，用來測還沒開始送就取消
+        var pressDelay = 0.0
         func key(_ on: Bool) throws {
             if !on, releaseDelay > 0 { usleep(UInt32(releaseDelay * 1_000_000)) }
+            if on, pressDelay > 0 { usleep(UInt32(pressDelay * 1_000_000)) }
             lock.lock()
             states.append(on)
             lock.unlock()
@@ -936,6 +1087,16 @@ enum SelfTest {
             samples.removeAll()
             return result
         }
+    }
+
+    /// 八條直的彩條（96×72）：和內附的三張測試圖都不像，當第四張圖用。
+    private static func colorBars() -> Data {
+        let colors: [[UInt8]] = [[255, 255, 255], [255, 255, 0], [0, 255, 255], [0, 255, 0], [255, 0, 255], [255, 0, 0], [0, 0, 255], [0, 0, 0]]
+        var rgb = Data(capacity: NBTV.rgbBytes)
+        for _ in 0..<NBTV.imageHeight {
+            for x in 0..<NBTV.imageWidth { rgb.append(contentsOf: colors[x * colors.count / NBTV.imageWidth]) }
+        }
+        return rgb
     }
 
     /// 兩張 96×72 的畫面平均每個值差多少。
@@ -1189,6 +1350,347 @@ enum SelfTest {
         report(name, reached && stayed && restarted,
                String(format: "%@；暫停之後停在 %.2f 秒%@；再播放%@從頭來", reached ? "播到了結尾" : "一直沒有播到結尾", rested,
                       stayed ? "" : "（沒有停住）", restarted ? "" : "沒有"))
+    }
+
+    // MARK: 圖片序列
+
+    /// 把一段文字寫成檔案（做「不是圖片」「壞掉的圖片」用）。
+    private static func writeText(_ text: String, to url: URL) {
+        try? Data(text.utf8).write(to: url)
+    }
+
+    /// 圖片序列的檔案：選到的資料夾換成它裡面的圖片、照檔名排（數字照大小、不分大小寫）、不是圖片的與隱藏的略過、
+    /// 不往子資料夾裡找、同一個檔案只算一次；讀圖時照相片記載的方向轉正，大圖縮到夠用的大小，壞掉的檔案讀不進來。
+    private static func testImageFiles(_ picture: Data) {
+        let name = "圖片序列：挑出圖片檔、照檔名排、照記載的方向轉正"
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("nbtv-selftest-images-\(getpid())", isDirectory: true)
+        let inner = folder.appendingPathComponent("sub", isDirectory: true)
+        try? FileManager.default.removeItem(at: folder)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        guard (try? FileManager.default.createDirectory(at: inner, withIntermediateDirectories: true)) != nil,
+              let image = NBTV.image(fromRGB: picture) else {
+            report(name, false, "暫存資料夾建不起來")
+            return
+        }
+        var problems: [String] = []
+        for file in ["10.png", "2.png", "1.png", "b.JPG", "A.jpg", ".hidden.png", "sub/inner.png"] {
+            if !Demo.writeImage(image, to: folder.appendingPathComponent(file)) { problems.append("寫不出 \(file)") }
+        }
+        writeText("不是圖片", to: folder.appendingPathComponent("notes.txt"))
+        writeText("<svg xmlns=\"http://www.w3.org/2000/svg\"/>", to: folder.appendingPathComponent("vector.svg"))
+        writeText("不是影片", to: folder.appendingPathComponent("clip.mp4"))
+
+        func names(_ selection: [URL]) -> [String] { ImageSequenceSource.files(from: selection).map(\.lastPathComponent) }
+        let expected = ["1.png", "2.png", "10.png", "A.jpg", "b.JPG"]
+        let whole = names([folder])
+        if whole != expected { problems.append("選資料夾：得到 \(whole.joined(separator: "、"))，預期 \(expected.joined(separator: "、"))") }
+        // 一個一個點檔案、順序亂的、同一個檔案又隨資料夾再選到一次、夾著不是圖片的：結果一樣
+        let mixed = names([folder.appendingPathComponent("10.png"), folder.appendingPathComponent("notes.txt"), folder,
+                           folder.appendingPathComponent("2.png"), folder.appendingPathComponent("不存在.png")])
+        if mixed != expected { problems.append("混著選：得到 \(mixed.joined(separator: "、"))") }
+        let picked = names([folder.appendingPathComponent("b.JPG"), folder.appendingPathComponent("10.png"), folder.appendingPathComponent("2.png")])
+        if picked != ["2.png", "10.png", "b.JPG"] { problems.append("只選三個檔案：得到 \(picked.joined(separator: "、"))") }
+        if names([inner]) != ["inner.png"] { problems.append("選子資料夾：得到 \(names([inner]).joined(separator: "、"))") }
+        if !names([folder.appendingPathComponent("notes.txt"), folder.appendingPathComponent("vector.svg")]).isEmpty {
+            problems.append("不是圖片（或讀不進來的類型）的檔案被當成圖片")
+        }
+
+        // 記載的方向：存進去的像素不動，另外記「看的時候要轉幾度」。讀進來的要和自己把像素轉好的一樣
+        var details = ["資料夾裡 \(whole.count) 張：\(whole.joined(separator: "、"))"]
+        let turned: [(file: String, orientation: Int, turns: Int)] = [("turn6.jpg", 6, 1), ("turn3.tiff", 3, 2), ("turn8.jpg", 8, 3), ("turn6.heic", 6, 1)]
+        for item in turned {
+            let url = folder.appendingPathComponent("sub/" + item.file)
+            guard Demo.writeImage(image, to: url, scale: 10, orientation: item.orientation) else {
+                // 這台電腦寫不出 HEIC（沒有那種編碼器）就不測它；其他的一定要寫得出來
+                if item.file.hasSuffix(".heic") { details.append("\(item.file)：這台電腦寫不出來，略過") } else { problems.append("寫不出 \(item.file)") }
+                continue
+            }
+            guard let loaded = ImageSequenceSource.load(url), let actual = FrameScaler.scale(loaded.image, mode: .fit),
+                  let upright = FrameScaler.scale(image, mode: .fit, quarterTurns: item.turns), let ignored = FrameScaler.scale(image, mode: .fit) else {
+                // HEIC 要靠這台電腦的 HEVC 解碼器（虛擬機不一定有）：讀不進來就不測它；JPEG、TIFF 一定要讀得進來
+                if item.file.hasSuffix(".heic") { details.append("\(item.file)：這台電腦讀不進來，略過") } else { problems.append("\(item.file) 讀不進來") }
+                continue
+            }
+            let sideways = item.turns % 2 != 0
+            let size = CGSize(width: (sideways ? image.height : image.width) * 10, height: (sideways ? image.width : image.height) * 10)
+            let mean = difference(actual, upright), wrong = item.turns == 2 ? difference(actual, ignored) : 255
+            // 轉 180 度的寬高不變，「沒有照方向轉」要靠內容看：和沒轉的那一張要差很多
+            if loaded.size != size || mean > 6 || wrong < 20 {
+                problems.append(String(format: "%@：大小 %d×%d（預期 %d×%d），和轉正的平均差 %.1f／255", item.file, Int(loaded.size.width), Int(loaded.size.height),
+                                       Int(size.width), Int(size.height), mean))
+            }
+            // 960×720 的圖不整張解開：短邊留 384 像素（輸出的四倍）就夠
+            if min(loaded.image.width, loaded.image.height) != 384 {
+                problems.append("\(item.file)：讀進來是 \(loaded.image.width)×\(loaded.image.height)，短邊預期 384")
+            }
+            details.append(String(format: "%@（方向 %d）%d×%d、平均差 %.1f", item.file, item.orientation, Int(loaded.size.width), Int(loaded.size.height), mean))
+        }
+        // 小圖不放大；壞掉的檔案（副檔名是圖片、內容不是）讀不進來
+        if let small = ImageSequenceSource.load(folder.appendingPathComponent("1.png")) {
+            if small.image.width != image.width || small.image.height != image.height || small.size != CGSize(width: image.width, height: image.height) {
+                problems.append("96×72 的小圖讀進來變成 \(small.image.width)×\(small.image.height)")
+            }
+            if let rgb = FrameScaler.scale(small.image, mode: .fill), difference(rgb, picture) > 0.5 {
+                problems.append(String(format: "96×72 的圖讀進來再縮成 96×72，和原圖平均差 %.2f", difference(rgb, picture)))
+            }
+        } else {
+            problems.append("1.png 讀不進來")
+        }
+        let broken = folder.appendingPathComponent("broken.png")
+        writeText("這不是 PNG", to: broken)
+        if !ImageSequenceSource.isImage(broken) || ImageSequenceSource.load(broken) != nil { problems.append("壞掉的圖片檔沒有被認出來") }
+        report(name, problems.isEmpty, problems.isEmpty ? details.joined(separator: "；") : problems.joined(separator: "；"))
+    }
+
+    /// 用圖片序列當來源的整個發射流程。和影片來源的測試一樣用 app 真正的狀態物件，音訊輸出換成模擬的、PTT 換成記錄用的：
+    ///   * 選了資料夾，預覽是第一張；按下發射，照檔名的順序一張一張送，每張送一次，送完自動停止、放開 PTT，位置回到第一張
+    ///   * 送到一半按停止：這一張送完就停；已經取走、還沒送出去的那一張退回去，再按發射從它接著送到最後一張（沒有哪一張被跳過或重複）
+    ///   * 立刻停止（最後一張被切掉）：被切掉的那一張下一次重送
+    ///   * 還沒開始送就取消：第一張沒有被跳過
+    ///   * 勾了循環播放：送完最後一張再從第一張來，不會自己停
+    ///   * 只有一張：送一張就停
+    ///   * 讀不到的檔案從序列裡拿掉、在底列說明，其餘的照送
+    ///   * 上次選的那一批（設定裡記的路徑）啟動時自動帶回來，不見了的檔案略過
+    private static func testImageTransmit(_ pictures: [Data]) {
+        let name = "圖片序列：依序一張一張送、送完自動停止、沒送出去的下次再送"
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("nbtv-selftest-sequence-\(getpid())", isDirectory: true)
+        try? FileManager.default.removeItem(at: folder)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        // 檔名故意讓「照字元排」和「數字照大小排」的結果不同：正確的順序是 2、3、10、11
+        let fileNames = ["pic2.png", "pic3.png", "pic10.png", "pic11.png"]
+        var references: [Data] = []
+        for (index, rgb) in pictures.prefix(4).enumerated() {
+            let url = folder.appendingPathComponent(fileNames[index])
+            guard let image = NBTV.image(fromRGB: rgb), Demo.writeImage(image, to: url, scale: 4),
+                  let loaded = ImageSequenceSource.load(url), let reference = FrameScaler.scale(loaded.image, mode: .fill) else { break }
+            references.append(reference)
+        }
+        guard references.count == 4 else {
+            report(name, false, "測試用的圖片檔做不出來")
+            return
+        }
+        /// 一張收到的畫面最像哪一張圖片（0 起算）
+        func nearest(_ rgb: Data) -> Int {
+            references.indices.min { difference(rgb, references[$0]) < difference(rgb, references[$1]) } ?? -1
+        }
+
+        setenv("NBTV_NO_DEVICES", "1", 1)   // 狀態物件啟動時不開輸入裝置與鏡頭
+        let settings = AppSettings(store: nil)
+        settings.callsign = "N0CALL"
+        settings.sourceKind = .images
+        settings.txModeID = 12   // 模式 12：每張 1.04 秒
+        let ptt = RecordingPTT()
+        settings.debugPTTDriver = { ptt }
+        let model = AppModel(settings: settings, live: true)
+        let sent = SampleCollector()
+        model.debugUseSimulatedOutput { sent.append($0) }
+        var traces: [String] = []
+        let previousTrace = AppModel.trace
+        AppModel.trace = { traces.append($0) }
+        defer { AppModel.trace = previousTrace }
+        model.start()
+        defer { model.shutdown() }
+
+        var problems: [String] = []
+        var details: [String] = []
+        if model.sourceMessage == nil, model.canTransmit { problems.append("還沒選圖片就可以發射") }
+        if model.openImages([folder]) != 4 || model.imageFiles.map(\.lastPathComponent) != fileNames {
+            problems.append("選資料夾之後的順序是 \(model.imageFiles.map(\.lastPathComponent).joined(separator: "、"))")
+        }
+        guard Demo.wait(timeout: 10, until: { model.canTransmit && model.sourcePreview != nil }) else {
+            report(name, false, "選了圖片之後一直沒有來源畫面")
+            return
+        }
+        if model.imageIndex != 0 || bytes(of: model.sourcePreview).map({ difference($0, references[0]) > 0.5 }) != false
+            || model.sourceSize != CGSize(width: 384, height: 288) {
+            problems.append("選了圖片之後，預覽不是第一張")
+        }
+        // 位置移到第三張：預覽跟著換（預覽是「下一張要送的」）
+        model.selectImage(2)
+        if !Demo.wait(timeout: 5, until: { bytes(of: model.sourcePreview).map { difference($0, references[2]) < 0.5 } == true }) {
+            problems.append("位置移到第三張，預覽沒有跟著換")
+        }
+        model.selectImage(99)
+        if model.imageIndex != 3 { problems.append("位置超出範圍時沒有停在最後一張") }
+        model.selectImage(0)
+
+        /// 等這一次發射結束，回傳解回來的每一張各是第幾張圖片；label 用在出問題時的說明。
+        /// expectNotice：這一次底列本來就該有訊息；cutShort：最後一張是被切掉的，收到解不出來的殘幀不算問題。
+        func finish(_ label: String, expectNotice: Bool = false, cutShort: Bool = false) -> [Int] {
+            if !Demo.wait(timeout: 25, until: { model.txPhase == .idle }) {
+                problems.append("\(label)：發射沒有結束")
+                model.abortTransmit()
+                _ = Demo.wait(timeout: 10) { model.txPhase == .idle }
+            }
+            Demo.spin(0.3)   // PTT 的放開在背景佇列上做
+            let keyed = ptt.take()
+            if !keyed.isEmpty, keyed != [true, false] { problems.append("\(label)：PTT 不是「按下一次、放開一次」") }
+            if !expectNotice, let notice = model.notice { problems.append("\(label)：\(notice)") }
+            let frames = Demo.receive(sent.take() + Demo.silence(seconds: 0.5)).flatMap(\.frames)
+            let good = frames.filter { $0.decoded && $0.headerOK && $0.callsign == "N0CALL" }
+            if good.count != frames.count, !cutShort { problems.append("\(label)：收到 \(frames.count) 張，其中解得出來的只有 \(good.count) 張") }
+            return good.compactMap { $0.rgb.map(nearest) }
+        }
+        func begin() {
+            _ = sent.take()
+            _ = ptt.take()
+            traces.removeAll()
+            model.startTransmit()
+        }
+        func text(_ order: [Int]) -> String { order.isEmpty ? "沒有" : order.map { String($0 + 1) }.joined(separator: "、") }
+
+        // 1. 從頭送到尾：四張各一次，送完自己停，位置回到第一張
+        begin()
+        var order = finish("從頭送到尾")
+        if order != [0, 1, 2, 3] || model.txFramesSent != 4 {
+            problems.append("從頭送到尾：送出 \(model.txFramesSent) 張，解回來的是第 \(text(order)) 張，預期 1、2、3、4")
+        }
+        if model.imageIndex != 0 { problems.append("送完之後位置沒有回到第一張（在第 \(model.imageIndex + 1) 張）") }
+        details.append("四張照檔名的順序各送一次、自動停止")
+
+        // 2. 第二張送到後半才按停止：第三張這時已經取走（編好排進佇列，或還在編），不會送出去，要退回去
+        begin()
+        if Demo.wait(timeout: 15, until: { model.txPhase == .transmitting && model.imageIndex == 3 }) {
+            Demo.spin(0.25)
+            model.stopTransmit()
+            let rolledBack = model.imageIndex
+            order = finish("送到一半按停止")
+            let how = traces.contains { $0.contains("已經排進佇列但還沒開始播") } ? "已經排進佇列" : (traces.contains { $0.contains("剛編好：不送") } ? "還在編碼" : "不明")
+            if order != [0, 1] { problems.append("送到一半按停止：解回來的是第 \(text(order)) 張，預期 1、2") }
+            if rolledBack != 2 || model.imageIndex != 2 {
+                problems.append("送到一半按停止：取走卻沒送出去的第三張沒有退回去（按停止之後位置在第 \(rolledBack + 1) 張，結束時在第 \(model.imageIndex + 1) 張）")
+            }
+            // 預覽也跟著回到第三張
+            if !Demo.wait(timeout: 5, until: { bytes(of: model.sourcePreview).map { difference($0, references[2]) < 0.5 } == true }) {
+                problems.append("送到一半按停止：預覽沒有回到下一張要送的那一張")
+            }
+            // 再按一次：從第三張接著送到最後一張
+            begin()
+            order = finish("停下之後再按一次")
+            if order != [2, 3] || model.imageIndex != 0 { problems.append("停下之後再按一次：解回來的是第 \(text(order)) 張，預期 3、4") }
+            details.append("第二張送到後半按停止（第三張\(how)）→ 只送出 1、2，再按一次接著送 3、4")
+        } else {
+            problems.append("送到一半按停止：一直沒有送到第二張")
+            model.abortTransmit()
+            _ = finish("送到一半按停止")
+        }
+
+        // 3. 第二張才剛取走就按停止（多半還在編碼）：第一張送完就停，第二張退回去
+        model.selectImage(0)
+        begin()
+        if Demo.wait(timeout: 15, until: { model.txPhase == .transmitting && model.imageIndex == 2 }) {
+            model.stopTransmit()
+            let rolledBack = model.imageIndex
+            order = finish("剛取走下一張就按停止")
+            let how = traces.contains { $0.contains("已經排進佇列但還沒開始播") } ? "已經排進佇列" : (traces.contains { $0.contains("剛編好：不送") } ? "還在編碼" : "不明")
+            if order != [0] || rolledBack != 1 || model.imageIndex != 1 {
+                problems.append("剛取走下一張就按停止：解回來的是第 \(text(order)) 張（預期 1），位置在第 \(model.imageIndex + 1) 張（預期 2）")
+            }
+            details.append("剛取走第二張就按停止（第二張\(how)）→ 只送出 1，位置回到 2")
+        } else {
+            problems.append("剛取走下一張就按停止：一直沒有取到第二張")
+            model.abortTransmit()
+            _ = finish("剛取走下一張就按停止")
+        }
+
+        // 4. 立刻停止：正在送的第二張被切掉，對方解不出來；下一次從它重送
+        model.selectImage(0)
+        begin()
+        if Demo.wait(timeout: 15, until: { model.txPhase == .transmitting && model.txFrameNumber == 2 }) {
+            model.abortTransmit()
+            let rolledBack = model.imageIndex
+            order = finish("立刻停止", expectNotice: true, cutShort: true)
+            if order != [0] || rolledBack != 1 { problems.append("立刻停止：解回來的是第 \(text(order)) 張（預期 1），位置在第 \(rolledBack + 1) 張（預期 2）") }
+            details.append("第二張送到一半立刻停止 → 位置回到 2")
+        } else {
+            problems.append("立刻停止：一直沒有送到第二張")
+            model.abortTransmit()
+            _ = finish("立刻停止", expectNotice: true, cutShort: true)
+        }
+        model.notice = nil
+
+        // 5. 還沒開始送就取消。先是按下發射馬上又按停止；再來讓 PTT 慢一點，等第一張已經取走（位置移到第二張）、還在等 PTT 時取消
+        model.selectImage(0)
+        begin()
+        model.stopTransmit()
+        Demo.spin(0.5)
+        if model.txPhase != .idle || model.imageIndex != 0 { problems.append("按下發射馬上取消：位置跑到第 \(model.imageIndex + 1) 張") }
+        ptt.pressDelay = 0.6
+        begin()
+        if Demo.wait(timeout: 10, until: { model.txPhase == .starting && model.imageIndex == 1 }) {
+            model.stopTransmit()
+            if model.txPhase != .idle || model.imageIndex != 0 { problems.append("等 PTT 的時候取消：取走的第一張沒有退回去（位置在第 \(model.imageIndex + 1) 張）") }
+        } else {
+            problems.append("等 PTT 的時候取消：沒有等到「第一張已經取走、PTT 還沒按好」的時刻")
+        }
+        ptt.pressDelay = 0
+        _ = Demo.wait(timeout: 10) { model.txPhase == .idle }
+        Demo.spin(1.0)   // 等那一次慢的 PTT 按下、放開都做完
+        if ptt.take().last == true { problems.append("還沒開始送就取消：PTT 還按著") }
+        _ = sent.take()
+        model.notice = nil
+        details.append("還沒開始送就取消，第一張沒有被跳過")
+
+        // 6. 循環播放：送完第四張再從第一張來，不會自己停
+        settings.loopImages = true
+        model.selectImage(0)
+        begin()
+        if Demo.wait(timeout: 20, until: { model.txPhase == .idle || model.txFramesSent >= 5 }), model.txPhase == .transmitting {
+            model.stopTransmit()
+            order = finish("循環播放")
+            if Array(order.prefix(5)) != [0, 1, 2, 3, 0] { problems.append("循環播放：解回來的是第 \(text(order)) 張，預期 1、2、3、4、1…") }
+            details.append("循環播放時送了第 \(text(order)) 張，按停止才結束")
+        } else {
+            problems.append("循環播放：送不到五張就停了")
+            _ = finish("循環播放")
+        }
+        settings.loopImages = false
+
+        // 7. 只選一張：送一張就停
+        if model.openImages([folder.appendingPathComponent(fileNames[1])]) != 1 || !Demo.wait(timeout: 10, until: { model.canTransmit }) {
+            problems.append("只選一張：沒有來源畫面")
+        } else {
+            begin()
+            order = finish("只選一張")
+            if order != [1] || model.txFramesSent != 1 { problems.append("只選一張：送出 \(model.txFramesSent) 張，解回來的是第 \(text(order)) 張") }
+            details.append("只有一張時送一張就停")
+        }
+
+        // 8. 讀不到的檔案：排在最前面的在預覽時就拿掉；排在中間的在輪到它時拿掉，其餘的照送
+        let mixed = folder.appendingPathComponent("mixed", isDirectory: true)
+        try? FileManager.default.createDirectory(at: mixed, withIntermediateDirectories: true)
+        writeText("壞掉的圖片", to: mixed.appendingPathComponent("a-broken.png"))
+        writeText("壞掉的圖片", to: mixed.appendingPathComponent("c-broken.png"))
+        try? FileManager.default.copyItem(at: folder.appendingPathComponent(fileNames[0]), to: mixed.appendingPathComponent("b.png"))
+        try? FileManager.default.copyItem(at: folder.appendingPathComponent(fileNames[3]), to: mixed.appendingPathComponent("d.png"))
+        if model.openImages([mixed]) != 4 { problems.append("讀不到的檔案：一開始不是四個檔案") }
+        if Demo.wait(timeout: 10, until: { model.canTransmit && model.imageFiles.count == 3 }), model.notice?.contains("a-broken.png") == true {
+            model.notice = nil
+            begin()
+            order = finish("讀不到的檔案", expectNotice: true)
+            if order != [0, 3] || model.imageFiles.map(\.lastPathComponent) != ["b.png", "d.png"] || model.notice?.contains("c-broken.png") != true {
+                problems.append("讀不到的檔案：解回來的是第 \(text(order)) 張（預期 1、4），序列剩 \(model.imageFiles.map(\.lastPathComponent).joined(separator: "、"))，"
+                    + "訊息「\(model.notice ?? "無")」")
+            }
+            details.append("讀不到的兩個檔案從序列裡拿掉，其餘兩張照送")
+        } else {
+            problems.append("讀不到的檔案：排在最前面的壞檔沒有在預覽時被拿掉（序列 \(model.imageFiles.count) 個，訊息「\(model.notice ?? "無")」）")
+        }
+
+        // 9. 上次選的那一批：設定裡記著路徑，下次啟動時自動帶回來（已經不在的檔案略過）
+        let remembered = AppSettings(store: nil)
+        remembered.sourceKind = .images
+        remembered.imagePaths = fileNames.map { folder.appendingPathComponent($0).path } + [folder.appendingPathComponent("不見了.png").path]
+        let again = AppModel(settings: remembered, live: true)
+        again.start()
+        defer { again.shutdown() }
+        if again.imageFiles.map(\.lastPathComponent) != fileNames || !Demo.wait(timeout: 10, until: { again.canTransmit }) {
+            problems.append("啟動時沒有把上次選的圖片帶回來（\(again.imageFiles.count) 張）")
+        } else {
+            details.append("上次選的四張啟動時自動帶回來")
+        }
+        report(name, problems.isEmpty, problems.isEmpty ? details.joined(separator: "；") : problems.joined(separator: "；"))
     }
 
     // MARK: 畫布

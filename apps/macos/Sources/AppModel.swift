@@ -54,6 +54,33 @@ final class LatestFrameBox {
     }
 }
 
+/// 存影片的對話框下方的選項（NSSavePanel 的 accessoryView）：一個核取方塊「在每一張的左上角印上訊雜比」。
+/// 勾不勾當下就記進設定，下一次存影片時沿用；存檔時照設定決定要不要印（見 AppModel.exportSequence）。
+/// 用系統自己的核取方塊：它是放在系統畫的對話框裡的，外觀跟著對話框。
+final class VideoSaveOptions: NSObject {
+    let view: NSView
+    let stampBox: NSButton
+    private let settings: AppSettings
+
+    init(settings: AppSettings) {
+        self.settings = settings
+        stampBox = NSButton(checkboxWithTitle: L("在每一張的左上角印上訊雜比"), target: nil, action: nil)
+        stampBox.state = settings.stampVideoSNR ? .on : .off
+        stampBox.sizeToFit()
+        let size = stampBox.frame.size
+        view = NSView(frame: NSRect(x: 0, y: 0, width: size.width + 40, height: size.height + 20))
+        stampBox.setFrameOrigin(NSPoint(x: 20, y: 10))
+        view.addSubview(stampBox)
+        super.init()
+        stampBox.target = self
+        stampBox.action = #selector(toggled)
+    }
+
+    @objc private func toggled() {
+        settings.stampVideoSNR = stampBox.state == .on
+    }
+}
+
 final class AppModel: ObservableObject {
     enum LastResult { case none, ok, failed, modelMissing }
     enum TxPhase { case idle, starting, transmitting, stopping }
@@ -105,6 +132,10 @@ final class AppModel: ObservableObject {
     @Published var videoDuration = 0.0
     @Published var videoPosition = 0.0
     @Published var videoPlaying = false
+    /// 圖片序列：要送的圖片檔，照發射的順序。空的就是還沒選
+    @Published private(set) var imageFiles: [URL] = []
+    /// 圖片序列：下一張要送的是第幾張（0 起算）。右側欄的預覽就是這一張
+    @Published private(set) var imageIndex = 0
 
     // 定時發射（流程見後面「定時發射」那一段）
     /// 開關。不存進設定：每次開 app 都是關的，要自己再打開，重開 app 之後才不會在沒有人注意的時候自己發射。
@@ -140,6 +171,15 @@ final class AppModel: ObservableObject {
     private let engine: RadioEngine?
     private let camera = CameraSource()
     private let video = VideoFileSource()
+    private let images = ImageSequenceSource()   // 只在 previewQueue 上使用
+    /// 圖片序列的預覽是照什麼算出來的：哪一張、哪一種縮放方式、哪一版的畫布。和現在該有的不同就重算（見 refreshImagePreview）
+    private struct ImagePreviewKey: Equatable {
+        let url: URL
+        let scale: ScaleMode
+        let canvas: Int
+    }
+    private var imagePreviewKey: ImagePreviewKey?
+    private var imagePreviewLoading = false
     private let latestFrame = LatestFrameBox()
     private var previewVersion = -1
     private var previewScale: ScaleMode?
@@ -182,6 +222,13 @@ final class AppModel: ObservableObject {
         let samples: [Float]
         let preview: CGImage?
         let number: Int
+        let image: URL?   // 來源是圖片序列時，這一張是哪一個圖片檔
+    }
+    /// 取來源的一格的結果（見 captureSourceFrame）。
+    private struct SourceCapture {
+        var rgb: Data?         // 縮成 96×72 的畫面，還沒有印上畫布的字；來源沒有畫面時是 nil
+        var last = false       // 來源到此為止：只播一次的影片播完了（這是它的最後一格），或圖片序列已經沒有圖片可以送（這時 rgb 是 nil）
+        var image: URL? = nil  // 圖片序列：這一格是哪一個圖片檔
     }
     private let transmitter = CoreTransmitter()  // 只在 txQueue 上使用
     private let txQueue = DispatchQueue(label: "nbtv.tx", qos: .userInitiated)
@@ -196,6 +243,8 @@ final class AppModel: ObservableObject {
     private var txPreparing = false
     private var txTailState = 0         // 0：還沒排尾巴，1：正在取，2：已排入
     private var txLastRGB: Data?        // 這次發射最近送出的那一格；來源一時沒有畫面時重送它
+    private var txPendingImage: URL?    // 圖片序列：已經取走、正在編碼，還沒排進輸出佇列的那一張（見 putBackImage）
+    private var txEndsAfterFirst = false  // 圖片序列只剩一張要送：第一張排進去之後就收尾（見 goOnAir）
     private var txTimer: Timer?
     private var txTap: DebugTap.Stream?        // 除錯用：排進輸出佇列的取樣原樣記到檔案（見 DebugTap）
     private var txTapLogged = Date.distantPast
@@ -286,6 +335,7 @@ final class AppModel: ObservableObject {
         guard live else { return }
         refreshDevices()
         DebugTap.log("啟動：輸入「\(inputDeviceName)」、輸出「\(outputDeviceName)」、來源 \(settings.sourceKind.rawValue)、模式 \(settings.txModeID)、PTT \(settings.pttMode.rawValue)、輸出音量 \(settings.outputLevelDb) dB")
+        reopenLastImages()   // 先帶回來：下面打開來源時，圖片序列才有東西
         if ProcessInfo.processInfo.environment["NBTV_NO_DEVICES"] == nil {
             requestAudioAccessAndReceive()
             restartSource()
@@ -548,30 +598,39 @@ final class AppModel: ObservableObject {
 
     /// 影片的時間軸：每一張從它收到的時刻開始顯示，到下一張收到為止，所以影片的快慢和當時收到的一樣；
     /// 最後一張停留它那個模式一張的長度（至少一秒）。
-    static func videoTimeline(for frames: [ReceivedFrame]) -> (pictures: [SequenceVideo.Picture], lastHold: Double) {
+    /// stampSNR：每一張的左上角印上收到它當下的訊雜比（寫法和主畫面上疊的標示一樣：「SNR 12.3 dB」）。
+    static func videoTimeline(for frames: [ReceivedFrame], stampSNR: Bool = false) -> (pictures: [SequenceVideo.Picture], lastHold: Double) {
         guard let first = frames.first, let last = frames.last else { return ([], 0) }
-        let pictures = frames.map { SequenceVideo.Picture(image: $0.image, start: $0.time.timeIntervalSince(first.time)) }
+        let pictures = frames.map {
+            SequenceVideo.Picture(image: $0.image, start: $0.time.timeIntervalSince(first.time),
+                                  label: stampSNR ? "SNR " + AppModel.snrText($0.snrDb) : nil)
+        }
         return (pictures, max(1, Modes.find(last.modeID)?.frameSeconds ?? 1))
     }
 
     /// 把主畫面顯示的那一張所在的一段存成影片檔（.mp4、H.264、每秒 24 格）。只有一張的不存。
+    /// 存檔的對話框下方有一個選項：在每一張的左上角印上訊雜比（見 VideoSaveOptions）。
     func saveDisplayedSequence() {
         let frames = displayedSequence
         guard frames.count >= 2, !exportingVideo else { return }
         let panel = NSSavePanel()
         panel.nameFieldStringValue = AppModel.videoFileName(for: frames)
         panel.allowedContentTypes = [.mpeg4Movie]
+        let options = VideoSaveOptions(settings: settings)
+        panel.accessoryView = options.view
         panel.begin { [weak self] response in
+            _ = options   // 對話框開著的這段時間要留著它：核取方塊按下去是通知它
             guard response == .OK, let url = panel.url else { return }
             self?.exportSequence(frames, to: url)
         }
     }
 
     /// 在背景把一段畫面寫成影片檔；結果寫在底列（completion 是給測試用的）。
+    /// 要不要在每一張的左上角印上訊雜比，照設定（settings.stampVideoSNR，存檔對話框裡的那個選項）。
     func exportSequence(_ frames: [ReceivedFrame], to url: URL, completion: ((Result<SequenceVideo.Summary, Error>) -> Void)? = nil) {
         guard !frames.isEmpty, !exportingVideo else { return }
         exportingVideo = true
-        let timeline = AppModel.videoTimeline(for: frames)
+        let timeline = AppModel.videoTimeline(for: frames, stampSNR: settings.stampVideoSNR)
         exportQueue.async {
             let result = Result { try SequenceVideo.write(timeline.pictures, lastHold: timeline.lastHold, to: url) }
             DispatchQueue.main.async {
@@ -622,6 +681,11 @@ final class AppModel: ObservableObject {
             } else if settings.loopVideo {
                 video.play()   // 不循環的影片停在原來的位置，按下發射才開始播（見 goOnAir）
             }
+        case .images:
+            camera.stop()
+            video.pause()
+            // 預覽（下一張要送的那一張）由 uiTick 讀進來（見 refreshImagePreview）
+            if imageFiles.isEmpty { sourceMessage = L("還沒選擇圖片") }
         }
     }
 
@@ -652,6 +716,7 @@ final class AppModel: ObservableObject {
         sourceEpoch += 1
         latestFrame.reset(acceptCamera: settings.sourceKind == .camera)
         previewVersion = -1
+        imagePreviewKey = nil
         lastSourceRGB = nil
         pendingPreview = nil
         sourcePreview = nil
@@ -750,6 +815,179 @@ final class AppModel: ObservableObject {
         video.seek(to: seconds)
     }
 
+    // MARK: - 發射來源：圖片序列
+    //
+    // 使用者選一批圖片（或一個資料夾），照檔名排好（見 ImageSequenceSource.files）。imageIndex 是「下一張要送的」，
+    // 右側欄的預覽就是它。發射時每準備一張畫面就取這一張、位置往後移一張；沒有勾循環播放的話，
+    // 最後一張排進輸出佇列之後自動收尾（和影片播完一樣），位置回到第一張。
+    // 取走了卻沒有完整送出去的那一張會退回去，下一次發射從它開始，所以不會有哪一張被跳過：
+    // 按停止時已經排進去、還沒開始播的（stopTransmit）；送到一半被切掉的、還沒開始送就取消的（endTransmit）。
+    // 讀圖在 previewQueue 上做。讀不到的檔案從序列裡拿掉，並在底列說明。
+
+    func chooseImages() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image, .folder]
+        panel.allowsMultipleSelection = true
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.message = L("選擇要依序發射的圖片（可以多選），或選資料夾：裡面的圖片全部加入。順序照檔名")
+        panel.begin { [weak self] response in
+            guard let self, response == .OK, self.openImages(panel.urls) > 0 else { return }
+            // 使用者自己選的這一批記下來，下次啟動時自動帶回來（見 reopenLastImages）
+            self.settings.imagePaths = self.imageFiles.map(\.path)
+        }
+    }
+
+    /// 換一批圖片：選到的資料夾換成它裡面的圖片，照檔名排好，從第一張開始。回傳有幾張；
+    /// 一張圖片都沒有的話維持原來那一批，在底列說明。
+    @discardableResult
+    func openImages(_ selection: [URL]) -> Int {
+        let files = ImageSequenceSource.files(from: selection)
+        guard !files.isEmpty else {
+            notice = L("選的項目裡沒有可以讀取的圖片")
+            return 0
+        }
+        setImages(files)
+        return files.count
+    }
+
+    private func setImages(_ files: [URL]) {
+        imageFiles = files
+        imageIndex = 0
+        previewQueue.async { [images] in images.forget() }
+        DebugTap.log("圖片序列：\(files.count) 張，第一張「\(files[0].lastPathComponent)」")
+        if settings.sourceKind == .images {
+            sourceMessage = nil
+            clearSourceFrame()
+        }
+    }
+
+    /// 上次選的那一批圖片還在的話，啟動時自動帶回來（已經不在的檔案略過）。
+    private func reopenLastImages() {
+        guard imageFiles.isEmpty else { return }
+        let files = settings.imagePaths.filter { FileManager.default.fileExists(atPath: $0) }.map { URL(fileURLWithPath: $0) }
+        if !files.isEmpty { setImages(files) }
+    }
+
+    /// 圖片序列：改「下一張要送的」是第幾張（0 起算；超出範圍就停在第一張或最後一張）。
+    func selectImage(_ index: Int) {
+        guard !imageFiles.isEmpty else { return }
+        let clamped = min(max(index, 0), imageFiles.count - 1)
+        if clamped != imageIndex { imageIndex = clamped }
+    }
+
+    /// 下一張要送的那個圖片檔；還沒選圖片時是 nil
+    var nextImage: URL? { imageFiles.indices.contains(imageIndex) ? imageFiles[imageIndex] : nil }
+
+    /// 圖片序列的預覽：「下一張要送的」那一張縮成 96×72、印上畫布的樣子。位置、縮放方式或畫布變了就重算。
+    /// 一次只算一張：還在算的時候位置又變了（拖著滑桿），等這一張算完再算最新的那一張，不會越積越多。
+    private func refreshImagePreview() {
+        guard !imagePreviewLoading, let url = nextImage else { return }
+        let canvas = currentCanvas()
+        let mode = settings.scaleMode
+        let key = ImagePreviewKey(url: url, scale: mode, canvas: canvasVersion)
+        guard key != imagePreviewKey else { return }
+        imagePreviewLoading = true
+        let epoch = sourceEpoch
+        // 順便把再下一張也先讀好：發射中輪到它的時候不必等（幾千萬像素的相片、RAW 檔要讀一陣子）
+        let ahead = imageFiles[(imageIndex + 1) % imageFiles.count]
+        previewQueue.async { [weak self, images] in
+            let picture = images.picture(at: url)
+            let rgb = picture.flatMap { FrameScaler.scale($0.image, mode: mode) }
+            let image = rgb.flatMap { NBTV.image(fromRGB: canvas?.apply(to: $0) ?? $0) }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.imagePreviewLoading = false
+                guard epoch == self.sourceEpoch else { return }   // 這段時間裡換了來源，或換了一批圖片
+                guard let picture, let rgb else {
+                    self.removeUnreadableImages([url])   // 下一次 uiTick 改算接替它的那一張
+                    return
+                }
+                self.imagePreviewKey = key
+                self.lastSourceRGB = rgb
+                self.sourcePreview = image
+                self.sourceSize = picture.size
+            }
+            if ahead != url { _ = images.picture(at: ahead) }
+        }
+    }
+
+    /// 讀不到的圖片（檔案不見了、壞了）從序列裡拿掉，並在底列說明。
+    /// 位置留在原來那一張上；原來那一張就是被拿掉的，那就是它後面的那一張（後面沒有了就回到第一張）。
+    private func removeUnreadableImages(_ unreadable: [URL]) {
+        let gone = Set(unreadable).intersection(imageFiles)
+        guard !gone.isEmpty else { return }
+        let keptBefore = imageFiles[..<min(imageIndex, imageFiles.count)].filter { !gone.contains($0) }.count
+        imageFiles.removeAll { gone.contains($0) }
+        imageIndex = keptBefore < imageFiles.count ? keptBefore : 0
+        if gone.count == 1, let only = gone.first {
+            notice = L("無法讀取圖片「%@」，已從序列中拿掉", only.lastPathComponent)
+        } else {
+            notice = L("有 %d 張圖片無法讀取，已從序列中拿掉", gone.count)
+        }
+        DebugTap.log("圖片序列：拿掉讀不到的 " + gone.map(\.lastPathComponent).sorted().joined(separator: "、") + "，剩 \(imageFiles.count) 張")
+        if imageFiles.isEmpty, settings.sourceKind == .images {
+            clearSourceFrame()
+            sourceMessage = L("選的圖片都無法讀取")
+        }
+    }
+
+    /// 圖片序列：讀「下一張要送的」那一張，縮成 96×72。讀不到的從序列裡拿掉，改讀它後面那一張
+    /// （勾了循環播放的話，找到最後一張還沒有，再從第一張找）。都讀不到時 rgb 是 nil、last 是 true。
+    /// 位置在這一格確定要用的時候才往後移（見 accept）：取了之後才發現這次發射已經取消的話，這一張就不算取走。
+    private func captureNextImage(_ completion: @escaping (SourceCapture) -> Void) {
+        let files = imageFiles, mode = settings.scaleMode
+        let start = min(imageIndex, max(files.count - 1, 0))
+        let candidates = files.isEmpty ? [] : Array(files[start...]) + (settings.loopImages ? Array(files[..<start]) : [])
+        previewQueue.async { [weak self, images] in
+            var unreadable: [URL] = []
+            var taken: (url: URL, rgb: Data)?
+            for url in candidates {
+                if let picture = images.picture(at: url), let rgb = FrameScaler.scale(picture.image, mode: mode) {
+                    taken = (url, rgb)
+                    break
+                }
+                unreadable.append(url)
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.removeUnreadableImages(unreadable)
+                // 後面沒有讀得到的了：這一輪到此為止，位置回到第一張
+                if taken == nil, self.imageIndex != 0 { self.imageIndex = 0 }
+                completion(SourceCapture(rgb: taken?.rgb, last: taken == nil, image: taken?.url))
+            }
+        }
+    }
+
+    /// 取到的這一格確定要拿去編碼了。來源是圖片序列時：位置往後移一張（下一次取到的是下一張），
+    /// 並記下這一張還沒排進輸出佇列（見 putBackImage）。
+    /// 回傳來源是不是到這一格為止（影片播完了；不循環的圖片序列送到最後一張）：是的話，這一張排進去之後就收尾。
+    private func accept(_ capture: SourceCapture) -> Bool {
+        guard let url = capture.image else { return capture.last }
+        txPendingImage = url
+        guard let position = imageFiles.firstIndex(of: url) else { return false }   // 這段時間裡換了一批圖片
+        let atEnd = position + 1 >= imageFiles.count
+        imageIndex = atEnd ? 0 : position + 1
+        return atEnd && !settings.loopImages
+    }
+
+    /// 圖片序列：取走了卻沒有完整送出去的那一張退回去，下一次取到的就是它。
+    private func putBackImage(_ url: URL?) {
+        guard let url, let index = imageFiles.firstIndex(of: url), index != imageIndex else { return }
+        imageIndex = index
+        AppModel.trace?("圖片序列：「\(url.lastPathComponent)」沒有送完，下一次從它開始")
+    }
+
+    /// 示範用：把「下一張要送的」那一張圖片直接讀進來當預覽（不經過計時器）。讀到了回傳 true。
+    func demoLoadImage() -> Bool {
+        guard let url = nextImage, let picture = ImageSequenceSource.load(url),
+              let rgb = FrameScaler.scale(picture.image, mode: settings.scaleMode) else { return false }
+        lastSourceRGB = rgb
+        sourcePreview = NBTV.image(fromRGB: applyCanvas(to: rgb))
+        sourceSize = picture.size
+        return true
+    }
+
     /// 每 0.1 秒一次：把這段時間累積的結果一起反映到畫面上。
     private func uiTick() {
         // 接收：照順序套用；重新開始接收之前留下來的不算
@@ -777,7 +1015,7 @@ final class AppModel: ObservableObject {
             sourcePreview = preview.image
             sourceSize = preview.size
         }
-        refreshPreview()
+        if settings.sourceKind == .images { refreshImagePreview() } else { refreshPreview() }
     }
 
     private func publishTransmitDisplay() {
@@ -817,15 +1055,22 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// 取來源當下那一格（縮成 96×72，還沒有印上畫布的字）。沒有新的畫面時沿用上一格。
-    private func captureSourceFrame(_ completion: @escaping (Data?) -> Void) {
+    /// 取來源當下那一格（縮成 96×72，還沒有印上畫布的字）。鏡頭與影片檔沒有新的畫面時沿用上一格；
+    /// 圖片序列取的是「下一張要送的」那一張（見 captureNextImage）。取到之後確定要用，再呼叫 accept。
+    private func captureSourceFrame(_ completion: @escaping (SourceCapture) -> Void) {
+        if settings.sourceKind == .images {
+            captureNextImage(completion)
+            return
+        }
+        // 來源的影片已經播完：這次取到的是它的最後一格
+        let last = videoFinished
         if settings.sourceKind == .video, let buffer = video.copyCurrentFrame() { latestFrame.set(buffer, turns: video.quarterTurns) }
         let (buffer, turns, _) = latestFrame.get()
         let mode = settings.scaleMode
         let fallback = lastSourceRGB
         previewQueue.async {
             let rgb = buffer.flatMap { FrameScaler.scale($0, mode: mode, quarterTurns: turns)?.rgb } ?? fallback
-            DispatchQueue.main.async { completion(rgb) }
+            DispatchQueue.main.async { completion(SourceCapture(rgb: rgb, last: last)) }
         }
     }
 
@@ -893,16 +1138,22 @@ final class AppModel: ObservableObject {
         txTailState = 0
         txDisplay = nil
         txLastRGB = nil
+        txPendingImage = nil
+        txEndsAfterFirst = false
         let callsign = settings.callsign
         DebugTap.log("按下發射：模式 \(mode.id)、來源 \(settings.sourceKind.rawValue)")
         let encodeFirst = { [weak self] in
             guard let self, session == self.txSession else { return }
-            self.captureSourceFrame { [weak self] rgb in
+            self.captureSourceFrame { [weak self] capture in
                 guard let self, session == self.txSession else { return }
-                guard let rgb else {
+                guard let rgb = capture.rgb else {
                     self.failTransmit(L("沒有來源畫面可以發射"))
                     return
                 }
+                // 圖片序列只剩這一張要送（沒有勾循環播放）：它排進去之後就收尾（見 goOnAir）。
+                // 影片不會在第一張就播完（停在結尾的影片，上面已經先回到開頭了）
+                let ended = self.accept(capture)
+                self.txEndsAfterFirst = ended && capture.image != nil
                 self.txLastRGB = rgb
                 let picture = self.applyCanvas(to: rgb)   // 畫布的字在這裡印上去；txLastRGB 留的是沒有印字的
                 self.txQueue.async {
@@ -1032,6 +1283,8 @@ final class AppModel: ObservableObject {
         txPulledAt = ProcessInfo.processInfo.systemUptime
         txPhase = .transmitting
         guard enqueue(first) else { return }
+        // 圖片序列只剩這一張：不再準備下一張，送完它就收尾
+        if txEndsAfterFirst { stopAfterQueuedFrames() }
         // 來源是影片檔：開始送音訊的同時讓影片開始播放（已經在播的不動）。
         // 不循環的影片播完之後，再送出它的最後一格就自動停止（見 prepareNextFrame）。
         if settings.sourceKind == .video, video.url != nil, !video.isPlaying {
@@ -1069,7 +1322,8 @@ final class AppModel: ObservableObject {
                                 Double(engine.output.queuedSamples) / rate, Double(engine.output.playedSamples) / rate, engine.output.underruns))
         }
         onAir.append(OnAirFrame(start: start, end: txEnd, samples: frame.samples, preview: NBTV.image(fromRGB: frame.preview),
-                                number: txNextNumber))
+                                number: txNextNumber, image: txPendingImage))
+        txPendingImage = nil
         txNextNumber += 1
         txPreparing = false
         return true
@@ -1145,21 +1399,33 @@ final class AppModel: ObservableObject {
         txPreparing = true
         let session = txSession
         let started = Date()
-        // 來源的影片已經播完：這次取到的是它的最後一格，這一張排進去之後就收尾
-        let lastPicture = videoFinished
-        captureSourceFrame { [weak self] captured in
+        captureSourceFrame { [weak self] capture in
             guard let self, session == self.txSession else { return }
-            // 來源一時沒有畫面（剛切換來源）：重送上一格，不要讓電台空著發射
-            guard self.txPhase == .transmitting, let rgb = captured ?? self.txLastRGB else {
-                DebugTap.log("準備下一張：沒有畫面可用（或已經不在發射）")
+            guard self.txPhase == .transmitting else {
+                DebugTap.log("準備下一張：已經不在發射")
                 self.txPreparing = false
                 return
             }
-            if captured == nil { DebugTap.log("準備下一張：來源沒有新的畫面，重送上一格") }
+            // 圖片序列已經沒有圖片可以送（剩下的都讀不到，底列有說明）：不重送上一張，目前這張送完就收尾
+            if capture.rgb == nil, capture.last {
+                self.txPreparing = false
+                self.stopAfterQueuedFrames()
+                return
+            }
+            // 來源一時沒有畫面（剛切換來源）：重送上一格，不要讓電台空著發射
+            guard let rgb = capture.rgb ?? self.txLastRGB else {
+                DebugTap.log("準備下一張：沒有畫面可用")
+                self.txPreparing = false
+                return
+            }
+            if capture.rgb == nil { DebugTap.log("準備下一張：來源沒有新的畫面，重送上一格") }
             if DebugTap.isEnabled {
                 let mean = rgb.reduce(0) { $0 + Int($1) } / max(rgb.count, 1)
-                DebugTap.log("準備下一張：來源 \(self.settings.sourceKind.rawValue)，畫面 \(rgb.count) 位元組、平均亮度 \(mean)")
+                DebugTap.log("準備下一張：來源 \(self.settings.sourceKind.rawValue)，畫面 \(rgb.count) 位元組、平均亮度 \(mean)"
+                    + (capture.image.map { "，圖片「\($0.lastPathComponent)」" } ?? ""))
             }
+            // 來源到這一格為止（影片播完了，這是它的最後一格；不循環的圖片序列送到最後一張）：這一張排進去之後就收尾
+            let lastPicture = self.accept(capture)
             self.txLastRGB = rgb
             let picture = self.applyCanvas(to: rgb)   // 發射中改了畫布的字，下一張就照新的印
             self.txQueue.async {
@@ -1183,6 +1449,9 @@ final class AppModel: ObservableObject {
                             self.txQueue.async { self.transmitter.discardLast() }
                             AppModel.trace?("停止時下一張剛編好：不送")
                         }
+                        // 圖片序列：這一張沒有送出去，退回去（按停止的那一刻已經退過的話，這裡沒有東西可退）
+                        self.putBackImage(self.txPendingImage)
+                        self.txPendingImage = nil
                         self.txPreparing = false
                     }
                 }
@@ -1198,7 +1467,11 @@ final class AppModel: ObservableObject {
             txPhase = .stopping
             txStoppingAt = ProcessInfo.processInfo.systemUptime
             pauseVideoWithTransmit()   // 之後不會再取新的畫面，影片不必等這一張送完才停
-            dropQueuedFrame()
+            let dropped = dropQueuedFrame()
+            // 圖片序列：取走了卻不會送出去的退回去，下一次發射從它開始——已經排進佇列又被拿掉的那一張；
+            // 沒有的話是正在編碼的那一張（兩張都有時，被拿掉的那一張在前面）
+            putBackImage(dropped?.image ?? txPendingImage)
+            txPendingImage = nil
             if !txPreparing { queueTail() }
         case .starting:
             // 還沒開始送：直接取消
@@ -1208,12 +1481,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// 來源的影片播完了，它的最後一格也已經排進輸出佇列：和按下停止一樣收尾（送完、補尾巴、放開 PTT、回到接收），
-    /// 差別是不拿掉已經排進去的那一張——對方要看得到影片的結尾。
+    /// 來源的影片播完了（或圖片序列送到最後一張了），最後那一張也已經排進輸出佇列：和按下停止一樣收尾
+    /// （送完、補尾巴、放開 PTT、回到接收），差別是不拿掉已經排進去的那一張——對方要看得到結尾。
     private func stopAfterQueuedFrames() {
         guard txPhase == .transmitting else { return }
-        DebugTap.log("影片播完：最後一格已經排入，送完就停止發射")
-        AppModel.trace?("影片播完：送完最後一張就停止發射")
+        let what = settings.sourceKind == .images ? "圖片序列送完" : "影片播完"
+        DebugTap.log("\(what)：最後一格已經排入，送完就停止發射")
+        AppModel.trace?("\(what)：送完最後一張就停止發射")
         txPhase = .stopping
         txStoppingAt = ProcessInfo.processInfo.systemUptime
         if !txPreparing { queueTail() }
@@ -1233,14 +1507,16 @@ final class AppModel: ObservableObject {
         AppModel.trace?("發射停止：影片跟著暫停")
     }
 
-    /// 「送完目前這張」就停：下一張如果已經排進輸出佇列、但還沒開始播，把它拿掉。
-    private func dropQueuedFrame() {
-        guard let engine, let next = onAir.last, engine.output.discardQueued(from: next.start) else { return }
+    /// 「送完目前這張」就停：下一張如果已經排進輸出佇列、但還沒開始播，把它拿掉。回傳拿掉的那一張；沒有拿掉任何東西時是 nil。
+    @discardableResult
+    private func dropQueuedFrame() -> OnAirFrame? {
+        guard let engine, let next = onAir.last, engine.output.discardQueued(from: next.start) else { return nil }
         onAir.removeLast()
         txEnd = next.start
         txNextNumber = next.number
         txQueue.async { self.transmitter.discardLast() }   // 發射機也回到編它之前的狀態（見 queueTail）
         AppModel.trace?("停止時下一張已經排進佇列但還沒開始播：拿掉")
+        return next
     }
 
     /// 最後補上重取樣濾波器的尾巴與一小段靜音，確定整張都送出去了才放開 PTT。
@@ -1290,6 +1566,11 @@ final class AppModel: ObservableObject {
         }
         // 送到一半出錯才會在「發射中」直接走到這裡（按停止的話，當下就暫停過了；之後使用者自己又按播放的不再管）
         if txPhase == .transmitting { pauseVideoWithTransmit() }
+        // 圖片序列：沒有完整送出去的第一張退回去，下一次發射從它開始——送到一半被切掉的（立刻停止、輸出裝置出問題）、
+        // 排進去了還沒輪到的，或還沒開始送就取消的那一張。正常送完的話每一張都播完了，沒有東西要退。
+        let played = engine?.output.playedSamples ?? 0
+        putBackImage(onAir.first { $0.end > played && $0.image != nil }?.image ?? txPendingImage)
+        txPendingImage = nil
         txTap?.close()
         txTap = nil
         txSession += 1
@@ -1486,6 +1767,9 @@ final class AppModel: ObservableObject {
 
     /// 發射來源是只播一次的影片檔（沒有勾循環播放，或這一次是定時發射）：按下發射才開始播，播完自動停止發射。
     var videoPlaysOnce: Bool { settings.sourceKind == .video && videoName != nil && (!settings.loopVideo || scheduledRun) }
+
+    /// 發射來源是沒有勾循環播放的圖片序列：從預覽的那一張送到最後一張，送完自動停止發射。
+    var imagesPlayOnce: Bool { settings.sourceKind == .images && !imageFiles.isEmpty && !settings.loopImages }
 
     /// 「12.3 dB」「−1.4 dB」：標在收到的畫面上的訊雜比，取到小數一位。
     static func snrText(_ db: Double) -> String {

@@ -77,7 +77,7 @@ First use:
 1. Click the settings button at the top right (or press ⌘,). Enter your callsign, choose the audio input and output devices, and choose how PTT is keyed:
    not at all (use the radio's VOX), RTS or DTR on a serial port, CAT commands, or a rigctld that is already running. The last two need [Hamlib](https://github.com/Hamlib/Hamlib) installed separately.
 2. macOS asks for microphone access (receiving reads from the audio input device), and for camera access when you choose the camera as the transmit source.
-3. Back in the main window, it is already receiving. Choose the transmit source (camera or video file) and the transmit mode in the sidebar, then click Start transmitting.
+3. Back in the main window, it is already receiving. Choose the transmit source (camera, video file or a sequence of images) and the transmit mode in the sidebar, then click Start transmitting.
 
 The app can also transmit on a schedule, print a line of text on the picture (Canvas), and save received pictures as an image or a video. Its interface is available in Traditional Chinese, Simplified Chinese, Japanese, Spanish and English, and follows the system language.
 The full guide is in [apps/macos/README.md](apps/macos/README.md).

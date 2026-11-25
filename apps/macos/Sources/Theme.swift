@@ -43,6 +43,7 @@ enum Theme {
 /// 版面稿裡的線條圖示，照 SVG 的路徑重畫。
 enum IconKind {
     case settings, download, camera, chevrons, lock, videoFile, pause, play, check, clock
+    case imageFile, previous, next   // 圖片序列用的：圖片檔、上一張、下一張
 }
 
 struct IconShape: Shape {
@@ -52,7 +53,7 @@ struct IconShape: Shape {
     var viewBox: CGSize {
         switch kind {
         case .chevrons: return CGSize(width: 12, height: 14)
-        case .pause, .play: return CGSize(width: 12, height: 12)
+        case .pause, .play, .previous, .next: return CGSize(width: 12, height: 12)
         default: return CGSize(width: 16, height: 16)
         }
     }
@@ -96,6 +97,15 @@ struct IconShape: Shape {
         case .clock:   // 版面稿裡沒有，照同樣的線條畫的：圓框加上指著四點的兩根針
             p.addEllipse(in: CGRect(x: 2, y: 2, width: 12, height: 12))
             p.move(to: CGPoint(x: 8, y: 4.8)); p.addLine(to: CGPoint(x: 8, y: 8)); p.addLine(to: CGPoint(x: 10.3, y: 9.5))
+        case .imageFile:   // 版面稿裡沒有，照影片檔那一個的外框畫的：框裡是太陽和山的輪廓
+            p.addRoundedRect(in: CGRect(x: 2, y: 2.5, width: 12, height: 11), cornerSize: CGSize(width: 1.5, height: 1.5))
+            p.addEllipse(in: CGRect(x: 4.7, y: 5, width: 2.2, height: 2.2))
+            p.move(to: CGPoint(x: 2.6, y: 11.4)); p.addLine(to: CGPoint(x: 6.3, y: 8.6)); p.addLine(to: CGPoint(x: 8.6, y: 10.4))
+            p.addLine(to: CGPoint(x: 10.6, y: 8.8)); p.addLine(to: CGPoint(x: 13.4, y: 11.2))
+        case .previous:
+            p.move(to: CGPoint(x: 7.5, y: 2.5)); p.addLine(to: CGPoint(x: 4, y: 6)); p.addLine(to: CGPoint(x: 7.5, y: 9.5))
+        case .next:
+            p.move(to: CGPoint(x: 4.5, y: 2.5)); p.addLine(to: CGPoint(x: 8, y: 6)); p.addLine(to: CGPoint(x: 4.5, y: 9.5))
         }
         let box = viewBox
         let scale = min(rect.width / box.width, rect.height / box.height)

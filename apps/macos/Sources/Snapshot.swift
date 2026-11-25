@@ -62,6 +62,15 @@ enum SnapshotRunner {
             receiving.history = original
         }
 
+        // 開發用：NBTV_SNAPSHOT_SNR=1 時，另外把「存成影片時印上訊雜比」的一格存成 video-frame-snr.png
+        // （影片裡每一格就是這個樣子，960×720），用來和主畫面上疊的標示對照
+        if environment["NBTV_SNAPSHOT_SNR"] != nil, let newest = receiving.history.first,
+           let frame = AppModel.videoTimeline(for: [newest], stampSNR: true).pictures.first.flatMap(SequenceVideo.frameImage),
+           let png = NSBitmapImageRep(cgImage: frame).representation(using: .png, properties: [:]) {
+            try? png.write(to: directory.appendingPathComponent("video-frame-snr.png"))
+            print("[snapshot] video-frame-snr.png：影片的一格，左上角印的是「SNR \(AppModel.snrText(newest.snrDb))」")
+        }
+
         // 2. 發射中
         let transmitting = makeTransmittingModel(coffee: coffee, rocket: rocket, cat: cat, history: receiving.history)
         render(MainWindowView(placeholderControls: true).environmentObject(transmitting), width: 1280, height: 840,
@@ -73,6 +82,19 @@ enum SnapshotRunner {
         if ProcessInfo.processInfo.environment["NBTV_SNAPSHOT_SCHEDULE"] != nil { idle.setScheduleArmed(true) }
         render(MainWindowView(placeholderControls: true).environmentObject(idle), width: 1280, height: 840,
                to: directory.appendingPathComponent("3-idle-video.png"))
+
+        // 開發用：NBTV_SNAPSHOT_IMAGES=1 時多算一張「待機＋圖片序列來源」（extra-images.png）；
+        // 同時設了 NBTV_SNAPSHOT_EXTRA_SIZE 的話，再多算一張那個視窗大小的（看縮到最小時右側欄放不放得下）
+        if environment["NBTV_SNAPSHOT_IMAGES"] != nil {
+            let pictures = makeImagesModel(pictures: [coffee, rocket, cat], workDirectory: directory)
+            render(MainWindowView(placeholderControls: true).environmentObject(pictures), width: 1280, height: 840,
+                   to: directory.appendingPathComponent("extra-images.png"))
+            let parts = (environment["NBTV_SNAPSHOT_EXTRA_SIZE"] ?? "").split(separator: "x").compactMap { Double($0) }
+            if parts.count == 2 {
+                render(MainWindowView(placeholderControls: true).environmentObject(pictures), width: parts[0], height: parts[1],
+                       to: directory.appendingPathComponent("extra-images-\(Int(parts[0]))x\(Int(parts[1])).png"))
+            }
+        }
 
         // 開發用：畫布的字經過各個模式的編碼之後的樣子（NBTV_SNAPSHOT_CANVAS 有設才算）
         if let style = receiving.settings.canvasStyle { renderCanvasSheet(style, pictures: [coffee, rocket, cat], to: directory) }
@@ -265,6 +287,26 @@ enum SnapshotRunner {
         } else {
             print("[snapshot] 注意：示範影片做不出來")
         }
+        return model
+    }
+
+    /// 沒有訊號；發射來源選圖片序列：三張測試圖各存成一個圖片檔（放大十倍，像一般的圖片），選那個資料夾，
+    /// 下一張要送的是第二張。NBTV_SNAPSHOT_LOOP_IMAGES=1 時勾著「循環播放」。
+    private static func makeImagesModel(pictures: [Data], workDirectory: URL) -> AppModel {
+        let settings = demoSettings(source: .images)
+        settings.loopImages = ProcessInfo.processInfo.environment["NBTV_SNAPSHOT_LOOP_IMAGES"] != nil
+        let model = AppModel(settings: settings, live: false)
+        model.refreshDevices()
+        let folder = workDirectory.appendingPathComponent("pictures", isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        for (index, rgb) in pictures.enumerated() {
+            guard let image = NBTV.image(fromRGB: rgb) else { continue }
+            Demo.writeImage(image, to: folder.appendingPathComponent(String(format: "IMG_%04d.png", 2041 + index)), scale: 10)
+        }
+        let count = model.openImages([folder])
+        model.selectImage(1)
+        let got = model.demoLoadImage()
+        print("[snapshot] 圖片序列：\(count) 張，下一張要送的是「\(model.nextImage?.lastPathComponent ?? "—")」，取到畫面：\(got ? "是" : "否")")
         return model
     }
 

@@ -3,7 +3,7 @@
 import AppKit
 import SwiftUI
 
-/// 分段選擇（鏡頭／影片檔、填滿／完整、RTS／DTR）。
+/// 分段選擇（鏡頭／影片檔／圖片序列、填滿／完整、RTS／DTR）。
 struct SegmentedControl<Value: Hashable>: View {
     let options: [(value: Value, title: String)]
     @Binding var selection: Value
@@ -20,6 +20,8 @@ struct SegmentedControl<Value: Hashable>: View {
                     Text(option.title)
                         .font(Theme.ui(13, selected ? .semibold : .regular))
                         .foregroundColor(selected ? Theme.text : Theme.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)   // 選項多、名稱又長的時候（別的語言）字略縮，不要折成兩行或截掉
                         .padding(.horizontal, horizontalPadding)
                         .frame(maxWidth: fillWidth ? .infinity : nil)
                         .frame(height: 24)

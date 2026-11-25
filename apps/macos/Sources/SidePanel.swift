@@ -1,4 +1,4 @@
-// 右側欄：發射來源、縮放方式、畫布（印在畫面上的字）、發射模式、輸出音量與發射按鈕。
+// 右側欄：發射來源（鏡頭、影片檔、圖片序列）、縮放方式、畫布（印在畫面上的字）、發射模式、輸出音量與發射按鈕。
 import SwiftUI
 
 struct SidePanel: View {
@@ -10,15 +10,24 @@ struct SidePanel: View {
         let settings = model.settings
         VStack(alignment: .leading, spacing: 12) {
             SectionTitle(L("發射來源"))
-            SegmentedControl(options: [(SourceKind.camera, L("鏡頭")), (SourceKind.video, L("影片檔"))],
-                             selection: Binding(get: { settings.sourceKind }, set: { model.setSourceKind($0) }))
-            if settings.sourceKind == .camera { cameraPicker } else { videoPicker }
+            // 三個選項排一列：左右的留白比兩個選項時小一點，比較長的名稱（日文的「動画ファイル」）才放得下
+            SegmentedControl(options: [(SourceKind.camera, L("鏡頭")), (SourceKind.video, L("影片檔")), (SourceKind.images, L("圖片序列"))],
+                             selection: Binding(get: { settings.sourceKind }, set: { model.setSourceKind($0) }),
+                             horizontalPadding: 6)
+            switch settings.sourceKind {
+            case .camera: cameraPicker
+            case .video: videoPicker
+            case .images: imagePicker
+            }
             // 欄位不夠高時（視窗縮到最小、下面的說明又折成兩行）縮的是預覽，其他的控制元件都留著
             preview.layoutPriority(1)
             HStack(spacing: 12) {
                 if settings.sourceKind == .video, model.videoName != nil {
                     CheckBox(isOn: Binding(get: { settings.loopVideo }, set: { settings.loopVideo = $0 }), title: L("循環播放"))
                         .help(L("沒有勾：按下發射才開始播放，播完自動停止發射。勾了：影片循環播放，要自己按停止。兩種都是每送一張取當下那一格"))
+                } else if settings.sourceKind == .images, !model.imageFiles.isEmpty {
+                    CheckBox(isOn: Binding(get: { settings.loopImages }, set: { settings.loopImages = $0 }), title: L("循環播放"))
+                        .help(L("沒有勾：從預覽的這一張送到最後一張，每張送一次，送完自動停止發射。勾了：送完最後一張再從第一張開始，要自己按停止"))
                 } else {
                     Text(L("縮放方式")).font(Theme.ui(12)).foregroundColor(Theme.secondary)
                 }
@@ -72,11 +81,22 @@ struct SidePanel: View {
     }
 
     private var videoPicker: some View {
+        filePicker(icon: .videoFile, name: model.videoName, placeholder: L("尚未選擇影片檔")) { model.chooseVideoFile() }
+    }
+
+    /// 圖片序列：框裡寫的是「下一張要送的」那個圖片檔（就是下面預覽的那一張）；「選擇…」換一批圖片。
+    private var imagePicker: some View {
+        filePicker(icon: .imageFile, name: model.nextImage?.lastPathComponent, placeholder: L("尚未選擇圖片")) { model.chooseImages() }
+            .help(model.nextImage.map { L("下一張要送的圖片：%@", $0.path) } ?? L("選擇要依序發射的圖片，或選一個資料夾"))
+    }
+
+    /// 檔名的框加上「選擇…」鈕（影片檔與圖片序列共用）。
+    private func filePicker(icon: IconKind, name: String?, placeholder: String, choose: @escaping () -> Void) -> some View {
         HStack(spacing: 8) {
             HStack(spacing: 8) {
-                Icon(kind: .videoFile, lineWidth: 1.4)
-                Text(model.videoName ?? L("尚未選擇影片檔"))
-                    .foregroundColor(model.videoName == nil ? Theme.tertiary : Theme.text)
+                Icon(kind: icon, lineWidth: 1.4)
+                Text(name ?? placeholder)
+                    .foregroundColor(name == nil ? Theme.tertiary : Theme.text)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -85,7 +105,7 @@ struct SidePanel: View {
             .frame(height: 28)
             .background(RoundedRectangle(cornerRadius: 6).fill(Theme.disabledFill))
             .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Theme.separator, lineWidth: 1))
-            Button(L("選擇…")) { model.chooseVideoFile() }
+            Button(L("選擇…"), action: choose)
                 .buttonStyle(SmallButtonStyle())
         }
     }
@@ -96,7 +116,7 @@ struct SidePanel: View {
                 Color.black
                 if let image = model.sourcePreview {
                     PixelImage(image: image)
-                        .accessibilityLabel(model.settings.sourceKind == .camera ? L("鏡頭畫面縮成 96×72 後的預覽") : L("影片目前這一格縮成 96×72 後的預覽"))
+                        .accessibilityLabel(previewDescription)
                 } else {
                     Text(model.sourceMessage ?? L("等待來源畫面"))
                         .font(Theme.ui(12))
@@ -111,6 +131,7 @@ struct SidePanel: View {
             .frame(maxWidth: .infinity)   // 被壓矮的時候跟著變窄，留在欄位的中間
 
             if model.settings.sourceKind == .video, model.videoName != nil { videoControls }
+            if model.settings.sourceKind == .images, !model.imageFiles.isEmpty { imageControls }
 
             Text(sourceCaption)
                 .font(Theme.ui(12))
@@ -148,6 +169,14 @@ struct SidePanel: View {
         }
     }
 
+    private var previewDescription: String {
+        switch model.settings.sourceKind {
+        case .camera: return L("鏡頭畫面縮成 96×72 後的預覽")
+        case .video: return L("影片目前這一格縮成 96×72 後的預覽")
+        case .images: return L("下一張要送的圖片縮成 96×72 後的預覽")
+        }
+    }
+
     private var sourceCaption: String {
         guard let size = model.sourceSize, model.sourcePreview != nil else { return L("來源 — → 送出 96×72") }
         return L("來源 %d×%d → 送出 96×72", Int(size.width), Int(size.height))
@@ -176,6 +205,43 @@ struct SidePanel: View {
                 .font(Theme.mono(12))
                 .foregroundColor(Theme.secondary)
         }
+    }
+
+    /// 圖片序列的位置：上一張、下一張、拖到第幾張，以及「第幾張／共幾張」。指的都是「下一張要送的」那一張。
+    private var imageControls: some View {
+        let count = model.imageFiles.count, index = model.imageIndex
+        return HStack(spacing: 8) {
+            HStack(spacing: 4) {
+                stepButton(.previous, L("上一張圖片"), enabled: index > 0) { model.selectImage(index - 1) }
+                stepButton(.next, L("下一張圖片"), enabled: index < count - 1) { model.selectImage(index + 1) }
+            }
+            if count > 1 {
+                PlainSlider(value: Binding(get: { Double(model.imageIndex + 1) }, set: { model.selectImage(Int($0.rounded()) - 1) }),
+                            range: 1...Double(count), step: 1)
+                    .accessibilityLabel(L("下一張要送第幾張"))
+                    .accessibilityValue("\(index + 1) / \(count)")
+            } else {
+                Spacer(minLength: 0)
+            }
+            Text("\(index + 1) / \(count)")
+                .font(Theme.mono(12))
+                .foregroundColor(Theme.secondary)
+                .fixedSize()
+        }
+    }
+
+    private func stepButton(_ icon: IconKind, _ title: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Icon(kind: icon, width: 12, height: 12, lineWidth: 1.6, color: enabled ? Theme.text : Theme.tertiary)
+                .frame(width: 28, height: 28)
+                .background(RoundedRectangle(cornerRadius: 6).fill(enabled ? Theme.button : Theme.disabledFill))
+                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(enabled ? Theme.buttonRing : Theme.separator, lineWidth: 1))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .accessibilityLabel(title)
+        .help(title)
     }
 
     // MARK: 模式與發射
@@ -261,10 +327,12 @@ struct SidePanel: View {
         if model.txPhase == .stopping { return L("正在送完這張；再按一次立刻停止（這張不完整）") }
         if model.txPhase != .idle, model.scheduledRun { return L("定時發射：影片播完會自動停止，也可以隨時按停止") }
         if model.txPhase == .transmitting, model.videoPlaysOnce { return L("影片播完會自動停止，也可以隨時按停止") }
+        if model.txPhase == .transmitting, model.imagesPlayOnce { return L("圖片送完會自動停止，也可以隨時按停止") }
         if model.txPhase != .idle { return L("送完目前這張後放開 PTT，自動回到接收") }
         if model.settings.callsign.isEmpty { return L("還沒設定呼號，請先到設定裡填寫") }
         if model.live, !model.canTransmit { return L("等來源有畫面後才能發射") }
         if model.videoPlaysOnce { return L("以 %@ 發射，影片播完自動停止", model.settings.callsign) }
+        if model.imagesPlayOnce { return L("以 %@ 發射，圖片送完自動停止", model.settings.callsign) }
         return L("以 %@ 發射，停止後自動回到接收", model.settings.callsign)
     }
 }

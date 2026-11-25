@@ -12,6 +12,7 @@ set(NBTV_APP_SOURCES
   Sources/AudioIO.swift
   Sources/PTT.swift
   Sources/VideoSources.swift
+  Sources/ImageSequence.swift
   Sources/Canvas.swift
   Sources/SequenceVideo.swift
   Sources/Settings.swift

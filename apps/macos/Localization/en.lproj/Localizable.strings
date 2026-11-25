@@ -157,6 +157,7 @@
 "儲存影片：這一段只有一張，不能存" = "Save video: this sequence has only one frame, so there is nothing to save";
 "儲存中…" = "Saving…";
 "儲存影片" = "Save video";
+"在每一張的左上角印上訊雜比" = "Stamp each frame's SNR in the top-left corner";
 "%d 張" = "%d frames";
 "%d 張#1" = "%d frame";
 "第 %d 張" = "Frame %d";
@@ -316,3 +317,22 @@
 "找不到鏡頭" = "No camera found";
 "無法使用這個鏡頭" = "This camera cannot be used";
 "無法開啟鏡頭：%@" = "Could not open the camera: %@";
+
+// 發射來源：圖片序列（右側欄的選項與說明、讀不到圖片時的訊息）
+"圖片序列" = "Images";
+"尚未選擇圖片" = "No images selected";
+"還沒選擇圖片" = "No images selected";
+"選擇要依序發射的圖片，或選一個資料夾" = "Choose the images to transmit in order, or choose a folder";
+"選擇要依序發射的圖片（可以多選），或選資料夾：裡面的圖片全部加入。順序照檔名" = "Choose the images to transmit one after another (you can select several), or choose folders: every image inside is added. They are sent in file-name order";
+"下一張要送的圖片：%@" = "Next image to send: %@";
+"下一張要送的圖片縮成 96×72 後的預覽" = "Preview of the next image to send, scaled to 96×72";
+"上一張圖片" = "Previous image";
+"下一張圖片" = "Next image";
+"下一張要送第幾張" = "Position of the next image to send";
+"沒有勾：從預覽的這一張送到最後一張，每張送一次，送完自動停止發射。勾了：送完最後一張再從第一張開始，要自己按停止" = "Off: sends from the previewed image to the last one, each once, and transmission stops by itself. On: after the last image it starts again from the first, and you stop manually";
+"圖片送完會自動停止，也可以隨時按停止" = "It stops by itself after the last image; you can also stop at any time";
+"以 %@ 發射，圖片送完自動停止" = "Transmits as %@; stops by itself after the last image";
+"選的項目裡沒有可以讀取的圖片" = "The selection contains no readable images";
+"無法讀取圖片「%@」，已從序列中拿掉" = "Could not read the image “%@”; it was removed from the sequence";
+"有 %d 張圖片無法讀取，已從序列中拿掉" = "%d images could not be read; they were removed from the sequence";
+"選的圖片都無法讀取" = "None of the selected images can be read";

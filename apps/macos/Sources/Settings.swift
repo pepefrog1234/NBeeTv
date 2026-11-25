@@ -31,6 +31,10 @@ final class AppSettings: ObservableObject {
     @Published var loopVideo: Bool { didSet { store?.set(loopVideo, forKey: "loopVideo") } }
     /// 上次選的影片檔的路徑（空字串：沒有）。下次啟動時自動開啟；定時發射播的就是這個影片
     @Published var videoPath: String { didSet { store?.set(videoPath, forKey: "videoPath") } }
+    /// 圖片序列：送完最後一張要不要從第一張再來。沒有勾（預設）就是每張送一次，送完自動停止發射
+    @Published var loopImages: Bool { didSet { store?.set(loopImages, forKey: "loopImages") } }
+    /// 圖片序列：上次選的那一批圖片的路徑，照發射的順序。下次啟動時自動帶回來（畫面上不直接用到，所以不是 @Published）
+    var imagePaths: [String] { didSet { store?.set(imagePaths, forKey: "imagePaths") } }
     /// 定時發射：每隔幾分鐘一次，對齊整點（15 就是每小時的 00、15、30、45 分）。
     /// 開關本身不存在這裡：每次開 app 都是關的，要自己再打開（見 AppModel.scheduleArmed）
     @Published var scheduleIntervalMinutes: Int { didSet { store?.set(scheduleIntervalMinutes, forKey: "scheduleIntervalMinutes") } }
@@ -38,6 +42,8 @@ final class AppSettings: ObservableObject {
     @Published var scheduleSkipWhenBusy: Bool { didSet { store?.set(scheduleSkipWhenBusy, forKey: "scheduleSkipWhenBusy") } }
     /// 在收到的畫面與縮圖的左上角標出那一張的訊雜比
     @Published var showFrameSNR: Bool { didSet { store?.set(showFrameSNR, forKey: "showFrameSNR") } }
+    /// 把一段畫面存成影片時，在每一張的左上角印上收到它當下的訊雜比（存檔對話框裡的選項，勾了會記住）
+    @Published var stampVideoSNR: Bool { didSet { store?.set(stampVideoSNR, forKey: "stampVideoSNR") } }
     /// 畫布：送出去的每一張畫面上要不要印字、印什麼、印在上面還是下面（見 Canvas.swift）
     @Published var canvasEnabled: Bool { didSet { store?.set(canvasEnabled, forKey: "canvasEnabled") } }
     @Published var canvasText: String { didSet { store?.set(canvasText, forKey: "canvasText") } }
@@ -68,10 +74,13 @@ final class AppSettings: ObservableObject {
         cameraID = store?.string(forKey: "cameraID") ?? ""
         loopVideo = (store?.object(forKey: "loopVideo") as? Bool) ?? true
         videoPath = store?.string(forKey: "videoPath") ?? ""
+        loopImages = (store?.object(forKey: "loopImages") as? Bool) ?? false
+        imagePaths = store?.stringArray(forKey: "imagePaths") ?? []
         let interval = (store?.object(forKey: "scheduleIntervalMinutes") as? Int) ?? TransmitSchedule.defaultInterval
         scheduleIntervalMinutes = TransmitSchedule.intervals.contains(interval) ? interval : TransmitSchedule.defaultInterval
         scheduleSkipWhenBusy = (store?.object(forKey: "scheduleSkipWhenBusy") as? Bool) ?? true
         showFrameSNR = (store?.object(forKey: "showFrameSNR") as? Bool) ?? false
+        stampVideoSNR = (store?.object(forKey: "stampVideoSNR") as? Bool) ?? false
         canvasEnabled = (store?.object(forKey: "canvasEnabled") as? Bool) ?? false
         canvasText = store?.string(forKey: "canvasText") ?? ""
         canvasPosition = CanvasPosition(rawValue: store?.string(forKey: "canvasPosition") ?? "") ?? .top

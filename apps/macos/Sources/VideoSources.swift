@@ -1,4 +1,4 @@
-// 發射來源：鏡頭與影片檔，以及把來源畫面縮成 96×72 的工具。
+// 發射來源：鏡頭與影片檔，以及把來源畫面縮成 96×72 的工具。（第三種來源「圖片序列」在 ImageSequence.swift。）
 import Accelerate
 import AVFoundation
 import CoreGraphics
@@ -8,6 +8,7 @@ import VideoToolbox
 
 enum SourceKind: String {
     case camera, video
+    case images   // 圖片序列：選好的一批圖片，一張一張送
 }
 
 enum ScaleMode: String {

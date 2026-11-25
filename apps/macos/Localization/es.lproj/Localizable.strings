@@ -157,6 +157,7 @@
 "儲存影片：這一段只有一張，不能存" = "Guardar video: esta serie solo tiene una imagen y no se puede guardar";
 "儲存中…" = "Guardando…";
 "儲存影片" = "Guardar video";
+"在每一張的左上角印上訊雜比" = "Estampar la SNR de cada imagen en la esquina superior izquierda";
 "%d 張" = "%d imágenes";
 "%d 張#1" = "%d imagen";
 "第 %d 張" = "Imagen %d";
@@ -316,3 +317,22 @@
 "找不到鏡頭" = "No se encuentra ninguna cámara";
 "無法使用這個鏡頭" = "No se puede usar esta cámara";
 "無法開啟鏡頭：%@" = "No se pudo abrir la cámara: %@";
+
+// 發射來源：圖片序列（右側欄的選項與說明、讀不到圖片時的訊息）
+"圖片序列" = "Imágenes";
+"尚未選擇圖片" = "Ninguna imagen seleccionada";
+"還沒選擇圖片" = "No hay imágenes seleccionadas";
+"選擇要依序發射的圖片，或選一個資料夾" = "Elige las imágenes que se transmitirán en orden, o elige una carpeta";
+"選擇要依序發射的圖片（可以多選），或選資料夾：裡面的圖片全部加入。順序照檔名" = "Elige las imágenes que se transmitirán una tras otra (puedes seleccionar varias), o elige carpetas: se añaden todas las imágenes que contienen. Se envían por orden de nombre de archivo";
+"下一張要送的圖片：%@" = "Siguiente imagen que se enviará: %@";
+"下一張要送的圖片縮成 96×72 後的預覽" = "Vista previa de la siguiente imagen que se enviará, reducida a 96×72";
+"上一張圖片" = "Imagen anterior";
+"下一張圖片" = "Imagen siguiente";
+"下一張要送第幾張" = "Posición de la siguiente imagen que se enviará";
+"沒有勾：從預覽的這一張送到最後一張，每張送一次，送完自動停止發射。勾了：送完最後一張再從第一張開始，要自己按停止" = "Sin marcar: envía desde la imagen de la vista previa hasta la última, una vez cada una, y la transmisión se detiene sola. Marcado: tras la última vuelve a empezar por la primera y hay que detener a mano";
+"圖片送完會自動停止，也可以隨時按停止" = "Se detiene sola tras la última imagen; también puedes detenerla cuando quieras";
+"以 %@ 發射，圖片送完自動停止" = "Transmite como %@; se detiene sola tras la última imagen";
+"選的項目裡沒有可以讀取的圖片" = "La selección no contiene imágenes que se puedan leer";
+"無法讀取圖片「%@」，已從序列中拿掉" = "No se pudo leer la imagen «%@»; se quitó de la secuencia";
+"有 %d 張圖片無法讀取，已從序列中拿掉" = "No se pudieron leer %d imágenes; se quitaron de la secuencia";
+"選的圖片都無法讀取" = "No se puede leer ninguna de las imágenes seleccionadas";
