@@ -4,3 +4,6 @@
 
 # 學習式編碼的權重檔與測試的參考答案
 *.bin binary
+
+# GitHub 的語言統計：版面稿是一整包匯出的 HTML（1.3 MB），不算進這個專案用的程式語言
+/短波?NBTV?macOS?介面版面.html linguist-documentation
