@@ -57,10 +57,10 @@
 | macOS 14 以降 | Intel | `NBeeTv-<バージョン>-macos-x86_64-app.zip` | NBTV.app |
 | macOS 11 以降 | Apple シリコン | `NBeeTv-<バージョン>-macos-arm64.tar.gz` | コマンドラインツール |
 | macOS 11 以降 | Intel | `NBeeTv-<バージョン>-macos-x86_64.tar.gz` | コマンドラインツール |
-| Linux | x86_64 | `NBeeTv-<バージョン>-linux-x86_64.tar.gz` | コマンドラインツール（静的リンク、ディストリビューションを問いません） |
-| Linux | arm64 | `NBeeTv-<バージョン>-linux-arm64.tar.gz` | コマンドラインツール（静的リンク） |
-| Windows 10、11 | x86_64 | `NBeeTv-<バージョン>-windows-x86_64.zip` | コマンドラインツール |
-| Windows 11 | arm64 | `NBeeTv-<バージョン>-windows-arm64.zip` | コマンドラインツール |
+| Linux | x86_64 | `NBeeTv-<バージョン>-linux-x86_64.tar.gz` | デスクトップアプリ（`nbtv-gui`、glibc 2.35 以降が必要）とコマンドラインツール（静的リンク、ディストリビューションを問いません） |
+| Linux | arm64 | `NBeeTv-<バージョン>-linux-arm64.tar.gz` | デスクトップアプリとコマンドラインツール（同上） |
+| Windows 10、11 | x86_64 | `NBeeTv-<バージョン>-windows-x86_64.zip` | デスクトップアプリ（`nbtv-gui.exe`）とコマンドラインツール |
+| Windows 11 | arm64 | `NBeeTv-<バージョン>-windows-arm64.zip` | デスクトップアプリとコマンドラインツール |
 
 どのパッケージにも 4 つのモードの重みファイルが入っていて、展開すればすぐに使えます。まだリリースされていない版は、[Actions](https://github.com/pepefrog1234/NBeeTv/actions/workflows/build.yml) の各ビルドの Artifacts からダウンロードできます（GitHub へのサインインが必要で、保存期間は 7 日です）。
 
@@ -82,9 +82,23 @@ NBTV.app には Apple の開発者署名も公証もなく、ad-hoc 署名だけ
 このほかに、定時送信、画像に 1 行の文字を入れる機能（キャンバス）、受信した画像を画像ファイルや動画として保存する機能があります。インターフェイスは繁体字中国語、簡体字中国語、日本語、スペイン語、英語に対応していて、システムの言語に合わせて自動で切り替わります。
 詳しい説明は [apps/macos/README.md](apps/macos/README.md) にあります。
 
+### Windows と Linux のアプリ
+
+Windows と Linux のパッケージには `nbtv-gui`（Windows では `nbtv-gui.exe`）が入っています。macOS のアプリを移植した GUI で、画面の構成も送受信の動作も同じです。展開したらそのまま実行できます。`models/` と同じフォルダに置いたままにしてください。
+
+![受信中の Windows・Linux 用アプリ](docs/images/desktop-receiving.ja.png)
+
+*この画像は、プログラム自身が Linux 上でウインドウを開かずに、デモ用のデータから描画したものです。*
+
+- **Windows**：実行ファイルにはコード署名がないため、初回の実行時に SmartScreen に止められることがあります。このリポジトリからダウンロードしたファイルであることを確認したうえで、「詳細情報 → 実行」を押してください。
+- **Linux**：glibc 2.35 以降が必要です（Ubuntu 22.04、Debian 12、Raspberry Pi OS bookworm 以降）。日本語や中国語の表示にはシステムのフォント（`fonts-noto-cjk` など）を使い、見つからない場合は英語で表示します。
+- 動画ファイルを送信ソースにする機能と、受信した画像を動画として保存する機能には [ffmpeg](https://ffmpeg.org) のインストールが必要です（画像ファイルには不要です）。CAT コマンドで PTT を制御するには [Hamlib](https://github.com/Hamlib/Hamlib) が必要です。
+
+> このアプリは新しいものです。CI で自動チェックを一通り行っていますが、**実際の Windows や Linux のパソコンを無線機につないで使った人はまだいません**。実物のサウンドデバイス、カメラ、シリアルポートによる PTT は、実機ではまだ確認できていません。使う前に [apps/desktop/README.md](apps/desktop/README.md)（繁体字中国語）の「驗證過與還沒驗證的」（確認できたこと・できていないこと）を読んでください。問題があれば Issues で知らせてください。
+
 ### コマンドラインツール
 
-Linux と Windows には今のところコマンドラインツールしかなく、リアルタイムの送受信はできません。送信するときは作成した WAV ファイルを無線機に向けて再生し、受信するときは無線機の音を WAV ファイルに録音してから復号します。
+どのパッケージにもコマンドラインツールが入っています。扱うのはファイルで、リアルタイムの送受信ではありません。送信するときは作成した WAV ファイルを無線機に向けて再生し、受信するときは無線機の音を WAV ファイルに録音してから復号します。
 
 展開すると、実行ファイルと `models/` が同じフォルダに入っているので、そのまま実行できます。画像はすべて 96×72 のバイナリ PPM で、ffmpeg で変換できます。
 
@@ -155,6 +169,13 @@ cmake --build build-app
 open build-app/apps/macos/NBTV.app
 ```
 
+Windows と Linux のアプリ（設定時に SDL、Dear ImGui、stb をダウンロードします。Linux で先に入れておくパッケージは [apps/desktop/README.md](apps/desktop/README.md) にあります）：
+
+```sh
+cmake -S . -B build-desktop -DNBTV_BUILD_DESKTOP_APP=ON -DNBTV_BUILD_TESTS=OFF
+cmake --build build-desktop --config Release --target nbtv-gui
+```
+
 | パス | 内容 |
 | --- | --- |
 | `core/` | プラットフォームに依存しない C++20 のコアライブラリ：OFDM の送受信、同期、伝搬路推定、ニューラルネットワークの推論。外部に公開しているのは C API ひとつだけです（`core/include/nbtv/nbtv.h`） |
@@ -162,13 +183,14 @@ open build-app/apps/macos/NBTV.app
 | `tools/` | コマンドラインツール。`tools/learned/` はモデルの学習とエクスポート用のプログラムです（Python、PyTorch） |
 | `models/` | モデルの重みファイル |
 | `apps/macos/` | macOS のアプリ（SwiftUI） |
+| `apps/desktop/` | Windows と Linux のアプリ（C++、SDL 3、Dear ImGui） |
 | `apps/web/` | 受信カードのウェブサイト（Python、FastAPI） |
 
 ## 現在の制限
 
 - 文字や字幕はにじんで読みにくくなり、小さな範囲の鮮やかな色は薄くなります。
 - フレームやコールサインには身元を確認するしくみがなく、だれでも任意のコールサインで画像を送れます。
-- Linux と Windows にはまだ GUI がなく、リアルタイムの送受信もできません。
+- Windows と Linux のアプリは新しく、自動テストでしか確認していません。実物の無線機、サウンドデバイス、カメラ、シリアルポートではまだ検証できていません。
 - コマンドラインツールの説明文と下記の詳細なドキュメントは、今のところ繁体字中国語のみです。
 
 ## ドキュメント
@@ -177,6 +199,7 @@ open build-app/apps/macos/NBTV.app
 
 - [技術解説](docs/TECHNICAL.md)：シミュレーション結果、受信機の動作、フレーム構造と設計上の判断、まだできていないこと
 - [macOS のアプリ](apps/macos/README.md)
+- [Windows と Linux のアプリ](apps/desktop/README.md)
 - [モデルと学習](tools/learned/README.md)
 - [受信カードのウェブサイト](apps/web/README.md)
 - [仕様の草案 v0.1](短波%20NBTV%20軟體規格草案%20v0.1.md)：ニューラルネットワークに切り替える前に書かれたものです。OFDM のパラメーター、プリアンブル、パイロットの部分は今も有効です

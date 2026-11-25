@@ -57,10 +57,10 @@ Get the file for your platform from [Releases](https://github.com/pepefrog1234/N
 | macOS 14 or later | Intel | `NBeeTv-<version>-macos-x86_64-app.zip` | NBTV.app |
 | macOS 11 or later | Apple silicon | `NBeeTv-<version>-macos-arm64.tar.gz` | Command-line tools |
 | macOS 11 or later | Intel | `NBeeTv-<version>-macos-x86_64.tar.gz` | Command-line tools |
-| Linux | x86_64 | `NBeeTv-<version>-linux-x86_64.tar.gz` | Command-line tools (statically linked, for any distribution) |
-| Linux | arm64 | `NBeeTv-<version>-linux-arm64.tar.gz` | Command-line tools (statically linked) |
-| Windows 10, 11 | x86_64 | `NBeeTv-<version>-windows-x86_64.zip` | Command-line tools |
-| Windows 11 | arm64 | `NBeeTv-<version>-windows-arm64.zip` | Command-line tools |
+| Linux | x86_64 | `NBeeTv-<version>-linux-x86_64.tar.gz` | Desktop app (`nbtv-gui`, needs glibc 2.35 or later) and command-line tools (statically linked, for any distribution) |
+| Linux | arm64 | `NBeeTv-<version>-linux-arm64.tar.gz` | Desktop app and command-line tools (same as above) |
+| Windows 10, 11 | x86_64 | `NBeeTv-<version>-windows-x86_64.zip` | Desktop app (`nbtv-gui.exe`) and command-line tools |
+| Windows 11 | arm64 | `NBeeTv-<version>-windows-arm64.zip` | Desktop app and command-line tools |
 
 Every package includes the weight files for all four modes and works as soon as it is unpacked. Builds of commits that have not been released yet can be downloaded from the Artifacts of each run under [Actions](https://github.com/pepefrog1234/NBeeTv/actions/workflows/build.yml) (you need to be signed in to GitHub; they are kept for 7 days).
 
@@ -82,9 +82,23 @@ First use:
 The app can also transmit on a schedule, print a line of text on the picture (Canvas), and save received pictures as an image or a video. Its interface is available in Traditional Chinese, Simplified Chinese, Japanese, Spanish and English, and follows the system language.
 The full guide is in [apps/macos/README.md](apps/macos/README.md).
 
+### The Windows and Linux app
+
+The Windows and Linux packages contain `nbtv-gui` (`nbtv-gui.exe` on Windows): the graphical interface of the macOS app ported over, with the same layout and the same receive and transmit behavior. Run it right after unpacking; it has to stay in the same folder as `models/`.
+
+![The Windows and Linux app while receiving](docs/images/desktop-receiving.en.png)
+
+*This picture was rendered by the program itself on Linux, without opening a window, from demo data.*
+
+- **Windows**: the executable is not code-signed, so SmartScreen may block it the first time. Once you are sure the file came from this repo, click "More info → Run anyway".
+- **Linux**: needs glibc 2.35 or later (Ubuntu 22.04, Debian 12, Raspberry Pi OS bookworm and newer). The Chinese and Japanese interface text needs system fonts (for example `fonts-noto-cjk`); without them the interface is shown in English.
+- Using a video file as the transmit source, and saving received pictures as a video, need [ffmpeg](https://ffmpeg.org) installed (image files do not); controlling PTT with CAT commands needs [Hamlib](https://github.com/Hamlib/Hamlib).
+
+> This app is new. It has thorough automated checks in CI, but **nobody has used it yet on a real Windows or Linux computer connected to a radio**: real sound cards, cameras and serial-port PTT have not been verified on actual hardware. Before relying on it, read "驗證過與還沒驗證的" (what has and has not been verified) in [apps/desktop/README.md](apps/desktop/README.md) (in Traditional Chinese), and please report problems in Issues.
+
 ### Command-line tools
 
-Linux and Windows have only the command-line tools for now, with no live receiving or transmitting. To transmit, you play the generated WAV file into the radio; to receive, you record the radio's audio to a WAV file and decode it.
+Every package includes the command-line tools. They work on files rather than live audio: to transmit, you play the generated WAV file into the radio; to receive, you record the radio's audio to a WAV file and decode it.
 
 After unpacking, the executables and `models/` are in the same folder and can be run right there. Pictures are always 96×72 binary PPM files, which ffmpeg can produce.
 
@@ -155,6 +169,13 @@ cmake --build build-app
 open build-app/apps/macos/NBTV.app
 ```
 
+The Windows and Linux app (the configure step downloads SDL, Dear ImGui and stb; the packages Linux needs first are listed in [apps/desktop/README.md](apps/desktop/README.md)):
+
+```sh
+cmake -S . -B build-desktop -DNBTV_BUILD_DESKTOP_APP=ON -DNBTV_BUILD_TESTS=OFF
+cmake --build build-desktop --config Release --target nbtv-gui
+```
+
 | Path | Contents |
 | --- | --- |
 | `core/` | Platform-independent C++20 core library: OFDM transmit and receive, synchronization, channel estimation and neural-network inference. Its only public interface is a C API (`core/include/nbtv/nbtv.h`) |
@@ -162,13 +183,14 @@ open build-app/apps/macos/NBTV.app
 | `tools/` | Command-line tools; `tools/learned/` holds the training and export code for the models (Python, PyTorch) |
 | `models/` | Model weight files |
 | `apps/macos/` | The macOS app (SwiftUI) |
+| `apps/desktop/` | The Windows and Linux app (C++, SDL 3, Dear ImGui) |
 | `apps/web/` | The reception-card website (Python, FastAPI) |
 
 ## Current limitations
 
 - Text and captions get smeared, and small patches of vivid color fade.
 - Nothing authenticates a frame or its callsign: anyone can send pictures under any callsign.
-- Linux and Windows have no graphical interface yet and cannot receive or transmit live.
+- The Windows and Linux app is new and has only been checked by automated tests; it has not yet been verified with a real radio, sound card, camera or serial port.
 - The help text of the command-line tools and the detailed documents below are in Traditional Chinese only for now.
 
 ## Documentation
@@ -177,6 +199,7 @@ These documents are in Traditional Chinese.
 
 - [Technical notes](docs/TECHNICAL.md): simulation results, receiver behavior, frame structure and design trade-offs, and what is not done yet
 - [The macOS app](apps/macos/README.md)
+- [The Windows and Linux app](apps/desktop/README.md)
 - [Models and training](tools/learned/README.md)
 - [The reception-card website](apps/web/README.md)
 - [Draft specification v0.1](短波%20NBTV%20軟體規格草案%20v0.1.md): written before the switch to neural-network coding; the parts on OFDM parameters, the preamble and the pilots still apply

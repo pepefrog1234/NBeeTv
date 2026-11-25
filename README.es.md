@@ -57,10 +57,10 @@ Descarga el archivo de tu plataforma desde [Releases](https://github.com/pepefro
 | macOS 14 o posterior | Intel | `NBeeTv-<versión>-macos-x86_64-app.zip` | NBTV.app |
 | macOS 11 o posterior | Chip de Apple | `NBeeTv-<versión>-macos-arm64.tar.gz` | Herramientas de línea de comandos |
 | macOS 11 o posterior | Intel | `NBeeTv-<versión>-macos-x86_64.tar.gz` | Herramientas de línea de comandos |
-| Linux | x86_64 | `NBeeTv-<versión>-linux-x86_64.tar.gz` | Herramientas de línea de comandos (enlazadas estáticamente, para cualquier distribución) |
-| Linux | arm64 | `NBeeTv-<versión>-linux-arm64.tar.gz` | Herramientas de línea de comandos (enlazadas estáticamente) |
-| Windows 10, 11 | x86_64 | `NBeeTv-<versión>-windows-x86_64.zip` | Herramientas de línea de comandos |
-| Windows 11 | arm64 | `NBeeTv-<versión>-windows-arm64.zip` | Herramientas de línea de comandos |
+| Linux | x86_64 | `NBeeTv-<versión>-linux-x86_64.tar.gz` | App de escritorio (`nbtv-gui`, requiere glibc 2.35 o posterior) y herramientas de línea de comandos (enlazadas estáticamente, para cualquier distribución) |
+| Linux | arm64 | `NBeeTv-<versión>-linux-arm64.tar.gz` | App de escritorio y herramientas de línea de comandos (igual que arriba) |
+| Windows 10, 11 | x86_64 | `NBeeTv-<versión>-windows-x86_64.zip` | App de escritorio (`nbtv-gui.exe`) y herramientas de línea de comandos |
+| Windows 11 | arm64 | `NBeeTv-<versión>-windows-arm64.zip` | App de escritorio y herramientas de línea de comandos |
 
 Todos los paquetes incluyen los archivos de pesos de los cuatro modos y funcionan nada más descomprimirlos. Las compilaciones de versiones aún no publicadas se pueden descargar de los Artifacts de cada ejecución en [Actions](https://github.com/pepefrog1234/NBeeTv/actions/workflows/build.yml) (hay que iniciar sesión en GitHub; se conservan 7 días).
 
@@ -82,9 +82,23 @@ Primer uso:
 La app también puede transmitir a horas programadas, imprimir una línea de texto sobre la imagen (Lienzo) y guardar las imágenes recibidas como imagen o como video. La interfaz está en chino tradicional, chino simplificado, japonés, español e inglés, y sigue el idioma del sistema.
 La guía completa está en [apps/macos/README.md](apps/macos/README.md).
 
+### La app de Windows y Linux
+
+Los paquetes de Windows y Linux incluyen `nbtv-gui` (`nbtv-gui.exe` en Windows): la interfaz gráfica de la app de macOS llevada a estos sistemas, con la misma disposición y el mismo comportamiento al recibir y transmitir. Se ejecuta nada más descomprimir; tiene que quedarse en la misma carpeta que `models/`.
+
+![La app de Windows y Linux mientras recibe](docs/images/desktop-receiving.es.png)
+
+*Esta imagen la generó el propio programa en Linux, sin abrir ninguna ventana, a partir de datos de demostración.*
+
+- **Windows**: el ejecutable no tiene firma de código, así que SmartScreen puede bloquearlo la primera vez. Cuando estés seguro de que el archivo viene de este repositorio, pulsa «Más información → Ejecutar de todas formas».
+- **Linux**: requiere glibc 2.35 o posterior (Ubuntu 22.04, Debian 12, Raspberry Pi OS bookworm y posteriores). El texto en chino y japonés de la interfaz necesita fuentes del sistema (por ejemplo `fonts-noto-cjk`); sin ellas, la interfaz se muestra en inglés.
+- Para usar un archivo de video como fuente de transmisión y para guardar como video las imágenes recibidas hay que instalar [ffmpeg](https://ffmpeg.org) (las imágenes no lo necesitan); para controlar el PTT con comandos CAT hay que instalar [Hamlib](https://github.com/Hamlib/Hamlib).
+
+> Esta app es nueva. Tiene comprobaciones automáticas completas en CI, pero **todavía nadie la ha usado en una computadora real con Windows o Linux conectada a un equipo de radio**: las tarjetas de sonido, las cámaras y el PTT por puerto serie no se han verificado con hardware de verdad. Antes de confiar en ella, lee «驗證過與還沒驗證的» (lo que se ha verificado y lo que no) en [apps/desktop/README.md](apps/desktop/README.md) (en chino tradicional), y por favor avisa de los problemas en Issues.
+
 ### Herramientas de línea de comandos
 
-Linux y Windows solo tienen por ahora las herramientas de línea de comandos, sin recepción ni transmisión en directo. Para transmitir se reproduce en el equipo el archivo WAV generado; para recibir se graba el audio del equipo en un archivo WAV y se decodifica.
+Todos los paquetes incluyen las herramientas de línea de comandos. Trabajan con archivos, no en directo: para transmitir se reproduce en el equipo el archivo WAV generado; para recibir se graba el audio del equipo en un archivo WAV y se decodifica.
 
 Al descomprimir el paquete, los ejecutables y `models/` quedan en la misma carpeta y se pueden usar ahí mismo. Las imágenes son siempre archivos PPM binarios de 96×72, que se pueden generar con ffmpeg.
 
@@ -155,6 +169,13 @@ cmake --build build-app
 open build-app/apps/macos/NBTV.app
 ```
 
+La app de Windows y Linux (al configurar se descargan SDL, Dear ImGui y stb; los paquetes que Linux necesita antes están en [apps/desktop/README.md](apps/desktop/README.md)):
+
+```sh
+cmake -S . -B build-desktop -DNBTV_BUILD_DESKTOP_APP=ON -DNBTV_BUILD_TESTS=OFF
+cmake --build build-desktop --config Release --target nbtv-gui
+```
+
 | Ruta | Contenido |
 | --- | --- |
 | `core/` | Biblioteca principal en C++20, independiente de la plataforma: transmisión y recepción OFDM, sincronización, estimación de canal e inferencia de la red neuronal. Su única interfaz pública es una API en C (`core/include/nbtv/nbtv.h`) |
@@ -162,13 +183,14 @@ open build-app/apps/macos/NBTV.app
 | `tools/` | Herramientas de línea de comandos; `tools/learned/` contiene el código de entrenamiento y exportación de los modelos (Python, PyTorch) |
 | `models/` | Archivos de pesos de los modelos |
 | `apps/macos/` | La app de macOS (SwiftUI) |
+| `apps/desktop/` | La app de Windows y Linux (C++, SDL 3, Dear ImGui) |
 | `apps/web/` | El sitio web de las tarjetas de recepción (Python, FastAPI) |
 
 ## Limitaciones actuales
 
 - El texto y los subtítulos salen emborronados, y las zonas pequeñas de color vivo pierden intensidad.
 - Nada autentica una trama ni su indicativo: cualquiera puede enviar imágenes con cualquier indicativo.
-- Linux y Windows todavía no tienen interfaz gráfica ni pueden recibir o transmitir en directo.
+- La app de Windows y Linux es nueva y solo se ha comprobado con pruebas automáticas; todavía no se ha verificado con una radio, una tarjeta de sonido, una cámara ni un puerto serie reales.
 - El texto de ayuda de las herramientas de línea de comandos y los documentos detallados de abajo solo están en chino tradicional por ahora.
 
 ## Documentación
@@ -177,6 +199,7 @@ Estos documentos están en chino tradicional.
 
 - [Notas técnicas](docs/TECHNICAL.md): resultados de simulación, comportamiento del receptor, estructura de la trama y decisiones de diseño, y lo que falta por hacer
 - [La app de macOS](apps/macos/README.md)
+- [La app de Windows y Linux](apps/desktop/README.md)
 - [Modelos y entrenamiento](tools/learned/README.md)
 - [El sitio web de las tarjetas de recepción](apps/web/README.md)
 - [Borrador de especificación v0.1](短波%20NBTV%20軟體規格草案%20v0.1.md): escrito antes de pasar a la codificación con red neuronal; siguen siendo válidas las partes sobre los parámetros OFDM, el preámbulo y los pilotos

@@ -57,10 +57,10 @@
 | macOS 14 及以上 | Intel | `NBeeTv-<版本>-macos-x86_64-app.zip` | NBTV.app |
 | macOS 11 及以上 | Apple 芯片 | `NBeeTv-<版本>-macos-arm64.tar.gz` | 命令行工具 |
 | macOS 11 及以上 | Intel | `NBeeTv-<版本>-macos-x86_64.tar.gz` | 命令行工具 |
-| Linux | x86_64 | `NBeeTv-<版本>-linux-x86_64.tar.gz` | 命令行工具（静态链接，不挑发行版） |
-| Linux | arm64 | `NBeeTv-<版本>-linux-arm64.tar.gz` | 命令行工具（静态链接） |
-| Windows 10、11 | x86_64 | `NBeeTv-<版本>-windows-x86_64.zip` | 命令行工具 |
-| Windows 11 | arm64 | `NBeeTv-<版本>-windows-arm64.zip` | 命令行工具 |
+| Linux | x86_64 | `NBeeTv-<版本>-linux-x86_64.tar.gz` | 桌面 app（`nbtv-gui`，需要 glibc 2.35 及以上）与命令行工具（静态链接，不挑发行版） |
+| Linux | arm64 | `NBeeTv-<版本>-linux-arm64.tar.gz` | 桌面 app 与命令行工具（同上） |
+| Windows 10、11 | x86_64 | `NBeeTv-<版本>-windows-x86_64.zip` | 桌面 app（`nbtv-gui.exe`）与命令行工具 |
+| Windows 11 | arm64 | `NBeeTv-<版本>-windows-arm64.zip` | 桌面 app 与命令行工具 |
 
 每一包都附带四个模式的权重文件，解压就能用。尚未发布的版本可以在 [Actions](https://github.com/pepefrog1234/NBeeTv/actions/workflows/build.yml) 每一次构建的 Artifacts 里下载（需要登录 GitHub，保留 7 天）。
 
@@ -82,9 +82,23 @@ NBTV.app 没有 Apple 的开发者签名与公证，只有 ad-hoc 签名，所�
 另外还有定时发射、在画面上印一行字（画布）、把收到的画面保存成图片或视频。界面有繁体中文、简体中文、日语、西班牙语与英语，按系统语言自动切换。
 完整的说明在 [apps/macos/README.md](apps/macos/README.md)。
 
+### Windows 与 Linux 的 app
+
+Windows 与 Linux 的下载包里有 `nbtv-gui`（Windows 是 `nbtv-gui.exe`）：把 macOS 的 app 移植过来的图形界面，版面与收发的流程相同。解压之后直接运行，它要和 `models/` 放在同一个文件夹里。
+
+![Windows 与 Linux 的 app，正在接收](docs/images/desktop-receiving.zh-Hans.png)
+
+*这张图是程序自己在 Linux 上不打开窗口、用演示数据算出来的。*
+
+- **Windows**：可执行文件没有代码签名，第一次运行时 SmartScreen 可能会拦下来；确认文件是从这个 repo 下载的之后，点“更多信息 → 仍要运行”。
+- **Linux**：需要 glibc 2.35 及以上（Ubuntu 22.04、Debian 12、Raspberry Pi OS bookworm 及之后的版本）。界面的中文、日文要靠系统的字体（例如 `fonts-noto-cjk`），找不到的话会改用英文显示。
+- 用视频文件作为发射来源、把收到的画面保存成视频，需要另外安装 [ffmpeg](https://ffmpeg.org)（图片文件不需要）；用 CAT 指令控制 PTT 需要另外安装 [Hamlib](https://github.com/Hamlib/Hamlib)。
+
+> 这个 app 是新的：它在 CI 上有完整的自动检查，但**还没有人在真正的 Windows、Linux 电脑上接着电台用过**——真实的声卡、摄像头、串口的 PTT 都还没有实机验证。使用之前请先看 [apps/desktop/README.md](apps/desktop/README.md)（繁体中文）里的“驗證過與還沒驗證的”（验证过与还没验证的），遇到问题欢迎到 Issues 反馈。
+
 ### 命令行工具
 
-Linux 与 Windows 目前只有命令行工具，不能实时收发：发射是把做好的 WAV 文件播放给电台，接收是把电台的声音录成 WAV 文件再解码。
+每个平台的下载包里都有命令行工具，处理的是文件，不是实时收发：发射是把做好的 WAV 文件播放给电台，接收是把电台的声音录成 WAV 文件再解码。
 
 解压之后，可执行文件和 `models/` 在同一个文件夹里，直接运行即可。图像一律是 96×72 的二进制 PPM，可以用 ffmpeg 转换。
 
@@ -155,6 +169,13 @@ cmake --build build-app
 open build-app/apps/macos/NBTV.app
 ```
 
+Windows 与 Linux 的 app（配置时会下载 SDL、Dear ImGui、stb；Linux 需要先安装的包见 [apps/desktop/README.md](apps/desktop/README.md)）：
+
+```sh
+cmake -S . -B build-desktop -DNBTV_BUILD_DESKTOP_APP=ON -DNBTV_BUILD_TESTS=OFF
+cmake --build build-desktop --config Release --target nbtv-gui
+```
+
 | 路径 | 内容 |
 | --- | --- |
 | `core/` | 与平台无关的 C++20 核心库：OFDM 收发、同步、信道估计、神经网络的推理。对外只有一个 C API（`core/include/nbtv/nbtv.h`） |
@@ -162,13 +183,14 @@ open build-app/apps/macos/NBTV.app
 | `tools/` | 命令行工具；`tools/learned/` 是模型的训练与导出程序（Python、PyTorch） |
 | `models/` | 模型的权重文件 |
 | `apps/macos/` | macOS 的 app（SwiftUI） |
+| `apps/desktop/` | Windows 与 Linux 的 app（C++、SDL 3、Dear ImGui） |
 | `apps/web/` | 收听卡网站（Python、FastAPI） |
 
 ## 目前的限制
 
 - 文字与字幕会被抹糊，小块的鲜艳颜色会变淡。
 - 帧与呼号没有验证身份的机制，谁都可以用任何呼号发出画面。
-- Linux 与 Windows 还没有图形界面，也不能实时收发。
+- Windows 与 Linux 的 app 是新的，只有自动检查，还没有接着真实的电台、声卡、摄像头与串口验证过。
 - 命令行工具的说明与下面的详细文档目前只有繁体中文。
 
 ## 文档
@@ -177,6 +199,7 @@ open build-app/apps/macos/NBTV.app
 
 - [技术说明](docs/TECHNICAL.md)：仿真结果、接收机的行为、帧结构与设计上的取舍、还没做的事
 - [macOS 的 app](apps/macos/README.md)
+- [Windows 与 Linux 的 app](apps/desktop/README.md)
 - [模型与训练](tools/learned/README.md)
 - [收听卡网站](apps/web/README.md)
 - [规格草案 v0.1](短波%20NBTV%20軟體規格草案%20v0.1.md)：写于改用神经网络之前，OFDM 参数、前导符号与导频的部分仍然适用

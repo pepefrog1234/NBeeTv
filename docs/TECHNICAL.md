@@ -9,9 +9,9 @@
 - **畫面的編碼**：類神經網路把畫面直接變成通道上的值（「學習式」的編碼，實驗中），沒有量化也沒有糾錯碼；
   訊號愈弱畫面愈糊，但不會整張收不到。收發兩邊要用同一份模型的權重。
 - **四個模式**：模式 14 每張 0.67 秒、模式 12 每張 1.04 秒、模式 11 與 13 每張 2.72 秒（13 用的是大四倍的網路，畫質再高 0.1–0.6 dB）。
-  愈慢的模式一張畫面送的值愈多，畫面愈細。命令列工具與 macOS 的 app 都可以收發。
+  愈慢的模式一張畫面送的值愈多，畫面愈細。命令列工具、macOS 的 app、Windows 與 Linux 的 app 都可以收發。
 - **收聽卡網站**（`apps/web/`）：聽眾上傳從無線電錄下來的 WAV 檔，解得出來就發一張有數位簽章的收聽卡。
-- 先做 macOS，之後不排除 iOS 與 Android。
+- 圖形介面先做了 macOS，再照它搬到 Windows 與 Linux（`apps/desktop/`）；之後不排除 iOS 與 Android。
 
 **已經移除的模式**（2026-11-23）：原本另有六個數位模式（OFDM＋LDPC，每張是一張 AV1 影像，編號 0–5）與三個相干類比模式
 （直接傳 DCT 係數，編號 8–10）。照片在同樣的播出時間下，學習式的模式在量過的每一種通道與訊雜比都不比類比模式差，訊雜比愈低贏得愈多
@@ -39,6 +39,7 @@
 | `tools/` | 命令列工具：`nbtv-tx`、`nbtv-rx`、`nbtv-chan`、`nbtv-sim`、`nbtv-learned`。`design/` 是產生核心常數用的設計工具，`learned/` 是模型的訓練與匯出程式（Python）。 |
 | `models/` | 模型的權重檔，每個模式一份，以模型訓練完成的日期命名（年月日-當天第幾個，例如 `261123-1.bin`）：模式 11、12 的各約 11.8 MB，模式 13、14 的各約 46 MB。另有接收端「合併最近幾幀」用的小網路的權重，每個畫面模型各配一份（各不到 1 MB）。 |
 | `apps/macos/` | macOS 外殼（SwiftUI）。 |
+| `apps/desktop/` | Windows 與 Linux 的桌面 app `nbtv-gui`（C++、SDL 3、Dear ImGui）：版面與收發流程照 macOS 外殼。見 [apps/desktop/README.md](../apps/desktop/README.md)。 |
 | `apps/web/` | 收聽卡網站（Python）：上傳錄音、用 `nbtv-rx` 解碼、發卡、簽章與查驗。架設方式見 [apps/web/README.md](../apps/web/README.md)。 |
 | `.github/workflows/build.yml` | GitHub Actions：在 Linux、macOS、Windows 的 x86_64 與 arm64 上建置、測試、打包；推版本標籤時發佈到 Releases。 |
 | `docs/` | 這份技術說明，以及 README 用的圖。 |
@@ -59,7 +60,8 @@ ctest --test-dir build --output-on-failure
 
 **安裝與打包**：`cmake --install build --prefix <目錄>` 把五個命令列工具裝到 `bin/`、權重檔裝到 `share/nbtv/models/`。
 設定時加上 `-DNBTV_INSTALL_FLAT=ON` 則全部放在同一層（執行檔旁邊就是 `models/`），整個目錄可以直接打包給別人；
-GitHub 上的下載包就是這樣做的（`.github/workflows/build.yml`：Linux 整個靜態連結，Windows 靜態連結 C 執行階段）。
+GitHub 上的下載包就是這樣做的（`.github/workflows/build.yml`：Linux 的命令列工具整個靜態連結（`-DNBTV_STATIC_TOOLS=ON`），Windows 靜態連結 C 執行階段；
+Windows 與 Linux 的包裡另外有桌面 app）。
 工具找權重檔的順序是：環境變數 `NBTV_MODEL_DIR` 指的目錄、執行檔旁邊的 `models/`、執行檔上一層的 `share/nbtv/models/`、
 建置時專案的 `models/`（`tools/model_file.hpp`），所以從建置目錄直接執行、裝到別處、搬到別台電腦都找得到。
 
@@ -69,6 +71,13 @@ macOS 外殼另外開一個建置目錄，細節見 [apps/macos/README.md](../ap
 cmake -S . -B build-app -G Ninja -DNBTV_BUILD_MACOS_APP=ON
 cmake --build build-app
 # 同一台電腦要同時開兩個（兩部電台互相收發）：設定時再加 -DNBTV_MACOS_SECOND_APP=ON，會多做出 NBTV 2.app
+```
+
+Windows 與 Linux 的桌面 app 加上 `-DNBTV_BUILD_DESKTOP_APP=ON`（設定時會下載 SDL、Dear ImGui、stb），細節見 [apps/desktop/README.md](../apps/desktop/README.md)：
+
+```sh
+cmake -S . -B build-desktop -DNBTV_BUILD_DESKTOP_APP=ON -DNBTV_BUILD_TESTS=OFF
+cmake --build build-desktop --config Release --target nbtv-gui
 ```
 
 ## 命令列工具
@@ -113,8 +122,9 @@ build/tools/nbtv-learned --snr 10 --out out/learned.ppm core/tests/data/cat.ppm
 | 接收端合併最近幾幀 | 實驗中：核心、C API、命令列工具與 macOS 的 app 都接上了，含測試（C++ 的計算和 PyTorch 逐一對過）；四個模式各有一份權重。只在模擬裡驗證過 |
 | C API、48 kHz 重取樣、瀑布圖頻譜 | 完成，含測試 |
 | 通道模擬與命令列工具 | 完成 |
-| Linux、macOS、Windows（x86_64 與 arm64）的建置與下載包 | 完成：GitHub Actions 在六種平台上各自建置、跑完測試、用下載包實際收發一次；macOS 另外建置 NBTV.app 並跑它的自我測試。Linux 與 Windows 只有命令列工具 |
+| Linux、macOS、Windows（x86_64 與 arm64）的建置與下載包 | 完成：GitHub Actions 在六種平台上各自建置、跑完測試、用下載包實際收發一次；macOS 另外建置 NBTV.app 並跑它的自我測試；Windows 與 Linux 另外建置桌面 app 並跑它的自我測試、開視窗幾秒鐘 |
 | macOS 外殼（SwiftUI） | 第一版完成：五張版面、收發流程、PTT（VOX／序列埠／rigctld）。以內附測試圖的模擬收發驗證過；鏡頭擷取與真的序列埠控制線還沒測，細節見 [apps/macos/README.md](../apps/macos/README.md) |
+| Windows 與 Linux 的桌面 app（`apps/desktop/`） | 第一版完成：把 macOS 外殼的版面與收發流程搬過來（SDL 3 與 Dear ImGui），五種語言。29 項自我測試在 Windows、Linux 的 x86_64、arm64 上都跑過（模擬的輸出、只做紀錄的 PTT、SDL 的假音訊驅動、Hamlib 的假電台）。**真的音效裝置、鏡頭、序列埠、電台都還沒有實機驗證**，也還沒有人在 Windows、Linux 上實際操作過，細節見 [apps/desktop/README.md](../apps/desktop/README.md) |
 | 收聽卡網站（`apps/web/`） | 第一版完成，含測試：上傳、解碼、發卡、數位簽章（自己簽發的根憑證與簽章憑證）、C2PA、序號與離線查驗、Cloudflare Turnstile。自動測試用的是合成的錄音與假的查證服務；正式的網域上（經過 Cloudflare Tunnel 與 Turnstile）實際上傳、出卡、查驗走過一次。見 [apps/web/README.md](../apps/web/README.md) |
 | 數位模式（LDPC＋AV1）、相干類比模式 | 做完之後在 2026-11-23 移除（見最上面的說明） |
 | 實機測試（音訊線迴路、假負載、空中） | 未開始 |
@@ -358,6 +368,7 @@ S1 也和目前的模式對得上，就照樣當成一幀；訊號一停，導�
 - 更高解析度的檔位、呼號的可讀識別（草案的未決事項）。
 - 強的窄頻干擾：自動陷波，或是把被干擾的導頻排除在通道估測之外。
 - 實機測試之後才能定的東西：收發機濾波器對頻帶邊緣的影響、削波門檻、PTT 的時序。
+- Windows 與 Linux 的桌面 app 在真的電腦與電台上的驗證（音效裝置、鏡頭、序列埠的 PTT、Windows 上的 Hamlib、Wayland）。
 
 ## 授權
 
