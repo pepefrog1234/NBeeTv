@@ -1,0 +1,195 @@
+# 在六種平台上建置、測試、打包：Linux、macOS、Windows，各有 x86_64 與 arm64。
+#
+# 每個平台都在那個平台、那種處理器的機器上編譯並跑完測試，不是交叉編譯。產物是可以直接解開來用的下載包：
+#   NBeeTv-<版本>-<平台>.tar.gz（Windows 是 .zip）  命令列工具與 models/，放在同一層
+#   NBeeTv-<版本>-macos-<處理器>-app.zip             macOS 的 NBTV.app
+#
+# 什麼時候跑：推到 main、開 PR、手動執行時，下載包留在那一次執行的 Artifacts 裡（7 天）；
+# 推版本標籤（v 開頭，例如 v0.1.0）時，另外把全部的下載包放上 GitHub Releases。
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 同一個分支又推了新的提交，舊的那一次就不必跑完；版本標籤的那一次不取消。
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            runner: ubuntu-24.04
+            file_says: "x86-64.*static"
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+            file_says: "aarch64.*static"
+          - target: macos-x86_64
+            runner: macos-26-intel
+            file_says: "x86_64"
+          - target: macos-arm64
+            runner: macos-26
+            file_says: "arm64"
+          - target: windows-x86_64
+            runner: windows-2025
+            vs_arch: x64
+            file_says: "x86-64"
+          - target: windows-arm64
+            runner: windows-11-arm
+            vs_arch: ARM64
+            file_says: "aarch64|arm64"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 下載包的名稱
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$(git rev-parse --short=7 HEAD)"
+          fi
+          echo "PACKAGE=NBeeTv-$version-${{ matrix.target }}" >> "$GITHUB_ENV"
+
+      # Linux：整個靜態連結，不挑發行版與 glibc 的版本。
+      # macOS：命令列工具最低支援 macOS 11（NBTV.app 另外設定，見下面）。
+      # Windows：C 執行階段靜態連結，使用者不必另外裝 Visual C++ 的可轉散發套件。
+      - name: 設定
+        run: |
+          case "$RUNNER_OS" in
+            Linux)
+              cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DNBTV_INSTALL_FLAT=ON \
+                -DCMAKE_EXE_LINKER_FLAGS=-static ;;
+            macOS)
+              cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DNBTV_INSTALL_FLAT=ON \
+                -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 ;;
+            Windows)
+              cmake -S . -B build -A "${{ matrix.vs_arch }}" -DNBTV_INSTALL_FLAT=ON \
+                -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded ;;
+          esac
+
+      - name: 建置
+        run: cmake --build build --config Release --parallel
+
+      - name: 測試
+        run: ctest --test-dir build -C Release --output-on-failure --parallel 4 --timeout 2400
+
+      - name: 打包
+        run: cmake --install build --config Release --prefix "dist/$PACKAGE"
+
+      # 下載包的名稱說是哪一種處理器，裡面的執行檔就要真的是那一種。
+      - name: 確認執行檔是給這個平台的
+        run: |
+          exe="dist/$PACKAGE/nbtv-rx"
+          [ "$RUNNER_OS" = Windows ] && exe="$exe.exe"
+          file "$exe"
+          file "$exe" | grep -i -E -q "${{ matrix.file_says }}"
+
+      # 把下載包搬到別的目錄，並且把專案自己的 models/ 藏起來：這時包裡的工具只找得到自己旁邊的權重檔。
+      # 檔名刻意用中文，Windows 上也要開得了。
+      - name: 只靠下載包收發一次
+        run: |
+          work="$RUNNER_TEMP/試用 trial"
+          mkdir -p "$work"
+          cp -R "dist/$PACKAGE" "$work/"
+          cp core/tests/data/cat.ppm "$work/貓.ppm"
+          cp core/tests/data/coffee.ppm core/tests/data/rocket.ppm "$work/"
+          mv models models.hidden
+          trap 'mv "$GITHUB_WORKSPACE/models.hidden" "$GITHUB_WORKSPACE/models"' EXIT
+          cd "$work"
+          tools="./$PACKAGE"
+          "$tools/nbtv-tx" --mode 14 --call N0CALL --out 發射.wav 貓.ppm coffee.ppm rocket.ppm
+          "$tools/nbtv-chan" --channel awgn --snr 12 --offset 37 --ppm 40 發射.wav 收到.wav
+          "$tools/nbtv-rx" --json --merge --out-dir . 收到.wav | tee rx.json
+          grep -q '"callsign":"N0CALL"' rx.json
+          grep -q '"end":true,"frames":3,"pictures":3' rx.json
+          test -s frame_2.ppm
+          "$tools/nbtv-sim" --mode 12 --channel poor --snr 10 --frames 8 --image 貓.ppm
+          "$tools/nbtv-learned" --mode 13 --snr 10 貓.ppm coffee.ppm
+
+      - name: 壓縮
+        run: |
+          cd dist
+          if [ "$RUNNER_OS" = Windows ]; then
+            cmake -E tar cf "$PACKAGE.zip" --format=zip "$PACKAGE"
+          else
+            tar -czf "$PACKAGE.tar.gz" "$PACKAGE"
+          fi
+          rm -rf "$PACKAGE"
+
+      # macOS 的 app：另外一個建置目錄（Swift 要用 Ninja），最低支援 macOS 14。
+      # 簽章是 ad-hoc 的（沒有 Apple 的開發者憑證，也沒有公證），使用者第一次開啟要自己放行，README 有寫。
+      - name: 建置 NBTV.app
+        if: runner.os == 'macOS'
+        run: |
+          cmake -S . -B build-app -G Ninja -DCMAKE_BUILD_TYPE=Release -DNBTV_BUILD_MACOS_APP=ON \
+            -DNBTV_BUILD_TESTS=OFF -DNBTV_BUILD_TOOLS=OFF -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0
+          cmake --build build-app
+          app=build-app/apps/macos/NBTV.app
+          codesign --verify --deep --strict --verbose=2 "$app"
+          file "$app/Contents/MacOS/NBTV"
+          file "$app/Contents/MacOS/NBTV" | grep -i -E -q "${{ matrix.file_says }}"
+
+      # app 自己的檢查：模型、核心收發、存檔、影片來源、定時發射、翻譯……都不碰音訊裝置與鏡頭。
+      - name: NBTV.app 的自我測試
+        if: runner.os == 'macOS'
+        run: build-app/apps/macos/NBTV.app/Contents/MacOS/NBTV --selftest --no-devices
+
+      - name: 壓縮 NBTV.app
+        if: runner.os == 'macOS'
+        run: ditto -c -k --keepParent build-app/apps/macos/NBTV.app "dist/$PACKAGE-app.zip"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.PACKAGE }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  # 推版本標籤時：把六個平台的下載包與一份 SHA-256 清單放上 GitHub Releases。
+  release:
+    name: release
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: SHA-256 清單
+        run: |
+          cd dist
+          sha256sum NBeeTv-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: 發佈
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+              --title "NBeeTv ${GITHUB_REF_NAME#v}" --generate-notes --verify-tag
+          fi
