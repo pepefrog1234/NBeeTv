@@ -260,6 +260,11 @@ int run_window(const Options& options) {
             ImGui_ImplSDL3_ProcessEvent(&event);
             if (event.type == SDL_EVENT_QUIT) loop.running = false;
             if (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && event.window.windowID == SDL_GetWindowID(loop.window)) loop.running = false;
+            if (event.type == SDL_EVENT_DROP_FILE && event.drop.data != nullptr && app.live) {
+                // 把檔案拖進視窗：當成在「影片檔」那裡選了它（影片或圖片），發射來源也換過去
+                app.set_source_kind(SourceKind::video);
+                app.open_video(event.drop.data, true);
+            }
             if (event.type != wake_event) loop.last_input = now;
             got = SDL_PollEvent(&event);
         }
