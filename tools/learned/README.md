@@ -780,7 +780,7 @@ python3 train.py --train data/train.npy --val data/val.npy --latent 72 \
 重設接收機會忘掉前面的幀。
 
 核心預設不合併（`RxTuning::learned_merge`，C API 是 `nbtv_rx_set_merge` 加 `nbtv_rx_set_merging`）；`nbtv-rx --merge`、`nbtv-sim --merge`
-與 app 設定裡的「合併最近幾幀」（預設開）會打開。權重每個畫面模型各一份，檔案裡記著配的是哪個模型的識別碼；
+會打開；macOS 的 app 接收時固定開著（原本是設定裡的選項，2026-11-25 起不能關）。權重每個畫面模型各一份，檔案裡記著配的是哪個模型的識別碼；
 某個模式沒有對應的權重時，照原來的方式解。四個模式都有。
 
 ### 訓練與匯出

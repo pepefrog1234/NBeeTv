@@ -387,6 +387,11 @@ final class AudioOutput {
             self.renderedFrames += Int64(frames)
             self.silentFrames += Int64(frames - got)
             if got > 0, got < frames { self.underruns += 1 }
+            // 和真的裝置一樣照輸出音量調整（見 render），所以發射中改音量，取走的取樣也立刻跟著變
+            let g = self.gain
+            if g != 1.0 {
+                for index in 0..<got { block[index] *= g }
+            }
             self.simulatedSink?(block)
         }
         simulationTimer = timer

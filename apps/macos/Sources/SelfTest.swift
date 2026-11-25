@@ -7,7 +7,9 @@
 //   2. 影片檔來源（做一段影片、開啟、跳到指定位置、取一格），以及用影片當來源的整個發射流程
 //      （音訊輸出換成模擬的、PTT 換成記錄用的：按下發射自動播放，播完自動停止、放開 PTT），
 //      以及定時發射（另外把時鐘換成假的：到了時間自動發射、該跳過的時候跳過、超過上限自動停止）
-//   3. rigctld 的 PTT（要給 --rig，對著真的 rigctld 測）
+//      把一段收到的畫面存成影片（讀回來檢查格式與每一格）、畫布（印在送出畫面上的字，含經過整個發射流程）
+//   3. rigctld 的 PTT（要給 --rig，對著真的 rigctld 測）；用 CAT 指令的 PTT 用 Hamlib 不接電台的示範機測
+//      （自己開的 rigctld，只聽本機的臨時連接埠，不碰任何序列埠；這台電腦沒有裝 Hamlib 就略過）
 //   4. 音訊輸出（需要 BlackHole 虛擬音效卡）
 //   5. 經 BlackHole 自發自收（另外需要麥克風權限）
 import AppKit
@@ -155,23 +157,38 @@ enum SelfTest {
         report("合併最近幾幀的權重", MergeWeights.loaded.count == MergeWeights.resourceNames.count
                    && MergeWeights.modelIDs.allSatisfy { LearnedModel.ids.contains($0) },
                merges.isEmpty ? "app 裡沒有" : merges.joined(separator: "；"))
-        testCoreLoopback(coffee)
-        testMergeFrames(coffee)
-        testFlatPictures()
-        testExport(coffee)
-        testDroppedFrameTail(coffee, rocket)
-        testResampler(coffee)
-        testVideoFile(rocket)
-        testReceivedHistory(coffee)
-        testVideoTransmit(rocket)
-        testScheduleTimes()
-        testScheduledTransmit(rocket)
+        // 開發用：--only <關鍵字> 只跑下面這一串裡關鍵字相符的幾項（改了某一塊，不必每次等全部跑完）
+        let only = option("--only", in: arguments)
+        func run(_ key: String, _ test: () -> Void) {
+            if only == nil || key.contains(only ?? "") { test() }
+        }
+        run("core") { testCoreLoopback(coffee) }
+        run("merge") { testMergeFrames(coffee) }
+        run("flat") { testFlatPictures() }
+        run("export") { testExport(coffee) }
+        run("tail") { testDroppedFrameTail(coffee, rocket) }
+        run("resampler") { testResampler(coffee) }
+        run("videofile") { testVideoFile(rocket) }
+        run("history") { testReceivedHistory(coffee) }
+        run("sequence") { testSequenceVideo(coffee, rocket) }
+        run("videotransmit") { testVideoTransmit(rocket) }
+        run("canvas") { testCanvas(coffee) }
+        run("canvas-onair") { testCanvasOnAir(rocket) }
+        run("schedule") { testScheduleTimes() }
+        run("schedule-transmit") { testScheduledTransmit(rocket) }
+        if only != nil {
+            run("serial") { testSerialErrors() }
+            run("hamlib") { testHamlib() }
+            print("[selftest] （只跑了「\(only ?? "")」相符的項目）\(failures == 0 ? "沒有失敗的項目" : "\(failures) 項失敗")")
+            return failures == 0 ? 0 : 1
+        }
         if useCamera {
             testCamera(ask: arguments.contains("--ask-camera"), savePath: option("--save-camera-frame", in: arguments))
         } else {
             report("鏡頭", nil, "指定了不開鏡頭")
         }
         testSerialErrors()
+        testHamlib()
         if let index = arguments.firstIndex(of: "--rig"), index + 1 < arguments.count {
             testRigctld(arguments[index + 1])
         } else {
@@ -217,6 +234,7 @@ enum SelfTest {
     /// 合併最近幾幀：同一張畫面在很弱的訊號下連續送 6 張。打開合併之後，後面幾張要比不合併的接近原圖；
     /// 第一張前面沒有東西可以合，兩者一模一樣。雜訊是固定種子的亂數，每次的結果相同。
     private static func testMergeFrames(_ image: Data) {
+        var checkedAppReceiver = false
         for mode in Modes.all {
             guard let modelID = LearnedModel.id(values: mode.learnedValues, width: mode.learnedWidth),
                   MergeWeights.covers(modelID: modelID) else {
@@ -263,6 +281,14 @@ enum SelfTest {
             let after = merged[3...].map { difference($0, image) }.reduce(0, +) / 3
             report("合併最近幾幀（\(mode.label)）", plain[0] == merged[0] && after < before,
                    String(format: "訊雜比 3 dB、同一張畫面：第 4–6 張和原圖平均差 %.1f／255，不合併是 %.1f", after, before))
+            // app 接收用的接收機固定開著合併（設定裡已經沒有這個選項）：解出來的要和打開合併的一模一樣，而且和沒有合併的不同
+            if !checkedAppReceiver {
+                checkedAppReceiver = true
+                let app = Demo.receive(audio, receiver: RadioEngine.makeReceiver()).flatMap(\.frames)
+                    .filter { $0.decoded && $0.modeID == mode.id }.compactMap(\.rgb)
+                report("合併最近幾幀：app 的接收機固定開著", app == merged && app != plain,
+                       app == merged ? "\(mode.name) 的 6 張和打開合併的逐位元相同" : "和打開合併的結果不同")
+            }
         }
     }
 
@@ -690,15 +716,177 @@ enum SelfTest {
         for _ in 0..<(AppModel.historyLimit + extra - 2) { model.add(frames[0], time: Date()) }
         model.add(frames[1], time: Date())
         ok = ok && model.history.count == AppModel.historyLimit && model.history[0].snrDb == frames[1].snrDb
-        // 點選的那一張被擠掉之後，主畫面回到最新的
-        if let oldest = model.history.last {
-            model.select(oldest)
-            ok = ok && model.displayedFrame?.id == oldest.id
-            for _ in 0..<3 { model.add(frames[0], time: Date()) }
-            ok = ok && model.displayedFrame?.id == model.history.first?.id
-        }
         report(name, ok, String(format: "兩張的訊雜比 %@、%@（通道是 18、6 dB）；最多留 %d 張", AppModel.snrText(frames[0].snrDb),
                                 AppModel.snrText(frames[1].snrDb), AppModel.historyLimit))
+
+        // 點選了不是最新的那一張：主畫面顯示它。之後有新的畫面進來，主畫面要換成新的那一張，不能停在原來點選的
+        // （沒有解出畫面的幀不算，主畫面不動）。點最新的那一張等於沒有點選。
+        var problems: [String] = []
+        let older = model.history[3]
+        model.select(older)
+        if model.displayedFrame?.id != older.id { problems.append("點選之後主畫面不是點的那一張") }
+        model.add(DecodedFrame(modeID: 12, decoded: false, modelMissing: false, headerOK: false, callsign: "", sequence: -1,
+                               snrDb: 0, offsetHz: 0, rgb: nil), time: Date())
+        if model.displayedFrame?.id != older.id { problems.append("沒有解出畫面的幀也讓主畫面換掉了") }
+        model.add(frames[0], time: Date())
+        if model.displayedFrame?.id != model.history.first?.id || model.selectedID != nil {
+            problems.append("有新的畫面進來，主畫面還停在原來點選的那一張")
+        }
+        if !model.history.contains(where: { $0.id == older.id }) { problems.append("原來點選的那一張不見了") }
+        if let newest = model.history.first {
+            model.select(newest)
+            if model.selectedID != nil { problems.append("點最新的那一張之後沒有回到「跟著最新的」") }
+        }
+        report("收到的畫面：有新的進來就換成最新的那一張", problems.isEmpty,
+               problems.isEmpty ? "點選第 4 張 → 收到新的一張 → 主畫面是新的那一張" : problems.joined(separator: "；"))
+    }
+
+    // MARK: 把一段畫面存成影片
+
+    /// 讀回一個影片檔：編碼格式（四個字元的代碼）、畫面大小、格率、長度，以及每一格解出來的畫面（每 10×10 取中間那一點，縮回 96×72 的 RGB）。
+    private static func readVideo(_ url: URL) -> (codec: String, size: CGSize, frameRate: Float, seconds: Double, frames: [Data])? {
+        let asset = AVURLAsset(url: url)
+        var loaded: (track: AVAssetTrack, codec: String, size: CGSize, rate: Float, seconds: Double)?
+        var finished = false
+        Task {
+            var result: (track: AVAssetTrack, codec: String, size: CGSize, rate: Float, seconds: Double)?
+            if let track = try? await asset.loadTracks(withMediaType: .video).first,
+               let formats = try? await track.load(.formatDescriptions), let format = formats.first,
+               let size = try? await track.load(.naturalSize), let rate = try? await track.load(.nominalFrameRate),
+               let duration = try? await asset.load(.duration) {
+                let code = CMFormatDescriptionGetMediaSubType(format)
+                let text = String(bytes: [24, 16, 8, 0].map { UInt8((code >> UInt32($0)) & 0xFF) }, encoding: .ascii) ?? "?"
+                result = (track, text, size, rate, duration.seconds)
+            }
+            let value = result
+            DispatchQueue.main.async {
+                loaded = value
+                finished = true
+            }
+        }
+        guard Demo.wait(timeout: 15, until: { finished }), let loaded, let reader = try? AVAssetReader(asset: asset) else { return nil }
+        let output = AVAssetReaderTrackOutput(track: loaded.track, outputSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA])
+        guard reader.canAdd(output) else { return nil }
+        reader.add(output)
+        guard reader.startReading() else { return nil }
+        var frames: [Data] = []
+        while let sample = output.copyNextSampleBuffer() {
+            guard let buffer = CMSampleBufferGetImageBuffer(sample) else { continue }
+            CVPixelBufferLockBaseAddress(buffer, .readOnly)
+            defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+            guard let base = CVPixelBufferGetBaseAddress(buffer) else { continue }
+            let stride = CVPixelBufferGetBytesPerRow(buffer), scale = SequenceVideo.scale
+            guard CVPixelBufferGetWidth(buffer) == SequenceVideo.width, CVPixelBufferGetHeight(buffer) == SequenceVideo.height else { continue }
+            let pixels = base.assumingMemoryBound(to: UInt8.self)
+            var rgb = Data(count: NBTV.rgbBytes)
+            rgb.withUnsafeMutableBytes { raw in
+                let dst = raw.bindMemory(to: UInt8.self)
+                for y in 0..<NBTV.imageHeight {
+                    for x in 0..<NBTV.imageWidth {
+                        let source = pixels + (y * scale + scale / 2) * stride + (x * scale + scale / 2) * 4   // BGRA
+                        let index = 3 * (y * NBTV.imageWidth + x)
+                        dst[index] = source[2]
+                        dst[index + 1] = source[1]
+                        dst[index + 2] = source[0]
+                    }
+                }
+            }
+            frames.append(rgb)
+        }
+        return (loaded.codec, loaded.size, loaded.rate, loaded.seconds, frames)
+    }
+
+    /// 「儲存影片」：哪些畫面算同一段（同一個呼號、空檔不到 10 秒），以及存出來的影片檔。
+    /// 影片實際寫出來再讀回：要是 H.264 的 .mp4、每秒 24 格、960×720，每一張顯示的時間和當時收到的間隔一樣，畫面的內容也對。
+    private static func testSequenceVideo(_ coffee: Data, _ rocket: Data) {
+        let name = "把一段收到的畫面存成影片"
+        guard let cat = Demo.testImage("cat"), let mode = Modes.find(12) ?? Modes.all.first else {
+            report(name, false, "少了測試圖或模式")
+            return
+        }
+        let pictures = [coffee, rocket, cat]
+        let images = pictures.compactMap { NBTV.image(fromRGB: $0) }
+        guard images.count == 3 else {
+            report(name, false, "測試圖轉不成影像")
+            return
+        }
+        // 七張畫面：同一個呼號接連三張（中間有一次 9.5 秒的空檔）；隔了 10.5 秒再兩張（第二張的標頭沒解出來，不知道呼號）；
+        // 緊接著換另一個呼號的兩張。空檔是前一張收完到後一張開始送之間的時間。
+        let length = mode.frameSeconds
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+        let plan: [(call: String, gap: Double)] = [("N0CALL", 0), ("N0CALL", 0), ("N0CALL", 9.5), ("N0CALL", 10.5), ("", 0), ("W1AW", 0), ("W1AW", 0)]
+        var time = base
+        var frames: [AppModel.ReceivedFrame] = []
+        for (index, item) in plan.enumerated() {
+            if index > 0 { time = time.addingTimeInterval(item.gap + length) }
+            frames.append(AppModel.ReceivedFrame(image: images[index % 3], modeID: mode.id, callsign: item.call, sequence: index, time: time, snrDb: 10))
+        }
+        let history = Array(frames.reversed())   // app 裡是新的在前
+        var problems: [String] = []
+        let expected = [[0, 1, 2], [0, 1, 2], [0, 1, 2], [3, 4], [3, 4], [5, 6], [5, 6]]
+        for (index, frame) in frames.enumerated() {
+            let got = AppModel.sequence(containing: frame.id, in: history).map { member in frames.firstIndex { $0.id == member.id } ?? -1 }
+            if got != expected[index] { problems.append("第 \(index + 1) 張所在的一段是 \(got.map { $0 + 1 })，應該是 \(expected[index].map { $0 + 1 })") }
+        }
+        if !AppModel.sequence(containing: UUID(), in: history).isEmpty { problems.append("不在清單裡的畫面也找到了一段") }
+        let fileName = AppModel.videoFileName(for: Array(frames[3...4]))
+        if !fileName.hasPrefix("NBTV-N0CALL-") || !fileName.hasSuffix(".mp4") { problems.append("預設檔名是 \(fileName)") }
+
+        // 把第一段（三張）經過 app 的狀態物件存成影片：主畫面顯示其中一張時，「儲存影片」存的就是這一段
+        let model = AppModel(settings: AppSettings(store: nil), live: false)
+        model.history = history
+        model.select(frames[1])
+        let sequence = model.displayedSequence
+        if sequence.map(\.id) != frames[0...2].map(\.id) { problems.append("主畫面那一張所在的一段不是前三張") }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("nbtv-selftest-sequence-\(getpid()).mp4")
+        defer { try? FileManager.default.removeItem(at: url) }
+        var result: Result<SequenceVideo.Summary, Error>?
+        let began = Date()
+        model.exportSequence(sequence, to: url) { result = $0 }
+        let busy = model.exportingVideo
+        guard Demo.wait(timeout: 60, until: { result != nil }), case .success(let summary)? = result else {
+            if case .failure(let error)? = result { problems.append("存檔失敗：\(error.localizedDescription)") } else { problems.append("存檔一直沒有結束") }
+            report(name, false, problems.joined(separator: "；"))
+            return
+        }
+        let spent = Date().timeIntervalSince(began)
+        if !busy || model.exportingVideo { problems.append("「儲存中」的狀態不對") }
+        if model.notice?.contains(url.lastPathComponent) != true { problems.append("底列沒有寫存成了哪個檔案") }
+
+        // 時間軸：第二張在 length 秒、第三張在 2×length＋9.5 秒開始，最後一張停留 length 秒
+        let starts = [0, length, 2 * length + 9.5]
+        let first = starts.map { Int(($0 * 24).rounded()) }
+        let total = first[2] + max(1, Int((max(1, length) * 24).rounded()))
+        if summary.pictures != 3 || summary.videoFrames != total { problems.append("寫了 \(summary.pictures) 張、\(summary.videoFrames) 格，應該是 3 張、\(total) 格") }
+        guard let video = readVideo(url) else {
+            report(name, false, (problems + ["存出來的影片讀不回來"]).joined(separator: "；"))
+            return
+        }
+        if video.codec != "avc1" { problems.append("影片的編碼是 \(video.codec)，不是 H.264") }
+        if video.size != CGSize(width: 960, height: 720) { problems.append("畫面大小是 \(Int(video.size.width))×\(Int(video.size.height))") }
+        if abs(video.frameRate - 24) > 0.05 { problems.append(String(format: "格率是每秒 %.2f 格", video.frameRate)) }
+        if abs(video.seconds - Double(total) / 24) > 0.05 { problems.append(String(format: "長度是 %.2f 秒，應該是 %.2f 秒", video.seconds, Double(total) / 24)) }
+        if video.frames.count != total {
+            problems.append("讀回來 \(video.frames.count) 格，應該是 \(total) 格")
+        } else {
+            // 每一張的第一格、最後一格都要是那一張的畫面（換畫面的那一格不能早也不能晚）
+            var worst = 0.0
+            for index in 0..<3 {
+                let last = (index < 2 ? first[index + 1] : total) - 1
+                for frame in [first[index], (first[index] + last) / 2, last] {
+                    let error = difference(video.frames[frame], pictures[index])
+                    worst = max(worst, error)
+                    if error > 8 { problems.append(String(format: "第 %d 格不是第 %d 張的畫面（平均差 %.1f）", frame, index + 1, error)) }
+                }
+            }
+            if problems.isEmpty {
+                let size = ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.intValue ?? 0
+                report(name, true, String(format: "七張分成 3、2、2 張的三段；第一段存成 H.264 的 .mp4：960×720、每秒 %.0f 格、%d 格（%.2f 秒）、%d KB，"
+                                              + "花了 %.1f 秒；每一張的頭、中、尾三格和原圖平均最多差 %.1f／255", video.frameRate, total, video.seconds, size / 1024, spent, worst))
+                return
+            }
+        }
+        report(name, false, problems.joined(separator: "；"))
     }
 
     // MARK: 影片來源的發射流程
@@ -991,6 +1179,199 @@ enum SelfTest {
         report(name, reached && stayed && restarted,
                String(format: "%@；暫停之後停在 %.2f 秒%@；再播放%@從頭來", reached ? "播到了結尾" : "一直沒有播到結尾", rested,
                       stayed ? "" : "（沒有停住）", restarted ? "" : "沒有"))
+    }
+
+    // MARK: 畫布
+
+    /// 96×72 的 CGImage 原本的 RGB 位元組（用 NBTV.image(fromRGB:) 做出來的影像）。
+    private static func bytes(of image: CGImage?) -> Data? {
+        guard let data = image?.dataProvider?.data as Data?, data.count == NBTV.rgbBytes else { return nil }
+        return data
+    }
+
+    /// 兩張畫面在指定的那幾列平均每個值差多少。
+    private static func difference(_ a: Data, _ b: Data, rows: Range<Int>) -> Double {
+        let range = (rows.lowerBound * NBTV.imageWidth * 3)..<(rows.upperBound * NBTV.imageWidth * 3)
+        guard a.count == NBTV.rgbBytes, b.count == NBTV.rgbBytes, !range.isEmpty else { return 255 }
+        return difference(a.subdata(in: range), b.subdata(in: range))
+    }
+
+    /// 畫布：印在送出畫面上的字。字帶只蓋住上緣或下緣的幾列、其他地方一個位元組都不動；字盡量大，放不下就縮、再拆成兩行；
+    /// 沒有字就沒有畫布；印好字的畫面經過編碼、接收之後字帶還在。
+    private static func testCanvas(_ image: Data) {
+        let name = "畫布：印在送出畫面上的字"
+        var problems: [String] = []
+        let gray = Data(repeating: 128, count: NBTV.rgbBytes)
+        let width = NBTV.imageWidth, height = NBTV.imageHeight
+        /// 那幾列裡很亮（字）與很暗（字帶）的像素各有幾個
+        func count(_ rgb: Data, rows: Range<Int>) -> (bright: Int, dark: Int) {
+            var bright = 0, dark = 0
+            for index in (rows.lowerBound * width)..<(rows.upperBound * width) {
+                let value = Int(rgb[3 * index]) + Int(rgb[3 * index + 1]) + Int(rgb[3 * index + 2])
+                if value > 3 * 225 { bright += 1 } else if value < 3 * 70 { dark += 1 }
+            }
+            return (bright, dark)
+        }
+        var details: [String] = []
+        for position in [CanvasPosition.top, .bottom] {
+            let label = position == .top ? "上緣" : "下緣"
+            guard let layer = CanvasLayer(style: CanvasStyle(text: "CQ N0CALL", position: position)) else {
+                problems.append("\(label)：做不出圖層")
+                continue
+            }
+            let stamped = layer.apply(to: gray)
+            let band = layer.rows
+            if position == .top ? band.lowerBound != 0 : band.upperBound != height { problems.append("\(label)：字帶不在\(label)（第 \(band.lowerBound)–\(band.upperBound - 1) 列）") }
+            if band.count < 12 || band.count > 24 { problems.append("\(label)：字帶高 \(band.count) 列") }
+            if layer.lines != ["CQ N0CALL"] || layer.fontSize < 12 { problems.append("\(label)：排成 \(layer.lines)、字級 \(layer.fontSize)") }
+            // 字帶以外一個位元組都不能動
+            let outside = position == .top ? band.upperBound..<height : 0..<band.lowerBound
+            if difference(stamped, gray, rows: outside) != 0 { problems.append("\(label)：字帶以外的畫面被改了") }
+            let inside = count(stamped, rows: band)
+            if inside.bright < 150 || inside.dark < band.count * width / 2 { problems.append("\(label)：字帶裡亮的 \(inside.bright) 點、暗的 \(inside.dark) 點") }
+            if position == .top { details.append("「CQ N0CALL」字級 \(layer.fontSize)、字帶 \(band.count) 列（亮 \(inside.bright) 點）") }
+        }
+        // 沒有字：沒有畫布
+        if CanvasLayer(style: CanvasStyle(text: "   ", position: .top)) != nil { problems.append("只有空白也做出了圖層") }
+        // 一行放不下：拆成兩行；再長就截短
+        if let long = CanvasLayer(style: CanvasStyle(text: "CQ CQ CQ DE N0CALL", position: .top)) {
+            // 兩行的字不能大到把畫面蓋掉一半：字帶最多佔畫面高度的四成
+            if long.lines.count != 2 || long.fontSize < CanvasLayer.minimumFontSize || long.fontSize > CanvasLayer.wrappedMaximumFontSize
+                || long.rows.count > height * 2 / 5 {
+                problems.append("長的字排成 \(long.lines)、字級 \(long.fontSize)、字帶 \(long.rows.count) 列")
+            }
+            details.append("「CQ CQ CQ DE N0CALL」拆成\(long.lines.map { "「\($0)」" }.joined(separator: "與"))、字級 \(long.fontSize)、字帶 \(long.rows.count) 列")
+        } else {
+            problems.append("長的字做不出圖層")
+        }
+        if let endless = CanvasLayer(style: CanvasStyle(text: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", position: .bottom)) {
+            if endless.fontSize != CanvasLayer.minimumFontSize || endless.rows.count > 20 { problems.append("放不下的字：字級 \(endless.fontSize)、字帶 \(endless.rows.count) 列") }
+        } else {
+            problems.append("放不下的字做不出圖層")
+        }
+        // 中文也可以
+        if let chinese = CanvasLayer(style: CanvasStyle(text: "CQ 台灣", position: .top)) {
+            if count(chinese.apply(to: gray), rows: chinese.rows).bright < 100 { problems.append("中文字沒有印出來") }
+        } else {
+            problems.append("中文字做不出圖層")
+        }
+        // 設定：關著、或沒有字的時候沒有畫布；第一次打開而還沒有字，先填「CQ 呼號」
+        let settings = AppSettings(store: nil)
+        settings.callsign = "N0CALL"
+        let model = AppModel(settings: settings, live: false)
+        if settings.canvasStyle != nil || model.applyCanvas(to: image) != image { problems.append("畫布關著的時候畫面也被改了") }
+        model.setCanvasEnabled(true)
+        if settings.canvasText != "CQ N0CALL" || settings.canvasStyle == nil { problems.append("打開畫布之後的字是「\(settings.canvasText)」") }
+        let stamped = model.applyCanvas(to: image)
+        if stamped == image { problems.append("打開畫布之後畫面沒有變") }
+        settings.canvasText = "  "
+        if settings.canvasStyle != nil || model.applyCanvas(to: image) != image { problems.append("只有空白的時候畫面也被改了") }
+        settings.canvasText = "CQ N0CALL"
+
+        // 印好字的畫面經過每個模式的編碼與接收：字帶那幾列要比較像印了字的，而不是沒印字的原圖
+        if let layer = CanvasLayer(style: CanvasStyle(text: "CQ N0CALL", position: .top)) {
+            var worst = ""
+            for mode in Modes.menuOrder {
+                let tx = CoreTransmitter()
+                tx.setMode(mode.id)
+                tx.setCallsign("N0CALL")
+                guard let frame = tx.encode(rgb: stamped) else { continue }
+                let audio = Demo.silence(seconds: 0.3) + frame.samples + tx.finish() + Demo.silence(seconds: 0.5)
+                guard let received = Demo.receive(audio).flatMap(\.frames).first(where: { $0.decoded })?.rgb else {
+                    problems.append("\(mode.name)：印了字的畫面沒有收到")
+                    continue
+                }
+                let toStamped = difference(received, stamped, rows: layer.rows), toPlain = difference(received, image, rows: layer.rows)
+                if toStamped >= toPlain / 2 { problems.append(String(format: "%@：字帶和印了字的差 %.1f、和原圖差 %.1f", mode.name, toStamped, toPlain)) }
+                worst += String(format: "%@%@ %.1f／%.1f", worst.isEmpty ? "" : "、", mode.name, toStamped, toPlain)
+            }
+            details.append("收到的字帶和「印了字的／沒印字的」平均差：\(worst)")
+        }
+        report(name, problems.isEmpty, problems.isEmpty ? details.joined(separator: "；") : problems.joined(separator: "；"))
+    }
+
+    /// 畫布與輸出音量在真的發射流程裡（app 的狀態物件、模擬的音訊輸出、記錄用的 PTT）：
+    ///   * 右側欄的預覽就是印好字的樣子，和「原來的畫面疊上圖層」逐位元相同
+    ///   * 送出去的第一張解回來，字帶那幾列像印了字的
+    ///   * 發射中把輸出音量調低 20 dB，送出去的訊號立刻跟著小 20 dB（要能一邊發射一邊看著電台的 ALC 調）
+    private static func testCanvasOnAir(_ image: Data) {
+        let name = "畫布與輸出音量：經過整個發射流程"
+        let seconds = 2
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("nbtv-selftest-canvas-\(getpid()).mp4")
+        defer { try? FileManager.default.removeItem(at: url) }
+        guard let cg = NBTV.image(fromRGB: image), Demo.makeVideo(at: url, from: cg, seconds: seconds, fps: 10) else {
+            report(name, false, "示範影片做不出來")
+            return
+        }
+        setenv("NBTV_NO_DEVICES", "1", 1)   // 狀態物件啟動時不開輸入裝置與鏡頭
+        let settings = AppSettings(store: nil)
+        settings.callsign = "N0CALL"
+        settings.sourceKind = .video
+        settings.loopVideo = false
+        settings.txModeID = 12
+        settings.outputLevelDb = -6
+        let ptt = RecordingPTT()
+        settings.debugPTTDriver = { ptt }
+        let model = AppModel(settings: settings, live: true)
+        let sent = SampleCollector()
+        model.debugUseSimulatedOutput { sent.append($0) }
+        model.start()
+        defer { model.shutdown() }
+        var opened: Bool?
+        model.openVideo(url) { opened = $0 }
+        guard Demo.wait(timeout: 10, until: { opened != nil }), opened == true, Demo.wait(timeout: 10, until: { model.canTransmit }),
+              Demo.wait(timeout: 5, until: { model.sourcePreview != nil }), let plain = bytes(of: model.sourcePreview) else {
+            report(name, false, "影片開不起來，或一直沒有來源畫面")
+            return
+        }
+        var problems: [String] = []
+        // 打開畫布：預覽換成印好字的（影片停在開頭，來源的畫面沒有變）
+        model.setCanvasEnabled(true)
+        guard let layer = CanvasLayer(style: CanvasStyle(text: "CQ N0CALL", position: .top)),
+              Demo.wait(timeout: 5, until: { bytes(of: model.sourcePreview) != plain }), let preview = bytes(of: model.sourcePreview) else {
+            report(name, false, "打開畫布之後預覽沒有變")
+            return
+        }
+        let stamped = layer.apply(to: plain)
+        if preview != stamped { problems.append(String(format: "預覽不是「原來的畫面疊上字」（平均差 %.2f）", difference(preview, stamped))) }
+        // 換到下緣：預覽跟著換
+        settings.canvasPosition = .bottom
+        if !Demo.wait(timeout: 5, until: { bytes(of: model.sourcePreview) != preview }) { problems.append("改成印在下緣之後預覽沒有變") }
+        settings.canvasPosition = .top
+        _ = Demo.wait(timeout: 5) { bytes(of: model.sourcePreview) == stamped }
+
+        // 發射：送完第一張就把輸出音量調低 20 dB
+        _ = sent.take()
+        model.startTransmit()
+        let firstSent = Demo.wait(timeout: 15) { model.txFramesSent >= 1 || model.txPhase == .idle }
+        if !firstSent || model.txPhase == .idle { problems.append("發射沒有送出第一張") }
+        settings.outputLevelDb = -26
+        if !Demo.wait(timeout: 25, until: { model.txPhase == .idle }) {
+            problems.append("影片播完之後沒有自動停止")
+            model.stopTransmit()
+            _ = Demo.wait(timeout: 10) { model.txPhase == .idle }
+        }
+        let samples = sent.take()
+        let frames = Demo.receive(samples + Demo.silence(seconds: 0.5)).flatMap(\.frames).filter { $0.decoded }
+        var detail = ""
+        if let first = frames.first?.rgb {
+            let toStamped = difference(first, stamped, rows: layer.rows), toPlain = difference(first, plain, rows: layer.rows)
+            if toStamped >= toPlain / 2 { problems.append(String(format: "送出去的第一張：字帶和印了字的差 %.1f、和沒印字的差 %.1f", toStamped, toPlain)) }
+            detail = String(format: "送出 %d 張，第一張的字帶和「印了字的／沒印字的」平均差 %.1f／%.1f", model.txFramesSent, toStamped, toPlain)
+        } else {
+            problems.append("送出去的畫面一張都解不回來")
+        }
+        // 音量：第一張（開頭 0.3 秒靜音之後）是 −6 dB 時送的，最後一張是 −26 dB 時送的
+        func level(_ range: Range<Int>) -> Double {
+            guard range.lowerBound >= 0, range.upperBound <= samples.count, !range.isEmpty else { return -200 }
+            return 10 * log10(max(Demo.power(Array(samples[range])), 1e-20))
+        }
+        let rate = NBTV.sampleRate
+        let early = level(Int(0.45 * Double(rate))..<Int(1.15 * Double(rate)))
+        let late = level((samples.count - Int(0.9 * Double(rate)))..<(samples.count - Int(0.4 * Double(rate))))
+        if abs((early - late) - 20) > 3 { problems.append(String(format: "發射中把音量調低 20 dB，送出去的訊號只差 %.1f dB（%.1f → %.1f dBFS）", early - late, early, late)) }
+        detail += String(format: "；輸出音量 −6 → −26 dB，送出去的訊號 %.1f → %.1f dBFS", early, late)
+        report(name, problems.isEmpty, problems.isEmpty ? detail : problems.joined(separator: "；"))
     }
 
     // MARK: 定時發射
@@ -1452,6 +1833,315 @@ enum SelfTest {
             }
         }
         report("序列埠 PTT（虛擬終端機 \(path)）", true, outcomes.joined(separator: "；") + "。真的控制線沒有測")
+    }
+
+    // MARK: 用 CAT 指令的 PTT（Hamlib）
+
+    /// 假的 rigctld：聽本機的一個臨時連接埠。前 dropFirst 條連線一接起來就掛斷；之後的每一條，讀到指令就回 reply
+    /// （reply 是 nil 的話接起來之後一直不回）。用來重現真的 rigctld 剛啟動時偶爾把連線掛斷、以及電台沒有回應的情形。
+    private final class FakeRigctld {
+        private(set) var port = 0
+        private let listener: Int32
+        private let lock = NSLock()
+        private var accepted = 0
+        private var held: [Int32] = []
+
+        var connections: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return accepted
+        }
+
+        init?(dropFirst: Int, reply: String?) {
+            listener = socket(AF_INET, SOCK_STREAM, 0)
+            guard listener >= 0 else { return nil }
+            var address = sockaddr_in()
+            address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            address.sin_family = sa_family_t(AF_INET)
+            address.sin_addr.s_addr = inet_addr("127.0.0.1")
+            var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let ready = withUnsafeMutablePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    bind(listener, $0, length) == 0 && listen(listener, 8) == 0 && getsockname(listener, $0, &length) == 0
+                }
+            }
+            guard ready else {
+                close(listener)
+                return nil
+            }
+            port = Int(UInt16(bigEndian: address.sin_port))
+            let listener = self.listener
+            Thread.detachNewThread { [weak self] in
+                while true {
+                    let client = accept(listener, nil, nil)
+                    guard client >= 0, let self else { return }
+                    self.lock.lock()
+                    self.accepted += 1
+                    let number = self.accepted
+                    self.lock.unlock()
+                    var one: Int32 = 1
+                    setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+                    if number <= dropFirst {
+                        close(client)
+                    } else if let reply {
+                        var buffer = [UInt8](repeating: 0, count: 64)
+                        _ = recv(client, &buffer, buffer.count, 0)
+                        _ = Array(reply.utf8).withUnsafeBufferPointer { send(client, $0.baseAddress, $0.count, 0) }
+                        close(client)
+                    } else {
+                        self.lock.lock()
+                        self.held.append(client)   // 接起來之後不回也不掛斷，到 stop 為止
+                        self.lock.unlock()
+                    }
+                }
+            }
+        }
+
+        func stop() {
+            close(listener)
+            lock.lock()
+            for client in held { close(client) }
+            held.removeAll()
+            lock.unlock()
+        }
+    }
+
+    /// 用電台的 CAT 指令控制 PTT：型號清單與序列埠規格的拆法、交給 rigctld 的參數，以及整個流程——
+    /// 按下時自己開一個 rigctld、送「T 1」，放開時送「T 0」再把它結束。用的是 Hamlib 不接電台的示範機（型號 1），
+    /// rigctld 只聽本機的一個臨時連接埠，不碰任何序列埠。另外檢查看門的程序：app 突然不在了，它要替我們放開 PTT、結束 rigctld。
+    private static func testHamlib() {
+        // 1. 不需要裝 Hamlib 的部分：文字的拆法與參數
+        func pad(_ text: String, _ width: Int) -> String { text + String(repeating: " ", count: max(1, width - text.count)) }
+        func row(_ id: String, _ fields: [String]) -> String {
+            String(repeating: " ", count: 6 - id.count) + id + "  " + pad(fields[0], 23) + pad(fields[1], 24) + pad(fields[2], 16) + pad(fields[3], 12) + fields[4]
+        }
+        let listing = [
+            row("Rig #", ["Mfg", "Model", "Version", "Status", "Macro"]),
+            row("1", ["Hamlib", "Dummy", "20240709.0", "Stable", "RIG_MODEL_DUMMY"]),
+            row("2", ["Hamlib", "NET rigctl", "20250211.0", "Stable", "RIG_MODEL_NETRIGCTL"]),
+            row("2014", ["Kenwood", "TS-2000", "20250515.2", "Stable", "RIG_MODEL_TS2000"]),
+            row("3073", ["Icom", "IC-7300", "20250517.14", "Stable", "RIG_MODEL_IC7300"]),
+            row("3093", ["Icom", "ID-52A/E PLUS", "20250517.0", "Beta", "RIG_MODEL_ID52PLUS"]),
+            row("9001", ["Example", "A Model Name Longer Than Its Column", "1.0", "Alpha", "RIG_MODEL_LONG"]),
+        ].joined(separator: "\n")
+        let parsed = Hamlib.parseModels(listing)
+        var problems: [String] = []
+        let wanted = [Hamlib.Model(id: 1, manufacturer: "Hamlib", name: "Dummy"), Hamlib.Model(id: 2, manufacturer: "Hamlib", name: "NET rigctl"),
+                      Hamlib.Model(id: 2014, manufacturer: "Kenwood", name: "TS-2000"), Hamlib.Model(id: 3073, manufacturer: "Icom", name: "IC-7300"),
+                      Hamlib.Model(id: 3093, manufacturer: "Icom", name: "ID-52A/E PLUS"),
+                      Hamlib.Model(id: 9001, manufacturer: "Example", name: "A Model Name Longer Than Its Column")]
+        if parsed != wanted { problems.append("型號清單拆成 \(parsed.map { "\($0.id):\($0.manufacturer)/\($0.name)" })") }
+        let plain = Hamlib.parseSerialCaps("Model name:\tIC-7300\nSerial speed: 4800..115200 baud, 8N1, ctrl=NONE\nWrite delay: 0ms")
+        let handshake = Hamlib.parseSerialCaps("Serial speed: 1200..115200 baud, 8N1, ctrl=CTS/RTS")
+        if plain != Hamlib.SerialCaps(minBaud: 4800, maxBaud: 115200, hardwareHandshake: false)
+            || handshake != Hamlib.SerialCaps(minBaud: 1200, maxBaud: 115200, hardwareHandshake: true)
+            || Hamlib.parseSerialCaps("Port type:\tNone") != nil {
+            problems.append("序列埠規格拆錯了")
+        }
+        let arguments = HamlibPTT.arguments(model: 3073, port: "/dev/cu.example", baud: 19200, tcpPort: 4599, caps: plain)
+        if arguments != ["-m", "3073", "-T", "127.0.0.1", "-t", "4599", "-r", "/dev/cu.example", "-s", "19200", "-C", "rts_state=OFF,dtr_state=OFF"] {
+            problems.append("rigctld 的參數是 \(arguments)")
+        }
+        // 預設的速率不指定；要用 RTS／CTS 流量控制的型號，RTS 不去指定；不走序列埠的型號不設定控制線
+        if HamlibPTT.arguments(model: 2014, port: "/dev/cu.example", baud: 0, tcpPort: 4599, caps: handshake)
+            != ["-m", "2014", "-T", "127.0.0.1", "-t", "4599", "-r", "/dev/cu.example", "-C", "dtr_state=OFF"]
+            || HamlibPTT.arguments(model: 1, port: "", baud: 0, tcpPort: 4599, caps: nil) != ["-m", "1", "-T", "127.0.0.1", "-t", "4599"] {
+            problems.append("預設速率、流量控制或示範機的參數不對")
+        }
+        let failure = "rig_open: error = yaesu: initrigs4_yaesu called\nserial_open: Unable to open /dev/cu.example - No such file or directory\n"
+            + "rig.c(1284):rig_open returning2(-6) IO error\n\nIO error\n"
+        if HamlibPTT.openFailureReason(in: failure) != "Unable to open /dev/cu.example - No such file or directory"
+            || HamlibPTT.openFailureReason(in: "rig_open: error = x\nrig.c(1284):rig_open returning2(-5) Communication timed out\n") != "Communication timed out"
+            || HamlibPTT.openFailureReason(in: "Opened rig model 1, 'Dummy'\n") != nil {
+            problems.append("rigctld 的錯誤訊息判斷錯了")
+        }
+        // 送指令的重試（對著假的 rigctld）：剛啟動的 rigctld 偶爾會把頭幾條連線直接掛斷，要再試才送得到；
+        // 連上了卻一直沒有回覆的（電台沒有回應）不再試，等到逾時就回報；一直被掛斷的試到期限為止
+        let retriesBefore = HamlibPTT.retries
+        if let flaky = FakeRigctld(dropFirst: 2, reply: "RPRT 0\n") {
+            let reply = try? HamlibPTT.request("T 1", port: flaky.port, timeoutSeconds: 3, retryUntil: Date().addingTimeInterval(2))
+            if reply?.contains("RPRT 0") != true || flaky.connections != 3 || HamlibPTT.retries - retriesBefore != 2 {
+                problems.append("頭兩條連線被掛斷時：回覆 \(reply ?? "無")、連了 \(flaky.connections) 次、重試 \(HamlibPTT.retries - retriesBefore) 次")
+            }
+            flaky.stop()
+        } else {
+            problems.append("假的 rigctld 開不起來")
+        }
+        if let silent = FakeRigctld(dropFirst: 0, reply: nil) {
+            let began = Date()
+            do {
+                _ = try HamlibPTT.request("T 1", port: silent.port, timeoutSeconds: 1, retryUntil: Date().addingTimeInterval(5))
+                problems.append("對方一直不回覆也當成成功")
+            } catch {
+                let spent = Date().timeIntervalSince(began)
+                if (error as? PTTError)?.timedOut != true || spent < 0.9 || spent > 1.8 || silent.connections != 1 {
+                    problems.append(String(format: "對方不回覆時等了 %.1f 秒、連了 %d 次", spent, silent.connections))
+                }
+            }
+            silent.stop()
+        }
+        if let dead = FakeRigctld(dropFirst: 1000, reply: "RPRT 0\n") {
+            let began = Date()
+            do {
+                _ = try HamlibPTT.request("T 0", port: dead.port, timeoutSeconds: 3, retryUntil: Date().addingTimeInterval(0.5))
+                problems.append("連線一直被掛斷也當成成功")
+            } catch {
+                let spent = Date().timeIntervalSince(began)
+                if (error as? PTTError)?.timedOut != false || spent < 0.4 || spent > 1.2 || dead.connections < 3 {
+                    problems.append(String(format: "連線一直被掛斷時試了 %.1f 秒、連了 %d 次", spent, dead.connections))
+                }
+            }
+            dead.stop()
+        }
+        // 還沒選型號：不用啟動任何東西就知道
+        do {
+            try HamlibPTT(model: 0, port: "", baud: 0).key(true)
+            problems.append("沒有選電台型號也按下了 PTT")
+        } catch {
+            if !error.localizedDescription.contains("型號") { problems.append("沒有選型號時的訊息是「\(error.localizedDescription)」") }
+        }
+        report("CAT 指令的 PTT：型號清單、序列埠規格與參數", problems.isEmpty,
+               problems.isEmpty ? "清單 \(parsed.count) 個型號（含名稱有空白、比欄位長的）；速率與控制線的參數正確；"
+                   + "連線被掛斷會再試（頭兩次被掛斷、第三次送到），對方不回覆則等到逾時就回報" : problems.joined(separator: "；"))
+
+        // 2. 需要這台電腦上的 Hamlib
+        let name = "CAT 指令的 PTT：經 Hamlib 按下與放開（不接電台的示範機）"
+        guard let rigctld = Hamlib.rigctld, Hamlib.rigctl != nil else {
+            report(name, nil, "這台電腦沒有裝 Hamlib（找不到 rigctld）")
+            return
+        }
+        problems = []
+        let models = Hamlib.models()
+        let groups = Hamlib.modelsByManufacturer()
+        if models.count < 100 || !models.contains(Hamlib.Model(id: 1, manufacturer: "Hamlib", name: "Dummy"))
+            || !groups.contains(where: { $0.manufacturer == "Icom" && $0.models.count > 20 }) || groups.map(\.models.count).reduce(0, +) != models.count {
+            problems.append("Hamlib 的型號清單只有 \(models.count) 個，或裡面沒有該有的型號")
+        }
+        if Hamlib.serialCaps(model: 1) != nil { problems.append("示範機不走序列埠，卻有序列埠規格") }
+        // 設定裡的型號選單：真的做成系統的選單（不跳出來），每個廠牌一個子選單、每個型號一列；
+        // 目前選的型號與它的廠牌打勾；選一列（照系統選單送動作的方式）就回報那個型號
+        var picked: Hamlib.Model?
+        let menu = makePopupMenu(SettingsView.rigModelItems(selected: 3073) { picked = $0 })
+        let leaves = menu.items.flatMap { $0.submenu?.items ?? [] }
+        let checkedGroups = menu.items.filter { $0.state == .on }.map(\.title), checkedModels = leaves.filter { $0.state == .on }.map(\.title)
+        if menu.items.count != groups.count || leaves.count != models.count || menu.items.contains(where: { $0.submenu == nil }) {
+            problems.append("型號選單有 \(menu.items.count) 個廠牌、\(leaves.count) 個型號，應該是 \(groups.count) 個、\(models.count) 個")
+        }
+        if checkedGroups != ["Icom"] || checkedModels != ["IC-7300"] { problems.append("型號選單打勾的是 \(checkedGroups)、\(checkedModels)") }
+        if let item = menu.items.first(where: { $0.title == "Kenwood" })?.submenu?.items.first(where: { $0.title == "TS-2000" }), let action = item.action {
+            _ = NSApp.sendAction(action, to: item.target, from: item)
+            if picked != Hamlib.Model(id: 2014, manufacturer: "Kenwood", name: "TS-2000") { problems.append("在選單裡選 Kenwood TS-2000，回報的是 \(picked?.title ?? "無")") }
+        } else {
+            problems.append("型號選單裡找不到 Kenwood TS-2000")
+        }
+        if makePopupMenu([], emptyTitle: "（空的）").items.map(\.title) != ["（空的）"] { problems.append("沒有項目的選單不對") }
+        func query(_ port: Int) -> String {
+            ((try? RigctldPTT(host: "127.0.0.1", port: String(port)).send(command: "t\n")) ?? "?").trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        // 按下：rigctld 起來了，PTT 是按下的；放開：PTT 放開，rigctld 也結束了
+        var startup = 0.0
+        let ptt = HamlibPTT(model: 1, port: "", baud: 0)
+        do {
+            let began = Date()
+            try ptt.key(true)
+            startup = Date().timeIntervalSince(began)
+            guard let port = ptt.tcpPort else { throw PTTError(message: "按下之後不知道 rigctld 聽哪個連接埠") }
+            if query(port) != "1" { problems.append("按下之後查詢 PTT 得到 \(query(port))") }
+            try ptt.key(false)
+            if ptt.tcpPort != nil || Demo.wait(timeout: 2, until: { !HamlibPTT.canConnect(port) }) == false { problems.append("放開之後 rigctld 還在") }
+            try ptt.key(false)   // 再放開一次不能出錯
+        } catch {
+            problems.append("按下或放開失敗：\(error.localizedDescription)")
+        }
+        // 連續按下、放開幾次：rigctld 剛啟動的頭一瞬間偶爾（約一成）會把第一個指令的連線掛斷，要重試才按得下去，不能因此發射失敗。
+        // 開發用：NBTV_SELFTEST_PTT_CYCLES=<次數> 多跑幾次（預設 4 次，每次約半秒）
+        let cycles = ProcessInfo.processInfo.environment["NBTV_SELFTEST_PTT_CYCLES"].flatMap { Int($0) } ?? 4
+        let cycleRetriesBefore = HamlibPTT.retries
+        var cycleFailures = 0
+        for _ in 0..<cycles {
+            let driver = HamlibPTT(model: 1, port: "", baud: 0)
+            do {
+                try driver.key(true)
+                if let port = driver.tcpPort, query(port) != "1" { cycleFailures += 1 }
+                try driver.key(false)
+            } catch {
+                cycleFailures += 1
+                try? driver.key(false)
+            }
+        }
+        if cycleFailures > 0 { problems.append("連續按下、放開 \(cycles) 次，有 \(cycleFailures) 次失敗") }
+        let retried = HamlibPTT.retries - cycleRetriesBefore
+        // 序列埠打不開（不存在的裝置）：很快就回報原因，rigctld 不會留著。用的是需要序列埠的型號（Yaesu FT-857）
+        var failureText = ""
+        let broken = HamlibPTT(model: 1022, port: "/dev/cu.nbtv-selftest-nonexistent", baud: 9600)
+        let began = Date()
+        do {
+            try broken.key(true)
+            problems.append("序列埠不存在也按下了 PTT")
+            try? broken.key(false)
+        } catch {
+            failureText = error.localizedDescription
+            let spent = Date().timeIntervalSince(began)
+            if !failureText.contains("開不了電台") || !failureText.contains("Unable to open") || spent > 8 || broken.tcpPort != nil {
+                problems.append(String(format: "序列埠不存在時過了 %.1f 秒才回報「%@」", spent, failureText))
+            }
+        }
+        do {
+            try HamlibPTT(model: 1022, port: "", baud: 0).key(true)
+            problems.append("沒有選序列埠也按下了 PTT")
+        } catch {
+            if !error.localizedDescription.contains("序列埠") { problems.append("沒有選序列埠時的訊息是「\(error.localizedDescription)」") }
+        }
+
+        // 看門的程序（一）：按下之後 app 突然不在了（這裡只放掉它手上的管線）——rigctld 要被結束
+        let abandoned = HamlibPTT(model: 1, port: "", baud: 0)
+        do {
+            try abandoned.key(true)
+            guard let port = abandoned.tcpPort else { throw PTTError(message: "不知道連接埠") }
+            abandoned.debugAbandon()
+            if !Demo.wait(timeout: 6, until: { !HamlibPTT.canConnect(port) }) { problems.append("app 不在了之後 rigctld 沒有被結束") }
+        } catch {
+            problems.append("看門程序的測試沒有跑起來：\(error.localizedDescription)")
+        }
+        // 看門的程序（二）：結束之前有沒有先放開 PTT。另外開一個不會被它結束的 rigctld 來看：
+        // 讓看門的去結束一個不相干的 sleep，rigctld 留著，之後查得到 PTT 已經是放開的
+        if let port = HamlibPTT.freePort() {
+            let daemon = Process(), sleeper = Process()
+            daemon.executableURL = URL(fileURLWithPath: rigctld)
+            daemon.arguments = ["-m", "1", "-T", "127.0.0.1", "-t", String(port)]
+            daemon.standardOutput = FileHandle.nullDevice
+            daemon.standardError = FileHandle.nullDevice
+            sleeper.executableURL = URL(fileURLWithPath: "/bin/sleep")
+            sleeper.arguments = ["30"]
+            do {
+                try daemon.run()
+                try sleeper.run()
+                defer {
+                    // 等它真的結束再往下走：測試跑完之後不留任何還在收尾的 rigctld
+                    daemon.terminate()
+                    daemon.waitUntilExit()
+                    if sleeper.isRunning { sleeper.terminate() }
+                }
+                // rigctld 剛起來的頭一瞬間偶爾會把連線掛斷（app 自己的 HamlibPTT 也因此會重試）：按到成功為止
+                guard Demo.wait(timeout: 5, until: { HamlibPTT.canConnect(port) }),
+                      Demo.wait(timeout: 3, until: { (try? RigctldPTT(host: "127.0.0.1", port: String(port)).key(true)) != nil }) else {
+                    throw PTTError(message: "自己開的 rigctld 沒有起來")
+                }
+                guard let dog = HamlibPTT.makeWatchdog(tcpPort: port, pid: sleeper.processIdentifier) else { throw PTTError(message: "看門的程序啟動不了") }
+                Demo.spin(0.3)
+                if query(port) != "1" || !sleeper.isRunning { problems.append("管線還在的時候看門的程序就動手了") }
+                try? dog.pipe.close()
+                if !Demo.wait(timeout: 6, until: { !sleeper.isRunning }) { problems.append("管線斷了之後看門的程序沒有結束指定的行程") }
+                if query(port) != "0" { problems.append("管線斷了之後看門的程序沒有放開 PTT（查詢得到 \(query(port))）") }
+            } catch {
+                problems.append("看門程序的測試沒有跑起來：\(error.localizedDescription)")
+            }
+        }
+        report(name, problems.isEmpty, problems.isEmpty
+               ? String(format: "Hamlib 有 %d 個型號、%d 個廠牌，設定裡的選單每個廠牌一個子選單；按下花了 %.2f 秒，查詢得到 1，放開之後 rigctld 結束；"
+                            + "連續按下、放開 %d 次都成功（其中 %d 次第一個指令被剛啟動的 rigctld 掛斷、重試後成功）；序列埠不存在時回報「%@」；"
+                            + "app 不在了，看門的程序會放開 PTT 並結束 rigctld", models.count, groups.count, startup, cycles, retried, failureText)
+               : problems.joined(separator: "；"))
     }
 
     // MARK: 3. rigctld

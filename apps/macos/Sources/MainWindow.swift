@@ -184,7 +184,7 @@ struct MainColumn: View {
 
         init(width: CGFloat, height: CGFloat, frames: Int) {
             let infoBar = PictureSection.infoBarHeight
-            let statusMinimum: CGFloat = 214        // 訊號面板放得下所有列的最小高度
+            let statusMinimum = StatusPanel.minimumHeight   // 訊號面板放得下所有列的最小高度
             let spectrumMinimum: CGFloat = 192
             let tallest = max(300, height - 16 - spectrumMinimum)
 

@@ -80,12 +80,12 @@ final class AppModel: ObservableObject {
     @Published var offsetHz: Double?
     @Published var rxModeID: Int?
     @Published var lastResult: LastResult = .none
-    @Published var symbolsDone = 0
-    @Published var symbolsTotal = 0
     @Published var inputLevelDb = -120.0
     @Published var history: [ReceivedFrame] = []
     @Published var selectedID: UUID?
     @Published var waterfall: CGImage?
+    /// 正在把一段畫面存成影片檔（見 saveDisplayedSequence）
+    @Published private(set) var exportingVideo = false
 
     // 發射
     @Published var txPhase: TxPhase = .idle
@@ -141,6 +141,11 @@ final class AppModel: ObservableObject {
     private let latestFrame = LatestFrameBox()
     private var previewVersion = -1
     private var previewScale: ScaleMode?
+    // 畫布（印在送出畫面上的字）：圖層照設定算好留著，設定改了才重算（見 currentCanvas）
+    private var canvasLayer: CanvasLayer?
+    private var canvasBuilt: CanvasStyle?
+    private var canvasVersion = 0
+    private var previewCanvasVersion = 0
     private var previewTime = Date.distantPast
     private var sourceEpoch = 0   // 每換一次來源加一；換來源之前開始算的預覽晚到時靠它認出來
 
@@ -160,6 +165,7 @@ final class AppModel: ObservableObject {
     private var lastSourceRGB: Data?
     private var scrubbing = false
     private let previewQueue = DispatchQueue(label: "nbtv.preview", qos: .userInitiated)
+    private let exportQueue = DispatchQueue(label: "nbtv.export", qos: .userInitiated)
     private var uiTimer: Timer?
     private var deviceTimer: Timer?
     private var cancellables = Set<AnyCancellable>()
@@ -254,7 +260,6 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             self.video.loop = value && !self.scheduledRun   // 定時發射中一律只播一次
         }.store(in: &cancellables)
-        settings.$mergeFrames.sink { [weak self] value in self?.engine?.setMergeFrames(value) }.store(in: &cancellables)
         settings.$txModeID.sink { [weak self] value in
             if self?.txPhase == .idle { self?.txModeID = value }
         }.store(in: &cancellables)
@@ -374,8 +379,6 @@ final class AppModel: ObservableObject {
         offsetHz = nil
         rxModeID = nil
         lastResult = .none
-        symbolsDone = 0
-        symbolsTotal = 0
     }
 
     func apply(_ update: RxUpdate) {
@@ -388,8 +391,6 @@ final class AppModel: ObservableObject {
             rxModeID = update.modeID
             snrDb = update.snrValid ? update.snrDb : nil
             offsetHz = update.offsetHz
-            symbolsDone = update.symbolsDone
-            symbolsTotal = update.symbolsTotal
         } else if synced || update.frames.isEmpty {
             clearSyncState()
         }
@@ -409,6 +410,8 @@ final class AppModel: ObservableObject {
                                      snrDb: frame.snrDb),
                        at: 0)
         if history.count > AppModel.historyLimit { history.removeLast(history.count - AppModel.historyLimit) }
+        // 有新的畫面進來：主畫面一律換成它。先前點選來看的那一張還在「最近收到」裡，要看可以再點
+        selectedID = nil
     }
 
     func appendSpectrum(_ rows: [[Float]], reference: WaterfallStore.Reference) {
@@ -417,7 +420,7 @@ final class AppModel: ObservableObject {
         if changed { waterfall = waterfallStore.makeImage() }
     }
 
-    /// 主畫面顯示的那一張：使用者點選的，沒有點選就是最新的。
+    /// 主畫面顯示的那一張：使用者點選的，沒有點選就是最新的。點選只維持到下一張畫面進來為止（見 add）。
     var displayedFrame: ReceivedFrame? {
         if let selectedID, let frame = history.first(where: { $0.id == selectedID }) { return frame }
         return history.first
@@ -461,6 +464,99 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: - 把一段畫面存成影片
+
+    /// 兩張畫面之間的空檔要小於這麼多秒，才算同一段
+    static let sequenceGapSeconds = 10.0
+
+    /// 那一張畫面所在的「一段」：同一個呼號、一張接一張，中間的空檔都不到 10 秒。回傳的順序由舊到新。
+    ///
+    /// 空檔是前一張收完到後一張開始送之間的時間（後一張收完的時刻減掉它那個模式一張的長度，再減前一張收完的時刻），
+    /// 所以連續發射時是 0，中間漏掉一張時是一張的長度。
+    /// 標頭沒有解出來、不知道呼號的畫面，時間接得上就跟著前面那一段（它是一段的開頭的話，跟著後面的）。
+    /// 每一張畫面只屬於一段：不論從一段裡的哪一張問，得到的都是同一段。
+    static func sequence(containing id: UUID, in history: [ReceivedFrame]) -> [ReceivedFrame] {
+        guard let index = history.firstIndex(where: { $0.id == id }) else { return [] }
+        /// older 收完之後到 newer 開始送，中間的空檔夠不夠短
+        func contiguous(_ older: ReceivedFrame, _ newer: ReceivedFrame) -> Bool {
+            let started = newer.time.addingTimeInterval(-(Modes.find(newer.modeID)?.frameSeconds ?? 0))
+            return started.timeIntervalSince(older.time) < sequenceGapSeconds
+        }
+        // 1. 時間上接在一起的那一串（history 是新的在前：往後是更早的，往前是更晚的）
+        var oldest = index, newest = index
+        while oldest + 1 < history.count, contiguous(history[oldest + 1], history[oldest]) { oldest += 1 }
+        while newest > 0, contiguous(history[newest], history[newest - 1]) { newest -= 1 }
+        // 2. 這一串由舊到新照呼號分段：出現和這一段不一樣的呼號就是下一段的開頭
+        var groups: [[ReceivedFrame]] = []
+        var callsign = ""
+        for frame in history[newest...oldest].reversed() {
+            if groups.isEmpty || (!frame.callsign.isEmpty && !callsign.isEmpty && frame.callsign != callsign) {
+                groups.append([frame])
+                callsign = frame.callsign
+            } else {
+                groups[groups.count - 1].append(frame)
+                if callsign.isEmpty { callsign = frame.callsign }
+            }
+        }
+        return groups.first { group in group.contains { $0.id == id } } ?? []
+    }
+
+    /// 主畫面顯示的那一張所在的一段（由舊到新）；還沒有畫面時是空的。
+    var displayedSequence: [ReceivedFrame] {
+        displayedFrame.map { AppModel.sequence(containing: $0.id, in: history) } ?? []
+    }
+
+    /// 一段畫面存成影片時的預設檔名：呼號與第一張收到的時間。
+    static func videoFileName(for frames: [ReceivedFrame]) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let known = frames.first { !$0.callsign.isEmpty }?.callsign ?? ""
+        let call = known.isEmpty ? "unknown" : known.replacingOccurrences(of: "/", with: "-")
+        return "NBTV-\(call)-\(formatter.string(from: frames.first?.time ?? Date())).mp4"
+    }
+
+    /// 影片的時間軸：每一張從它收到的時刻開始顯示，到下一張收到為止，所以影片的快慢和當時收到的一樣；
+    /// 最後一張停留它那個模式一張的長度（至少一秒）。
+    static func videoTimeline(for frames: [ReceivedFrame]) -> (pictures: [SequenceVideo.Picture], lastHold: Double) {
+        guard let first = frames.first, let last = frames.last else { return ([], 0) }
+        let pictures = frames.map { SequenceVideo.Picture(image: $0.image, start: $0.time.timeIntervalSince(first.time)) }
+        return (pictures, max(1, Modes.find(last.modeID)?.frameSeconds ?? 1))
+    }
+
+    /// 把主畫面顯示的那一張所在的一段存成影片檔（.mp4、H.264、每秒 24 格）。只有一張的不存。
+    func saveDisplayedSequence() {
+        let frames = displayedSequence
+        guard frames.count >= 2, !exportingVideo else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = AppModel.videoFileName(for: frames)
+        panel.allowedContentTypes = [.mpeg4Movie]
+        panel.begin { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            self?.exportSequence(frames, to: url)
+        }
+    }
+
+    /// 在背景把一段畫面寫成影片檔；結果寫在底列（completion 是給測試用的）。
+    func exportSequence(_ frames: [ReceivedFrame], to url: URL, completion: ((Result<SequenceVideo.Summary, Error>) -> Void)? = nil) {
+        guard !frames.isEmpty, !exportingVideo else { return }
+        exportingVideo = true
+        let timeline = AppModel.videoTimeline(for: frames)
+        exportQueue.async {
+            let result = Result { try SequenceVideo.write(timeline.pictures, lastHold: timeline.lastHold, to: url) }
+            DispatchQueue.main.async {
+                self.exportingVideo = false
+                switch result {
+                case .success(let summary):
+                    self.notice = "影片已存成「\(url.lastPathComponent)」：\(summary.pictures) 張，\(AppModel.clock(summary.seconds))"
+                case .failure(let error):
+                    self.notice = "影片存檔失敗：\(error.localizedDescription)"
+                }
+                completion?(result)
+            }
+        }
+    }
+
     // MARK: - 發射來源
 
     func setSourceKind(_ kind: SourceKind) {
@@ -497,6 +593,28 @@ final class AppModel: ObservableObject {
                 video.play()   // 不循環的影片停在原來的位置，按下發射才開始播（見 goOnAir）
             }
         }
+    }
+
+    /// 畫布目前的圖層；沒有打開（或沒有字）時是 nil。設定改了就在這裡重算一次（不到一毫秒）。
+    private func currentCanvas() -> CanvasLayer? {
+        let style = settings.canvasStyle
+        if style != canvasBuilt {
+            canvasBuilt = style
+            canvasLayer = style.flatMap { CanvasLayer(style: $0) }
+            canvasVersion += 1
+        }
+        return canvasLayer
+    }
+
+    /// 把畫布的字印到一張 96×72 的來源畫面上（畫布沒開就原樣回傳）。發射前的每一張與右側欄的預覽都經過這裡。
+    func applyCanvas(to rgb: Data) -> Data { currentCanvas()?.apply(to: rgb) ?? rgb }
+
+    /// 打開、關掉畫布。第一次打開而還沒有填字的時候，先填上「CQ 呼號」。
+    func setCanvasEnabled(_ on: Bool) {
+        if on, settings.canvasText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            settings.canvasText = settings.callsign.isEmpty ? "CQ" : "CQ \(settings.callsign)"
+        }
+        settings.canvasEnabled = on
     }
 
     /// 換了來源（或換了影片檔）：上一個來源留下的畫面不能再顯示，也不能再拿來發射。
@@ -643,21 +761,24 @@ final class AppModel: ObservableObject {
         txElapsed = display.elapsed
     }
 
-    /// 來源有新的一格（或縮放方式改了）時，重算 96×72 的預覽。
+    /// 來源有新的一格（或縮放方式、畫布改了）時，重算 96×72 的預覽。預覽就是會送出去的樣子，畫布的字也印在上面。
     private func refreshPreview() {
         let (buffer, turns, version) = latestFrame.get()
         let mode = settings.scaleMode
-        guard let buffer, version != previewVersion || mode != previewScale else { return }
-        // 把整格來源畫面縮小並不便宜：來源一直在動時每秒更新 5 次就夠了；改縮放方式或剛換來源時立刻更新
+        let canvas = currentCanvas()
+        let restyled = mode != previewScale || canvasVersion != previewCanvasVersion
+        guard let buffer, version != previewVersion || restyled else { return }
+        // 把整格來源畫面縮小並不便宜：來源一直在動時每秒更新 5 次就夠了；改縮放方式、改畫布或剛換來源時立刻更新
         let now = Date()
-        guard mode != previewScale || sourcePreview == nil || now.timeIntervalSince(previewTime) >= 0.19 else { return }
+        guard restyled || sourcePreview == nil || now.timeIntervalSince(previewTime) >= 0.19 else { return }
         previewTime = now
         previewVersion = version
         previewScale = mode
+        previewCanvasVersion = canvasVersion
         let epoch = sourceEpoch
         previewQueue.async { [weak self] in
             guard let frame = FrameScaler.scale(buffer, mode: mode, quarterTurns: turns) else { return }
-            let image = NBTV.image(fromRGB: frame.rgb)
+            let image = NBTV.image(fromRGB: canvas?.apply(to: frame.rgb) ?? frame.rgb)
             DispatchQueue.main.async {
                 guard let self, epoch == self.sourceEpoch else { return }   // 這段時間裡換了來源
                 self.lastSourceRGB = frame.rgb
@@ -666,7 +787,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// 取來源當下那一格（縮成 96×72）。沒有新的畫面時沿用上一格。
+    /// 取來源當下那一格（縮成 96×72，還沒有印上畫布的字）。沒有新的畫面時沿用上一格。
     private func captureSourceFrame(_ completion: @escaping (Data?) -> Void) {
         if settings.sourceKind == .video, let buffer = video.copyCurrentFrame() { latestFrame.set(buffer, turns: video.quarterTurns) }
         let (buffer, turns, _) = latestFrame.get()
@@ -683,7 +804,7 @@ final class AppModel: ObservableObject {
         guard let buffer = video.copyCurrentFrame(),
               let frame = FrameScaler.scale(buffer, mode: settings.scaleMode, quarterTurns: video.quarterTurns) else { return false }
         lastSourceRGB = frame.rgb
-        sourcePreview = NBTV.image(fromRGB: frame.rgb)
+        sourcePreview = NBTV.image(fromRGB: applyCanvas(to: frame.rgb))
         sourceSize = frame.sourceSize
         videoPosition = video.position
         videoPlaying = video.isPlaying
@@ -742,6 +863,7 @@ final class AppModel: ObservableObject {
                     return
                 }
                 self.txLastRGB = rgb
+                let picture = self.applyCanvas(to: rgb)   // 畫布的字在這裡印上去；txLastRGB 留的是沒有印字的
                 self.txQueue.async {
                     // 上一次若有編好卻沒送出去的幀（取消、PTT 失敗），先取消它，再把重取樣濾波器清乾淨
                     self.transmitter.discardLast()
@@ -749,7 +871,7 @@ final class AppModel: ObservableObject {
                     self.transmitter.setMode(mode.id)
                     self.transmitter.setCallsign(callsign)
                     let began = Date()
-                    let frame = self.transmitter.encode(rgb: rgb)
+                    let frame = self.transmitter.encode(rgb: picture)
                     let spent = Date().timeIntervalSince(began)
                     DispatchQueue.main.async {
                         if session == self.txSession { self.txPrepareSeconds = spent }
@@ -981,9 +1103,10 @@ final class AppModel: ObservableObject {
                 DebugTap.log("準備下一張：來源 \(self.settings.sourceKind.rawValue)，畫面 \(rgb.count) 位元組、平均亮度 \(mean)")
             }
             self.txLastRGB = rgb
+            let picture = self.applyCanvas(to: rgb)   // 發射中改了畫布的字，下一張就照新的印
             self.txQueue.async {
                 let began = Date()
-                let frame = self.transmitter.encode(rgb: rgb)
+                let frame = self.transmitter.encode(rgb: picture)
                 let spent = Date().timeIntervalSince(began)
                 DispatchQueue.main.async {
                     guard session == self.txSession else { return }

@@ -42,7 +42,7 @@ final class RadioEngine {
     let output = AudioOutput(queueSeconds: max(14, 2 * (Modes.all.map(\.frameSeconds).max() ?? 6) + 2))
     private let input = AudioInput()
     private let coreQueue = DispatchQueue(label: "nbtv.core", qos: .userInitiated)
-    private let receiver = CoreReceiver()
+    private let receiver = RadioEngine.makeReceiver()
     private let spectrum = CoreSpectrum()
     /// 開始接收了幾次（主執行緒上讀寫）。
     private(set) var generation = 0
@@ -66,9 +66,12 @@ final class RadioEngine {
 
     var isReceiving: Bool { input.isRunning }
 
-    /// 接收時要不要把最近幾幀合起來解（設定視窗的「合併最近幾幀」）。隨時可以改，下一幀起生效。
-    func setMergeFrames(_ on: Bool) {
-        coreQueue.async { self.receiver.setMerging(on) }
+    /// app 接收用的接收機：一律把最近幾幀合起來解（畫面沒變的地方合併前面幾張，訊號弱時比較清楚也比較穩定；
+    /// 對方不必配合，畫面有變的地方不受影響）。這原本是設定裡的一個選項，後來固定開著。
+    static func makeReceiver() -> CoreReceiver {
+        let receiver = CoreReceiver()
+        receiver.setMerging(true)
+        return receiver
     }
 
     /// 從指定的輸入裝置開始接收；接收機會先清成初始狀態。

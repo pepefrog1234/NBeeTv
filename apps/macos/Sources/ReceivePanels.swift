@@ -97,41 +97,90 @@ struct PictureSection: View {
                 Spacer(minLength: 0)
                 Text(onAirNote).font(Theme.ui(12)).foregroundColor(Theme.secondary).lineLimit(1)
             } else if let frame = model.displayedFrame {
-                title(frame.callsign.isEmpty ? "—" : frame.callsign, meta(frame))
-                Spacer(minLength: 0)
-                Button {
-                    model.saveDisplayedFrame()
-                } label: {
-                    saveLabel
+                // 視窗窄的時候放不下完整的說明與兩顆按鈕：改用精簡的寫法（按鈕不帶圖示與張數，說明不寫「中等」那一段）
+                let count = model.displayedSequence.count
+                ViewThatFits(in: .horizontal) {
+                    received(frame, sequence: count, compact: false)
+                    received(frame, sequence: count, compact: true)
                 }
-                .buttonStyle(SmallButtonStyle())
             } else {
                 Text("尚未收到畫面").foregroundColor(Theme.secondary).frame(height: 28)
                 Spacer(minLength: 0)
-                saveLabel.modifier(DisabledSmallButton())
+                HStack(spacing: 8) {
+                    videoLabel(count: 0, enabled: false, compact: false).modifier(DisabledSmallButton())
+                    saveLabel(compact: false).modifier(DisabledSmallButton())
+                }
+                .fixedSize()
             }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
     }
 
-    private var saveLabel: some View {
+    /// 收到畫面時的資訊列：左邊是呼號與說明，右邊是「儲存影片」「儲存圖片」。
+    private func received(_ frame: AppModel.ReceivedFrame, sequence count: Int, compact: Bool) -> some View {
+        HStack(spacing: 12) {
+            title(frame.callsign.isEmpty ? "—" : frame.callsign, meta(frame, compact: compact))
+            Spacer(minLength: 0)
+            HStack(spacing: 8) {
+                saveVideoButton(count: count, compact: compact)
+                Button {
+                    model.saveDisplayedFrame()
+                } label: {
+                    saveLabel(compact: compact)
+                }
+                .buttonStyle(SmallButtonStyle())
+            }
+            .fixedSize()   // 還是放不下時，縮短的是左邊的說明，不是按鈕
+        }
+    }
+
+    private func saveLabel(compact: Bool) -> some View {
         HStack(spacing: 6) {
-            Icon(kind: .download, width: 14, height: 14)
+            if !compact { Icon(kind: .download, width: 14, height: 14) }
             Text("儲存圖片")
+        }
+    }
+
+    /// 「儲存影片」：把主畫面這一張所在的那一段（同一個呼號、一張接一張，空檔不到 10 秒）串成一個 .mp4。只有一張時不能按。
+    @ViewBuilder private func saveVideoButton(count: Int, compact: Bool) -> some View {
+        let enabled = count >= 2 && !model.exportingVideo
+        if enabled {
+            Button {
+                model.saveDisplayedSequence()
+            } label: {
+                videoLabel(count: count, enabled: true, compact: compact)
+            }
+            .buttonStyle(SmallButtonStyle())
+            .help("把這一段連續收到的 \(count) 張串成影片檔（.mp4）：同一個呼號，兩張之間的空檔不到 \(Int(AppModel.sequenceGapSeconds)) 秒")
+            .accessibilityLabel("儲存影片，這一段有 \(count) 張")
+        } else {
+            videoLabel(count: count, enabled: false, compact: compact)
+                .modifier(DisabledSmallButton())
+                .help(model.exportingVideo ? "正在存影片檔" : "這一張前後沒有連續收到的畫面：同一個呼號、空檔不到 \(Int(AppModel.sequenceGapSeconds)) 秒的才能串成影片")
+                .accessibilityLabel(model.exportingVideo ? "正在儲存影片" : "儲存影片：這一段只有一張，不能存")
+        }
+    }
+
+    private func videoLabel(count: Int, enabled: Bool, compact: Bool) -> some View {
+        HStack(spacing: 6) {
+            if !compact { Icon(kind: .videoFile, width: 14, height: 14, lineWidth: 1.4, color: enabled ? nil : Theme.tertiary) }
+            Text(model.exportingVideo ? "儲存中…" : "儲存影片")
+            if enabled, !compact { Text("\(count) 張").font(Theme.mono(12)).foregroundColor(Theme.secondary) }
         }
     }
 
     private func title(_ callsign: String, _ meta: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             Text(callsign).font(Theme.mono(20, .semibold)).tracking(0.4).lineLimit(1).fixedSize()
-            Text(meta).font(Theme.ui(12)).foregroundColor(Theme.secondary).lineLimit(1)
+            Text(meta).font(Theme.ui(12)).foregroundColor(Theme.secondary).lineLimit(1).truncationMode(.tail)
         }
         .frame(height: 28)
     }
 
-    private func meta(_ frame: AppModel.ReceivedFrame) -> String {
-        var parts = [Modes.find(frame.modeID)?.label ?? "模式 \(frame.modeID)"]
+    private func meta(_ frame: AppModel.ReceivedFrame, compact: Bool) -> String {
+        let mode = Modes.find(frame.modeID)
+        var parts = [(compact ? mode?.name : mode?.label) ?? "模式 \(frame.modeID)"]
         if frame.sequence >= 0 { parts.append("第 \(frame.sequence + 1) 張") }
         parts.append(AppModel.timeText(frame.time))
         return parts.joined(separator: " · ")
@@ -206,17 +255,9 @@ struct StatusPanel: View {
             }
         }
         Spacer(minLength: 0)
-        progress(color: Theme.rx, fraction: model.symbolsTotal > 0 ? Double(model.symbolsDone) / Double(model.symbolsTotal) : 0) {
-            if model.synced, model.symbolsTotal > 0 {
-                Text("\(model.symbolsDone) / \(model.symbolsTotal) 符號").font(Theme.mono(13))
-            } else {
-                dash
-            }
-        }
     }
 
     @ViewBuilder private var transmitting: some View {
-        let duration = model.txMode?.frameSeconds ?? 0
         header("發射") {
             Circle().fill(Theme.tx).frame(width: 6, height: 6)
             Text(pttText).foregroundColor(Theme.tx)
@@ -226,13 +267,6 @@ struct StatusPanel: View {
         row("模式") { Text(model.txMode?.label ?? "") }
         row("接收") { Text("暫停，停止發射後自動恢復") }
         Spacer(minLength: 0)
-        progress(color: Theme.tx, fraction: duration > 0 ? model.txFrameProgress / duration : 0) {
-            if model.isOnAir {
-                Text(String(format: "%.1f / %.2f 秒", model.txFrameProgress, duration)).font(Theme.mono(13))
-            } else {
-                dash
-            }
-        }
     }
 
     private var pttText: String {
@@ -249,29 +283,21 @@ struct StatusPanel: View {
         .padding(.bottom, 8)
     }
 
+    /// 面板比四列需要的高時，各列平分多出來的高度（每列最高 rowMaximum），不會全部空在底下。
     private func row<Value: View>(_ label: String, @ViewBuilder value: () -> Value) -> some View {
         HStack(spacing: 12) {
             Text(label).font(Theme.ui(12)).foregroundColor(Theme.secondary)
             Spacer(minLength: 0)
             value().lineLimit(1)
         }
-        .frame(minHeight: 31)
+        .frame(minHeight: StatusPanel.rowMinimum, maxHeight: StatusPanel.rowMaximum)
         .overlay(alignment: .top) { Rectangle().fill(Theme.separator).frame(height: 1) }
     }
 
-    private func progress<Value: View>(color: Color, fraction: Double, @ViewBuilder value: () -> Value) -> some View {
-        VStack(spacing: 6) {
-            HStack(spacing: 12) {
-                Text("本張進度").font(Theme.ui(12)).foregroundColor(Theme.secondary)
-                Spacer(minLength: 0)
-                value()
-            }
-            .frame(height: 18)
-            LevelBar(fraction: fraction, color: color)
-        }
-        .padding(.top, 8)
-        .overlay(alignment: .top) { Rectangle().fill(Theme.separator).frame(height: 1) }
-    }
+    static let rowMinimum: CGFloat = 31
+    static let rowMaximum: CGFloat = 44
+    /// 面板放得下標題與四列的最小高度：上下各 12 的留白、標題 26、四列各 31
+    static let minimumHeight: CGFloat = 24 + 26 + 4 * rowMinimum
 }
 
 /// 最近收到的縮圖：三張一列、最新的排最前面，點了就換到主畫面。

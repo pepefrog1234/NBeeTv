@@ -17,6 +17,12 @@ final class AppSettings: ObservableObject {
     @Published var serialLine: SerialLine { didSet { store?.set(serialLine.rawValue, forKey: "serialLine") } }
     @Published var rigHost: String { didSet { store?.set(rigHost, forKey: "rigHost") } }
     @Published var rigPort: String { didSet { store?.set(rigPort, forKey: "rigPort") } }
+    /// 用電台的 CAT 指令控制 PTT 時的電台型號：Hamlib 的型號編號（0：還沒選）與選的時候看到的名稱（「Icom IC-7300」）。
+    /// 名稱另外存一份，沒有裝 Hamlib 的時候畫面上才寫得出選的是哪一部
+    @Published var rigModel: Int { didSet { store?.set(rigModel, forKey: "rigModel") } }
+    @Published var rigModelName: String { didSet { store?.set(rigModelName, forKey: "rigModelName") } }
+    /// CAT 的序列速率（bps）；0：用 Hamlib 替那個型號定的預設
+    @Published var serialBaud: Int { didSet { store?.set(serialBaud, forKey: "serialBaud") } }
     /// 發射模式的編號
     @Published var txModeID: Int { didSet { store?.set(txModeID, forKey: "txModeID") } }
     @Published var sourceKind: SourceKind { didSet { store?.set(sourceKind.rawValue, forKey: "sourceKind") } }
@@ -32,8 +38,10 @@ final class AppSettings: ObservableObject {
     @Published var scheduleSkipWhenBusy: Bool { didSet { store?.set(scheduleSkipWhenBusy, forKey: "scheduleSkipWhenBusy") } }
     /// 在收到的畫面與縮圖的左上角標出那一張的訊雜比
     @Published var showFrameSNR: Bool { didSet { store?.set(showFrameSNR, forKey: "showFrameSNR") } }
-    /// 接收時把最近幾幀合起來解：畫面沒變的地方雜訊被平均掉，訊號弱時比較清楚也比較穩定
-    @Published var mergeFrames: Bool { didSet { store?.set(mergeFrames, forKey: "mergeFrames") } }
+    /// 畫布：送出去的每一張畫面上要不要印字、印什麼、印在上面還是下面（見 Canvas.swift）
+    @Published var canvasEnabled: Bool { didSet { store?.set(canvasEnabled, forKey: "canvasEnabled") } }
+    @Published var canvasText: String { didSet { store?.set(canvasText, forKey: "canvasText") } }
+    @Published var canvasPosition: CanvasPosition { didSet { store?.set(canvasPosition.rawValue, forKey: "canvasPosition") } }
     /// 測試用：不是 nil 時，發射用它給的 PTT 驅動，不看 pttMode（自我測試用來確認 PTT 有按下、有放開）。
     var debugPTTDriver: (() -> PTTDriver)?
 
@@ -49,6 +57,10 @@ final class AppSettings: ObservableObject {
         serialLine = SerialLine(rawValue: store?.string(forKey: "serialLine") ?? "") ?? .rts
         rigHost = store?.string(forKey: "rigHost") ?? "127.0.0.1"
         rigPort = store?.string(forKey: "rigPort") ?? "4532"
+        rigModel = (store?.object(forKey: "rigModel") as? Int) ?? 0
+        rigModelName = store?.string(forKey: "rigModelName") ?? ""
+        let baud = (store?.object(forKey: "serialBaud") as? Int) ?? 0
+        serialBaud = Hamlib.baudRates.contains(baud) ? baud : 0
         let mode = (store?.object(forKey: "txModeID") as? Int) ?? Modes.defaultID
         txModeID = Modes.find(mode) != nil ? mode : Modes.defaultID
         sourceKind = SourceKind(rawValue: store?.string(forKey: "sourceKind") ?? "") ?? .camera
@@ -60,7 +72,9 @@ final class AppSettings: ObservableObject {
         scheduleIntervalMinutes = TransmitSchedule.intervals.contains(interval) ? interval : TransmitSchedule.defaultInterval
         scheduleSkipWhenBusy = (store?.object(forKey: "scheduleSkipWhenBusy") as? Bool) ?? true
         showFrameSNR = (store?.object(forKey: "showFrameSNR") as? Bool) ?? false
-        mergeFrames = (store?.object(forKey: "mergeFrames") as? Bool) ?? true
+        canvasEnabled = (store?.object(forKey: "canvasEnabled") as? Bool) ?? false
+        canvasText = store?.string(forKey: "canvasText") ?? ""
+        canvasPosition = CanvasPosition(rawValue: store?.string(forKey: "canvasPosition") ?? "") ?? .top
     }
 
     /// 底列與設定視窗顯示的 PTT 說明
@@ -68,8 +82,21 @@ final class AppSettings: ObservableObject {
         switch pttMode {
         case .none: return "不控制（VOX）"
         case .serial: return "序列埠 \(serialLine.title)"
+        case .cat: return rigModel > 0 ? "CAT \(rigModelTitle)" : "CAT（還沒選電台型號）"
         case .rigctld: return "rigctld \(rigHost):\(rigPort)"
         }
+    }
+
+    /// 選的電台型號的名稱；還沒選的時候是空的
+    var rigModelTitle: String {
+        guard rigModel > 0 else { return "" }
+        return rigModelName.isEmpty ? "型號 \(rigModel)" : rigModelName
+    }
+
+    /// 畫布目前的內容；沒有打開（或沒有字）的時候是 nil
+    var canvasStyle: CanvasStyle? {
+        let text = canvasText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return canvasEnabled && !text.isEmpty ? CanvasStyle(text: text, position: canvasPosition) : nil
     }
 
     func makePTTDriver() -> PTTDriver {
@@ -77,6 +104,7 @@ final class AppSettings: ObservableObject {
         switch pttMode {
         case .none: return NoPTT()
         case .serial: return SerialPTT(path: serialPort, line: serialLine)
+        case .cat: return HamlibPTT(model: rigModel, port: serialPort, baud: serialBaud)
         case .rigctld: return RigctldPTT(host: rigHost, port: rigPort)
         }
     }

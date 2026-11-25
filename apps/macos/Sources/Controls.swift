@@ -35,11 +35,17 @@ struct SegmentedControl<Value: Hashable>: View {
     }
 }
 
-/// 下拉選單的一個項目。
+/// 下拉選單的一個項目。children 不是空的就是子選單（電台型號依廠牌分組用），這時候 action 不會被呼叫。
 struct PopupItem {
     let title: String
     var selected = false
-    let action: () -> Void
+    var children: [PopupItem] = []
+    var action: () -> Void = {}
+
+    /// 子選單攤平之後的每一個可以選的項目；子選單裡的項目標題前面加上它那一組的名稱（「Icom IC-7300」）
+    var leaves: [PopupItem] {
+        children.isEmpty ? [self] : children.flatMap(\.leaves).map { PopupItem(title: "\(title) \($0.title)", selected: $0.selected, action: $0.action) }
+    }
 }
 
 private final class ClosureMenuItem: NSMenuItem {
@@ -63,22 +69,28 @@ var popupMenuInterceptor: (([PopupItem]) -> Void)?
 /// 在滑鼠位置跳出系統選單。
 func showPopupMenu(_ items: [PopupItem], emptyTitle: String = "（沒有可選的項目）") {
     if let interceptor = popupMenuInterceptor {
-        interceptor(items)
+        interceptor(items.flatMap(\.leaves))
         return
     }
+    makePopupMenu(items, emptyTitle: emptyTitle).popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+}
+
+/// 把項目做成系統選單（有 children 的項目是子選單）。沒有項目時放一列不能選的 emptyTitle。
+func makePopupMenu(_ items: [PopupItem], emptyTitle: String = "（沒有可選的項目）") -> NSMenu {
     let menu = NSMenu()
     menu.autoenablesItems = false
+    for item in items {
+        let menuItem = ClosureMenuItem(title: item.title, handler: item.action)
+        menuItem.state = item.selected ? .on : .off
+        if !item.children.isEmpty { menuItem.submenu = makePopupMenu(item.children) }
+        menu.addItem(menuItem)
+    }
     if items.isEmpty {
         let item = NSMenuItem(title: emptyTitle, action: nil, keyEquivalent: "")
         item.isEnabled = false
         menu.addItem(item)
     }
-    for item in items {
-        let menuItem = ClosureMenuItem(title: item.title, handler: item.action)
-        menuItem.state = item.selected ? .on : .off
-        menu.addItem(menuItem)
-    }
-    menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    return menu
 }
 
 /// 下拉選單鈕的外觀：左邊可放圖示，中間是目前的選項，右邊是上下箭頭（停用時是鎖）。

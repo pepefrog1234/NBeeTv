@@ -67,7 +67,7 @@ struct NBTVApp: App {
                 .environmentObject(model)
                 .frame(minWidth: 1100, idealWidth: 1280, minHeight: 820 - NBTVApp.titleBar, idealHeight: 840 - NBTVApp.titleBar)
                 .ignoresSafeArea()   // 頂列畫到標題列的位置，視窗控制鈕疊在上面
-                .background(TitlebarButtons(barHeight: HeaderBar.height))
+                .background(TitlebarButtons(barHeight: HeaderBar.height, holdsInitialFocus: true))
                 .preferredColorScheme(.dark)
                 .onAppear {
                     model.start()
@@ -104,9 +104,11 @@ private struct OpenSettingsCommand: View {
 
 /// 開發用的環境變數，用來在沒有人操作的情況下驗證真的 app（不是離屏算圖）：
 ///   NBTV_DEBUG_SETTINGS="鍵=值;…"   用暫時的設定啟動，不讀也不寫 UserDefaults。可用的鍵：
-///       callsign、input、output（音訊裝置名稱的一部分）、ptt（none／serial／rigctld）、rig（主機:連接埠）、
+///       callsign、input、output（音訊裝置名稱的一部分）、ptt（none／serial／cat／rigctld）、rig（主機:連接埠）、
+///       rigmodel（用 CAT 指令時的電台型號，Hamlib 的編號；1 是不接電台的示範機）、baud（CAT 的序列速率，0 是預設）、
 ///       mode（發射模式編號）、source（camera／video）、loop（0／1：影片循環播放）、snr（0／1：在收到的畫面上標示訊雜比）、
-///       merge（0／1：合併最近幾幀）、every（定時發射每隔幾分鐘）、busy（0／1：定時發射遇到正在收畫面時跳過）
+///       volume（輸出音量，dB）、canvas（畫布要印的字；給了就打開畫布）、canvaspos（top／bottom）、
+///       every（定時發射每隔幾分鐘）、busy（0／1：定時發射遇到正在收畫面時跳過）
 ///   NBTV_DEBUG_VIDEO=<影片檔>        啟動後開啟這個影片檔當發射來源
 ///   NBTV_DEBUG_SIMULATED_OUTPUT=1    發射時不開音訊輸出裝置：取樣由模擬的輸出照實際的時間取走、丟掉（不會真的送出聲音）
 ///   NBTV_DEBUG_DUMP=<目錄>           dump 動作把視窗的 PNG 存在這裡（沒設就只印狀態）
@@ -125,6 +127,10 @@ private struct OpenSettingsCommand: View {
 ///       schedule=on|off|menu         打開、關掉定時發射；menu 是打開它的面板
 ///                                    （注意：開著的時候到了時間真的會發射，音訊送到設定的輸出裝置）
 ///       select=<n>                   點「最近收到」的第 n 張（1 起算）
+///       savevideo                    按「儲存影片」（會跳出存檔的對話框；接著用 savepanel 看預設檔名並取消）
+///       canvas=<文字>                 改畫布要印的字並打開畫布；空的就是關掉
+///       type=<文字>                   用鍵盤打這些字（送給目前接鍵盤輸入的視圖；先用 click 點進輸入框）。「\n」是 Return
+///       volume=<dB>                  改輸出音量
 ///       dump                         印出狀態，並把每個視窗的內容存成 PNG
 ///       quit                         結束 app（走正常的結束流程，會放開 PTT）
 ///   例：NBTV_DEBUG_SCRIPT="2:tx;9.5:stop;12:dump;13:quit"
@@ -158,11 +164,19 @@ enum DebugOptions {
                     settings.rigHost = address[0]
                     settings.rigPort = address[1]
                 }
+            case "rigmodel":
+                settings.rigModel = Int(value) ?? 0
+                settings.rigModelName = Hamlib.models().first { $0.id == settings.rigModel }?.title ?? ""
+            case "baud": settings.serialBaud = Int(value).flatMap { Hamlib.baudRates.contains($0) ? $0 : nil } ?? 0
+            case "volume": settings.outputLevelDb = min(0, max(-40, Double(value) ?? -6))
+            case "canvas":
+                settings.canvasText = value
+                settings.canvasEnabled = !value.isEmpty
+            case "canvaspos": settings.canvasPosition = CanvasPosition(rawValue: value) ?? .top
             case "mode": settings.txModeID = Int(value).flatMap { Modes.find($0)?.id } ?? Modes.defaultID
             case "source": settings.sourceKind = SourceKind(rawValue: value) ?? .camera
             case "loop": settings.loopVideo = value != "0"
             case "snr": settings.showFrameSNR = value != "0"
-            case "merge": settings.mergeFrames = value != "0"
             case "every":
                 if let minutes = Int(value), TransmitSchedule.intervals.contains(minutes) { settings.scheduleIntervalMinutes = minutes }
             case "busy": settings.scheduleSkipWhenBusy = value != "0"
@@ -318,6 +332,24 @@ enum DebugOptions {
                 log("點最近收到的第 \(index) 張")
                 model.select(model.history[index - 1])
             }
+        case "savevideo":
+            log("按儲存影片：這一段有 \(model.displayedSequence.count) 張")
+            model.saveDisplayedSequence()
+        case "canvas":
+            log(value.isEmpty ? "關掉畫布" : "畫布改成「\(value)」")
+            if !value.isEmpty { model.settings.canvasText = value }
+            model.setCanvasEnabled(!value.isEmpty)
+        case "volume":
+            log("輸出音量改成 \(value) dB")
+            model.settings.outputLevelDb = min(0, max(-40, Double(value) ?? -6))
+        case "type":
+            // 交給目前接鍵盤輸入的視圖，和輸入法送字進來走同一條路；Return 則照按鍵的路徑送
+            guard let window = NSApp.windows.first(where: { $0.identifier?.rawValue.hasPrefix("main") == true }) else { return }
+            log("打字「\(value)」，鍵盤輸入在\(window.firstResponder is NSText ? "輸入框裡" : "輸入框外")")
+            for piece in value.components(separatedBy: "\\n").enumerated() {
+                if piece.offset > 0 { window.firstResponder?.insertNewline(nil) }
+                if !piece.element.isEmpty { window.firstResponder?.insertText(piece.element) }
+            }
         case "dump":
             dump(model)
         case "quit":
@@ -341,7 +373,8 @@ enum DebugOptions {
                 if (try? rep.representation(using: .png, properties: [:])?.write(to: url)) != nil { saved = "，存成 \(url.lastPathComponent)" }
             }
             log("視窗 \(index)「\(window.title)」：外框 \(Int(window.frame.width))×\(Int(window.frame.height))，位置 (\(Int(window.frame.minX)), \(Int(window.frame.minY)))，"
-                + "內容 \(Int(content.bounds.width))×\(Int(content.bounds.height))，可拖背景移動 \(window.isMovableByWindowBackground)\(saved)")
+                + "內容 \(Int(content.bounds.width))×\(Int(content.bounds.height))，可拖背景移動 \(window.isMovableByWindowBackground)，"
+                + "鍵盤輸入在\(window.firstResponder is NSText ? "輸入框裡" : "輸入框外")\(saved)")
             // 三個控制鈕在視窗裡的位置（從左上角算）
             let buttons: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
             let frames = buttons.compactMap { window.standardWindowButton($0) }.filter { $0.frame.width > 0 }.map { button -> String in
@@ -359,11 +392,12 @@ enum DebugOptions {
         }
         log("設定：發射模式 \(model.settings.txModeID)，縮放 \(model.settings.scaleMode.rawValue)，來源 \(model.settings.sourceKind.rawValue)，"
             + "PTT \(model.settings.pttSummary)，輸出音量 \(Int(model.settings.outputLevelDb)) dB，循環播放 \(model.settings.loopVideo)，"
+            + "畫布 \(model.settings.canvasStyle.map { "「\($0.text)」（\($0.position.rawValue)）" } ?? "關")，"
             + "模式選單\(model.showModeMenu ? "開著" : "關著")")
         log("定時發射：\(model.scheduleArmed ? "開著" : "關著")，每 \(model.settings.scheduleIntervalMinutes) 分鐘，"
             + "下一次 \(model.scheduleNextFire.map { TransmitSchedule.clockText($0) } ?? "—")，頂列的字「\(model.scheduleSummary)」，"
             + "上一次：\(model.scheduleLastEvent ?? "無")，面板\(model.showScheduleMenu ? "開著" : "關著")")
-        log("狀態：\(phase)，同步 \(model.synced)，收到 \(model.history.count) 張，輸入音量 \(String(format: "%.1f", model.inputLevelDb)) dB，"
+        log("狀態：\(phase)，同步 \(model.synced)，收到 \(model.history.count) 張（主畫面那一段 \(model.displayedSequence.count) 張），輸入音量 \(String(format: "%.1f", model.inputLevelDb)) dB，"
             + "發射第 \(model.txFrameNumber) 張／已送出 \(model.txFramesSent) 張，輸入「\(model.inputDeviceName)」，輸出「\(model.outputDeviceName)」，"
             + "影片 \(model.videoPlaying ? "播放中" : "暫停") \(String(format: "%.1f", model.videoPosition))／\(String(format: "%.1f", model.videoDuration)) 秒，"
             + "訊息：\(model.notice ?? "無")，來源訊息：\(model.sourceMessage ?? "無")")

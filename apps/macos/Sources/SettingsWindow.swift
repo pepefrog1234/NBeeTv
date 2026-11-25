@@ -1,11 +1,12 @@
-// 設定視窗：呼號、音訊裝置、輸出音量、PTT 控制、接收與顯示的選項。改了立刻生效並存進 UserDefaults。
+// 設定視窗：呼號、音訊裝置、PTT 控制、顯示的選項。改了立刻生效並存進 UserDefaults。
+// （輸出音量在主視窗的發射鈕上面：要一邊發射一邊看著電台調。）
 import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject var model: AppModel
     var placeholderControls = false
-    /// 整個設定視窗的高度：版面稿是 700，後來多了「接收」與「顯示」兩組，加高到 900。
-    static let windowHeight: CGFloat = 900
+    /// 整個設定視窗的高度：版面稿是 700，後來多了「顯示」一組，PTT 多了用 CAT 指令的那一種（電台型號、序列速率兩列）。
+    static let windowHeight: CGFloat = 844
     /// 排版區的高度。真的視窗裡內容會往上延伸到標題列底下，所以要比 windowHeight 少一個標題列的高度。
     var height: CGFloat = SettingsView.windowHeight
 
@@ -17,7 +18,6 @@ struct SettingsView: View {
                 section("電台") { station }
                 section("音訊") { audio }
                 section("PTT 控制") { ptt }
-                section("接收") { receive }
                 section("顯示") { display }
                 Spacer(minLength: 0)
             }
@@ -115,17 +115,6 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: 接收
-
-    private var receive: some View {
-        let settings = model.settings
-        return row("合併最近幾幀", "畫面沒變的地方合併前面幾張，訊號弱時比較清楚；對方不必設定",
-                   first: true) {
-            CheckBox(isOn: Binding(get: { settings.mergeFrames }, set: { settings.mergeFrames = $0 }), title: "")
-                .accessibilityLabel("合併最近幾幀")
-        }
-    }
-
     // MARK: 音訊
 
     @ViewBuilder private var audio: some View {
@@ -135,14 +124,6 @@ struct SettingsView: View {
         }
         row("輸出裝置", "送去電台發射的聲音") {
             devicePicker(devices: model.outputDevices, uid: settings.outputDeviceUID, current: model.outputDeviceName) { settings.outputDeviceUID = $0 }
-        }
-        row("輸出音量", minHeight: 48) {
-            HStack(spacing: 10) {
-                PlainSlider(value: Binding(get: { settings.outputLevelDb }, set: { settings.outputLevelDb = $0 }), range: -40...0, step: 1)
-                    .frame(width: 170)
-                    .accessibilityLabel("輸出音量")
-                Text(AppModel.dbText(settings.outputLevelDb)).font(Theme.mono(13)).fixedSize().frame(width: 40, alignment: .trailing)
-            }
         }
     }
 
@@ -165,12 +146,13 @@ struct SettingsView: View {
         VStack(spacing: 0) {
             RadioRow(title: "不控制，使用電台的 VOX", selected: settings.pttMode == .none) { settings.pttMode = .none }
             RadioRow(title: "序列埠的 RTS 或 DTR", selected: settings.pttMode == .serial) { settings.pttMode = .serial }
+            RadioRow(title: "電台的 CAT 指令（經序列埠，由 Hamlib 翻譯）", selected: settings.pttMode == .cat) { settings.pttMode = .cat }
             RadioRow(title: "Hamlib rigctld（TCP）", selected: settings.pttMode == .rigctld) { settings.pttMode = .rigctld }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 6)
 
-        row("序列埠", minHeight: 48) {
+        row("序列埠", "RTS／DTR、CAT 共用", minHeight: 48) {
             HStack(spacing: 8) {
                 Button {
                     model.refreshDevices()
@@ -188,6 +170,31 @@ struct SettingsView: View {
                                  horizontalPadding: 12, fillWidth: false)
             }
         }
+        row("電台型號", rigModelDetail) {
+            Button {
+                showPopupMenu(SettingsView.rigModelItems(selected: settings.rigModel) { rig in
+                    settings.rigModel = rig.id
+                    settings.rigModelName = rig.title
+                }, emptyTitle: "（這台電腦沒有裝 Hamlib）")
+            } label: {
+                PopupButtonLabel(title: settings.rigModel > 0 ? settings.rigModelTitle : "尚未選擇").frame(width: 220)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("電台型號：\(settings.rigModel > 0 ? settings.rigModelTitle : "尚未選擇")")
+        }
+        row("序列速率", "要和電台裡設定的 CAT 速率相同") {
+            Button {
+                var items = [PopupItem(title: "依型號的預設", selected: settings.serialBaud == 0) { settings.serialBaud = 0 }]
+                items += Hamlib.baudRates.map { rate in
+                    PopupItem(title: "\(rate) bps", selected: settings.serialBaud == rate) { settings.serialBaud = rate }
+                }
+                showPopupMenu(items)
+            } label: {
+                PopupButtonLabel(title: settings.serialBaud == 0 ? "依型號的預設" : "\(settings.serialBaud) bps").frame(width: 220)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("序列速率：\(settings.serialBaud == 0 ? "依型號的預設" : "\(settings.serialBaud) bps")")
+        }
         row("rigctld 位址", "TCP 連線，本機或遠端都可以") {
             HStack(spacing: 6) {
                 field(Binding(get: { settings.rigHost }, set: { settings.rigHost = $0.trimmingCharacters(in: .whitespaces) }),
@@ -196,6 +203,24 @@ struct SettingsView: View {
                 field(Binding(get: { settings.rigPort }, set: { settings.rigPort = $0.filter(\.isNumber) }),
                       width: 64, font: Theme.mono(12), label: "rigctld 連接埠")
             }
+        }
+    }
+
+    /// 「電台型號」那一列的說明。選了 CAT 卻沒有裝 Hamlib 的時候直接寫出來，不要等到發射才知道。
+    private var rigModelDetail: String {
+        if model.settings.pttMode == .cat, !Hamlib.isInstalled { return "找不到 Hamlib，請先安裝" }
+        return "用 CAT 指令時要選"
+    }
+
+    /// 電台型號的選單：依廠牌分組，每個廠牌一個子選單（Hamlib 支援三百多個型號，排成一長串找不到）。
+    /// selected 是目前選的型號（它和它的廠牌前面打勾）；選了哪一個由 select 回報。沒有裝 Hamlib 時是空的。
+    static func rigModelItems(selected: Int, select: @escaping (Hamlib.Model) -> Void) -> [PopupItem] {
+        Hamlib.modelsByManufacturer().map { group in
+            PopupItem(title: group.manufacturer.isEmpty ? "其他" : group.manufacturer,
+                      selected: group.models.contains { $0.id == selected },
+                      children: group.models.map { rig in
+                          PopupItem(title: rig.name, selected: rig.id == selected) { select(rig) }
+                      })
         }
     }
 }

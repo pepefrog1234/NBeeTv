@@ -1,8 +1,10 @@
-// 右側欄：發射來源、縮放方式、發射模式與發射按鈕。
+// 右側欄：發射來源、縮放方式、畫布（印在畫面上的字）、發射模式、輸出音量與發射按鈕。
 import SwiftUI
 
 struct SidePanel: View {
     @EnvironmentObject var model: AppModel
+    /// 鍵盤的輸入焦點是不是在畫布的輸入框裡
+    @FocusState private var canvasFocused: Bool
 
     var body: some View {
         let settings = model.settings
@@ -11,17 +13,23 @@ struct SidePanel: View {
             SegmentedControl(options: [(SourceKind.camera, "鏡頭"), (SourceKind.video, "影片檔")],
                              selection: Binding(get: { settings.sourceKind }, set: { model.setSourceKind($0) }))
             if settings.sourceKind == .camera { cameraPicker } else { videoPicker }
-            preview
-            if settings.sourceKind == .video, model.videoName != nil {
-                CheckBox(isOn: Binding(get: { settings.loopVideo }, set: { settings.loopVideo = $0 }), title: "循環播放").lineHeight()
-            }
+            // 欄位不夠高時（視窗縮到最小、下面的說明又折成兩行）縮的是預覽，其他的控制元件都留著
+            preview.layoutPriority(1)
             HStack(spacing: 12) {
-                Text("縮放方式").font(Theme.ui(12)).foregroundColor(Theme.secondary)
+                if settings.sourceKind == .video, model.videoName != nil {
+                    CheckBox(isOn: Binding(get: { settings.loopVideo }, set: { settings.loopVideo = $0 }), title: "循環播放")
+                        .help("沒有勾：按下發射才開始播放，播完自動停止發射。勾了：影片循環播放，要自己按停止。兩種都是每送一張取當下那一格")
+                } else {
+                    Text("縮放方式").font(Theme.ui(12)).foregroundColor(Theme.secondary)
+                }
                 Spacer(minLength: 0)
                 SegmentedControl(options: [(ScaleMode.fill, "填滿"), (ScaleMode.fit, "完整")],
                                  selection: Binding(get: { settings.scaleMode }, set: { settings.scaleMode = $0 }),
                                  horizontalPadding: 14, fillWidth: false)
+                    .accessibilityLabel("縮放方式")
+                    .help("縮放方式。填滿：把畫面放大到蓋滿，裁掉多出來的邊。完整：整個畫面都留著，上下或左右補黑邊")
             }
+            canvasRow
             Rectangle().fill(Theme.separator).frame(height: 1)
             SectionTitle("發射模式")
             modeButton
@@ -31,7 +39,8 @@ struct SidePanel: View {
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
                 .lineHeight()
-            Spacer(minLength: 12)
+            Spacer(minLength: 4)
+            volumeRow
             transmitButton
             Text(buttonNote)
                 .font(Theme.ui(12))
@@ -97,17 +106,44 @@ struct SidePanel: View {
             }
             .aspectRatio(4.0 / 3.0, contentMode: .fit)
             .clipShape(RoundedRectangle(cornerRadius: 4))
+            .frame(minHeight: 120)
+            .frame(maxWidth: .infinity)   // 被壓矮的時候跟著變窄，留在欄位的中間
 
             if model.settings.sourceKind == .video, model.videoName != nil { videoControls }
 
-            VStack(alignment: .leading, spacing: 0) {
-                Text(sourceCaption).lineHeight()
-                if model.settings.sourceKind == .video {
-                    Text(model.videoPlaysOnce ? "按下發射才開始播放，每送一張取當下那一格" : "影片循環播放，每送一張就取當下那一格").lineHeight()
-                }
-            }
-            .font(Theme.ui(12))
-            .foregroundColor(Theme.secondary)
+            Text(sourceCaption)
+                .font(Theme.ui(12))
+                .foregroundColor(Theme.secondary)
+                .lineLimit(1)
+                .lineHeight()
+        }
+    }
+
+    // MARK: 畫布
+
+    /// 畫布：發射前印在每一張畫面上的字。打開之後上面的預覽就是印好字的樣子。
+    private var canvasRow: some View {
+        let settings = model.settings
+        return HStack(spacing: 8) {
+            CheckBox(isOn: Binding(get: { settings.canvasEnabled }, set: { model.setCanvasEnabled($0) }), title: "畫布")
+                .help("在送出去的每一張畫面上印字，例如「CQ \(settings.callsign.isEmpty ? "呼號" : settings.callsign)」。上面的預覽就是送出去的樣子")
+            TextField("要印的字", text: Binding(get: { settings.canvasText },
+                                              set: { settings.canvasText = String($0.prefix(CanvasLayer.maximumCharacters)) }))
+                .textFieldStyle(.plain)
+                .font(Theme.ui(13))
+                .foregroundColor(settings.canvasEnabled ? Theme.text : Theme.tertiary)
+                .padding(.horizontal, 8)
+                .frame(height: 28)
+                .frame(maxWidth: .infinity)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Theme.well))
+                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(canvasFocused ? Theme.rx : Theme.buttonRing, lineWidth: 1))
+                .focused($canvasFocused)
+                .onSubmit { canvasFocused = false }   // 按 Return 就離開輸入框，之後按到的鍵不會再改到這些字
+                .accessibilityLabel("畫布要印的字")
+            SegmentedControl(options: [(CanvasPosition.top, "上"), (CanvasPosition.bottom, "下")],
+                             selection: Binding(get: { settings.canvasPosition }, set: { settings.canvasPosition = $0 }),
+                             horizontalPadding: 9, fillWidth: false)
+                .accessibilityLabel("字印在畫面的上緣或下緣")
         }
     }
 
@@ -168,6 +204,21 @@ struct SidePanel: View {
     private var modeNote: String {
         if model.txPhase != .idle { return "發射中不能更換模式；來源可以隨時切換，下一張生效" }
         return Modes.find(model.settings.txModeID)?.summary ?? ""
+    }
+
+    /// 輸出音量：送去電台的聲音大小。放在發射鈕上面，發射中可以一邊看電台的 ALC 一邊調，改了立刻生效。
+    private var volumeRow: some View {
+        let settings = model.settings
+        return HStack(spacing: 8) {
+            Text("輸出音量").font(Theme.ui(12)).foregroundColor(Theme.secondary)
+            PlainSlider(value: Binding(get: { settings.outputLevelDb }, set: { settings.outputLevelDb = $0 }), range: -40...0, step: 1,
+                        tint: Theme.tx)
+                .accessibilityLabel("輸出音量")
+                .accessibilityValue(AppModel.dbText(settings.outputLevelDb))
+            Text(AppModel.dbText(settings.outputLevelDb)).font(Theme.mono(12)).fixedSize().frame(width: 44, alignment: .trailing)
+        }
+        .frame(height: 20)
+        .help("送去電台的聲音大小。發射中看著電台的 ALC 調：ALC 剛好不動或只動一點點")
     }
 
     private var ready: Bool { model.canTransmit && !model.settings.callsign.isEmpty }

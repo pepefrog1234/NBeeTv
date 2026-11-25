@@ -77,24 +77,38 @@ final class TitlebarButtonLayout {
 struct TitlebarButtons: NSViewRepresentable {
     /// 頂列的高度
     let barHeight: CGFloat
+    /// true：視窗打開時鍵盤的輸入焦點先放在這個看不見的視圖上，而不是視窗裡的第一個輸入框。
+    /// 主視窗用：裡面唯一的輸入框是畫布要印的字，視窗一開就讓它接鍵盤的話，隨手按到的鍵會改掉要送出去的字。
+    var holdsInitialFocus = false
 
-    func makeNSView(context: Context) -> NSView { Probe(barHeight: barHeight) }
+    func makeNSView(context: Context) -> NSView { Probe(barHeight: barHeight, holdsInitialFocus: holdsInitialFocus) }
     func updateNSView(_ nsView: NSView, context: Context) {}
 
     private final class Probe: NSView {
         private let barHeight: CGFloat
+        private let holdsInitialFocus: Bool
         private var layout: TitlebarButtonLayout?
 
-        init(barHeight: CGFloat) {
+        init(barHeight: CGFloat, holdsInitialFocus: Bool) {
             self.barHeight = barHeight
+            self.holdsInitialFocus = holdsInitialFocus
             super.init(frame: .zero)
         }
 
         required init?(coder: NSCoder) { fatalError("不支援從 nib 載入") }
 
+        override var acceptsFirstResponder: Bool { holdsInitialFocus }
+
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             layout = window.map { TitlebarButtonLayout(window: $0, barHeight: barHeight) }
+            guard holdsInitialFocus, let window else { return }
+            window.initialFirstResponder = self
+            // 視窗已經排好第一個接鍵盤的視圖的話（SwiftUI 先建好內容才把這個視圖放進來），這時候再換過來
+            DispatchQueue.main.async { [weak self, weak window] in
+                guard let self, let window, self.window === window else { return }
+                if window.firstResponder !== self { window.makeFirstResponder(self) }
+            }
         }
     }
 }

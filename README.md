@@ -149,7 +149,7 @@ build/tools/nbtv-learned --snr 10 --out out/learned.ppm core/tests/data/cat.ppm
 
 發射端與空中格式都不變。接收端解每一幀之前，先看前面 3 幀收到的值：畫面沒變的地方照各自的雜訊加權平均，把雜訊壓低；
 畫面變了的地方只用這一幀。判斷變了多少的是一個小網路，每個畫面模型各配一份權重。核心預設不合併，
-`nbtv-rx --merge`、`nbtv-sim --merge` 與 app 設定裡的「合併最近幾幀」（預設開）會打開。
+`nbtv-rx --merge`、`nbtv-sim --merge` 會打開；macOS 的 app 接收時固定開著（原本是設定裡的選項，2026-11-25 起不能關）。
 
 貓的測試圖連續送（每次發射 8 幀，每點 96 幀；前 3 幀還合不滿，也算在平均裡），PSNR（dB）：
 

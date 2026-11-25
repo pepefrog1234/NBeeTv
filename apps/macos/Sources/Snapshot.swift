@@ -71,6 +71,9 @@ enum SnapshotRunner {
         render(MainWindowView(placeholderControls: true).environmentObject(idle), width: 1280, height: 840,
                to: directory.appendingPathComponent("3-idle-video.png"))
 
+        // 開發用：畫布的字經過各個模式的編碼之後的樣子（NBTV_SNAPSHOT_CANVAS 有設才算）
+        if let style = receiving.settings.canvasStyle { renderCanvasSheet(style, pictures: [coffee, rocket, cat], to: directory) }
+
         // 4. 設定
         render(SettingsView(placeholderControls: true).environmentObject(receiving), width: 560, height: SettingsView.windowHeight,
                to: directory.appendingPathComponent("4-settings.png"))
@@ -106,6 +109,16 @@ enum SnapshotRunner {
         settings.pttMode = .serial
         settings.serialPort = "/dev/cu.usbserial-1420"
         settings.serialLine = .rts
+        settings.rigModel = 3073
+        settings.rigModelName = "Icom IC-7300"
+        settings.serialBaud = 19200
+        // 開發用：NBTV_SNAPSHOT_CANVAS=<文字> 打開畫布、印這些字（NBTV_SNAPSHOT_CANVAS_POSITION=bottom 印在下緣），
+        // 右側欄的預覽與「發射中」的畫面上看得到；另外多算一張 canvas-modes.png（各個模式編碼之後字還看不看得清楚）
+        if let text = ProcessInfo.processInfo.environment["NBTV_SNAPSHOT_CANVAS"], !text.isEmpty {
+            settings.canvasText = text
+            settings.canvasEnabled = true
+            settings.canvasPosition = CanvasPosition(rawValue: ProcessInfo.processInfo.environment["NBTV_SNAPSHOT_CANVAS_POSITION"] ?? "") ?? .top
+        }
         settings.txModeID = Modes.defaultID
         settings.sourceKind = source
         // 開發用：NBTV_SNAPSHOT_SNR=1 打開「在收到的畫面上標示訊雜比」，NBTV_SNAPSHOT_NO_LOOP=1 取消「循環播放」
@@ -179,7 +192,7 @@ enum SnapshotRunner {
         print(String(format: "[snapshot] 接收：解出 %d 張，同步 %@，訊雜比 %.1f dB，頻偏 %+.1f Hz，進度 %d/%d，輸入 %.1f dB", decoded,
                      final.synced ? "是" : "否", final.snrDb, final.offsetHz, final.symbolsDone, final.symbolsTotal, final.inputLevelDb))
         if let source = NBTV.image(fromRGB: coffee), let scaled = FrameScaler.scale(source, mode: .fill) {
-            model.sourcePreview = NBTV.image(fromRGB: scaled)
+            model.sourcePreview = NBTV.image(fromRGB: model.applyCanvas(to: scaled))
             model.sourceSize = CGSize(width: source.width, height: source.height)
         }
         return model
@@ -194,7 +207,7 @@ enum SnapshotRunner {
         tx.setMode(11)
         tx.setCallsign(model.settings.callsign)
         let cycle = [rocket, cat, coffee]
-        let frames = (0..<9).compactMap { tx.encode(rgb: cycle[$0 % 3]) }
+        let frames = (0..<9).compactMap { tx.encode(rgb: model.applyCanvas(to: cycle[$0 % 3])) }
         guard let current = frames.last, let mode = Modes.find(11) else { return model }
         let progress = 1.6
         model.txPhase = .transmitting
@@ -213,7 +226,7 @@ enum SnapshotRunner {
         model.appendSpectrum(rows, reference: .transmit)
         print("[snapshot] 發射：第 \(frames.count) 張（\(mode.label)），瀑布圖 \(rows.count) 列")
         if let source = NBTV.image(fromRGB: coffee), let scaled = FrameScaler.scale(source, mode: .fill) {
-            model.sourcePreview = NBTV.image(fromRGB: scaled)
+            model.sourcePreview = NBTV.image(fromRGB: model.applyCanvas(to: scaled))
             model.sourceSize = CGSize(width: source.width, height: source.height)
         }
         return model
@@ -250,6 +263,43 @@ enum SnapshotRunner {
             print("[snapshot] 注意：示範影片做不出來")
         }
         return model
+    }
+
+    /// 畫布的字經過編碼之後還看不看得清楚：每一列是一張測試圖，最左邊是印好字的原圖，往右是各個模式（由快到慢）
+    /// 編碼之後、沒有雜訊時對方看到的樣子。每一格放大四倍。
+    private static func renderCanvasSheet(_ style: CanvasStyle, pictures: [Data], to directory: URL) {
+        guard let layer = CanvasLayer(style: style) else { return }
+        let zoom = 4, gap = 8
+        let cellWidth = NBTV.imageWidth * zoom, cellHeight = NBTV.imageHeight * zoom
+        let columns = Modes.menuOrder.count + 1
+        let width = columns * cellWidth + (columns + 1) * gap, height = pictures.count * cellHeight + (pictures.count + 1) * gap
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4, space: space,
+                                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return }
+        context.setFillColor(CGColor(red: 0.07, green: 0.08, blue: 0.1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.interpolationQuality = .none
+        for (row, picture) in pictures.enumerated() {
+            let stamped = layer.apply(to: picture)
+            var cells = [stamped]
+            for mode in Modes.menuOrder {
+                let tx = CoreTransmitter()
+                tx.setMode(mode.id)
+                tx.setCallsign("N0CALL")
+                cells.append(tx.encode(rgb: stamped)?.preview ?? Data(count: NBTV.rgbBytes))
+            }
+            for (column, cell) in cells.enumerated() {
+                guard let image = NBTV.image(fromRGB: cell) else { continue }
+                context.draw(image, in: CGRect(x: gap + column * (cellWidth + gap), y: height - (row + 1) * (cellHeight + gap),
+                                               width: cellWidth, height: cellHeight))
+            }
+        }
+        guard let image = context.makeImage(), let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else { return }
+        let url = directory.appendingPathComponent("canvas-modes.png")
+        if (try? png.write(to: url)) != nil {
+            print("[snapshot] canvas-modes.png：「\(layer.lines.joined(separator: "／"))」字級 \(layer.fontSize)，字帶第 \(layer.rows.lowerBound)–\(layer.rows.upperBound - 1) 列；"
+                + "各欄依序是原圖、" + Modes.menuOrder.map(\.name).joined(separator: "、"))
+        }
     }
 
     // MARK: 算圖
