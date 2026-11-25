@@ -183,6 +183,7 @@ private:
     std::deque<Earlier> earlier_;
     AnalyticFilter analytic_;
     ChannelEstimator chanest_;
+    std::vector<float> clean_;   // push 進來的取樣整理後暫放的地方（非有限值換成 0）
     std::vector<cf> buf_;
     std::int64_t base_ = 0;      // buf_[0] 的取樣編號
     std::int64_t total_in_ = 0;

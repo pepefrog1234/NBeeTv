@@ -101,6 +101,7 @@ struct nbtv_rx {
     int rate = nbtv::kSampleRate;
     nbtv::Receiver rx;
     nbtv::Decimator4 down;
+    std::vector<float> clean;    // 重取樣之前先整理過的取樣（非有限值換成 0，見 dsp.hpp 的 clean_sample）
     std::vector<float> scratch;
 };
 
@@ -108,6 +109,7 @@ struct nbtv_spectrum {
     int rate = nbtv::kSampleRate;
     nbtv::Spectrum spectrum;
     nbtv::Decimator4 down;
+    std::vector<float> clean;
     std::vector<float> scratch;
 };
 
@@ -293,8 +295,10 @@ void nbtv_rx_push(nbtv_rx* rx, const float* samples, int count) {
     if (rx->rate == nbtv::kSampleRate) {
         rx->rx.push(in);
     } else {
+        // 先整理再重取樣：不然一個壞掉的取樣會被重取樣濾波器抹開成一小段
+        nbtv::clean_samples(in, rx->clean);
         rx->scratch.clear();
-        rx->down.process(in, rx->scratch);
+        rx->down.process(rx->clean, rx->scratch);
         rx->rx.push(rx->scratch);
     }
 }
@@ -357,8 +361,9 @@ void nbtv_spectrum_push(nbtv_spectrum* sp, const float* samples, int count) {
     if (sp->rate == nbtv::kSampleRate) {
         sp->spectrum.push(in);
     } else {
+        nbtv::clean_samples(in, sp->clean);
         sp->scratch.clear();
-        sp->down.process(in, sp->scratch);
+        sp->down.process(sp->clean, sp->scratch);
         sp->spectrum.push(sp->scratch);
     }
 }

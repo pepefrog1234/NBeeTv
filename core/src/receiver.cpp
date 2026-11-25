@@ -24,6 +24,15 @@ constexpr int kScPeakHold = 160;                    // 峰值之後這麼多點�
 
 constexpr int kAcquireBackoff = 24;   // 捕獲時 FFT 視窗比估計的起點提前的取樣數（粗定時誤差大）
 constexpr int kTrackBackoff = 16;     // 追蹤時的提前量：留給定時誤差、取樣時脈漂移與濾波器的前緣
+// 捕獲時幀起點最多會比候選位置晚多少：try_acquire 在候選位置前後 0、±一半、±kAcquireMaxOffset 個取樣各試一次，
+// 再照 S1 量到的路徑延遲（夾在 kAcquireMinDelay…kAcquireMaxDelay）修正。驗證導頻時要讀到幀起點之後
+// (kPreambleSymbols + kVerifySymbols) 個符號、扣掉 kTrackBackoff 的地方，所以 search_step 要多等 kAcquireMargin
+// 個取樣才檢查候選位置。少等的話 fft_window 會讀到緩衝區尾端之外（以前只等 3 個循環字首，最多少 24 個取樣）。
+constexpr int kAcquireMaxOffset = 160;
+constexpr int kAcquireMinDelay = -64;
+constexpr int kAcquireMaxDelay = 96;
+constexpr int kAcquireMargin = 4 * kCyclicPrefix;
+static_assert(kAcquireMargin >= kAcquireMaxOffset + kAcquireMaxDelay - kAcquireBackoff - kTrackBackoff);
 // 追蹤時確認下一幀的前導符號：延遲視窗（長 32 點）起點的範圍，相對於 FFT 視窗起點。第一條路徑理應在 +16，
 // 這個範圍容許它前後各差 40 點——process_frame 的定時修正處理得了這麼多。差得更遠的（對方的音效卡掉了一小段、
 // 或是另一次發射剛好在附近開始）不算確認到，交給搜尋重新捕獲，那邊的定時不受這個限制。
@@ -295,8 +304,11 @@ void Receiver::start_scan(std::int64_t from, std::int64_t limit) {
     cand_ready_ = false;
 }
 
-void Receiver::push(std::span<const float> samples) {
-    if (samples.empty()) return;
+void Receiver::push(std::span<const float> raw) {
+    if (raw.empty()) return;
+    // 非有限值與離譜的值不進濾波器、不進任何滑動平均（見 dsp.hpp 的 clean_sample）
+    clean_samples(raw, clean_);
+    const std::span<const float> samples = clean_;
     // 輸入音量：時間常數約 0.1 秒的指數平均
     const double alpha = 1.0 / (0.1 * kSampleRate);
     for (float s : samples) level_ += alpha * (static_cast<double>(s) * s - level_);
@@ -391,8 +403,8 @@ bool Receiver::search_step() {
     const double threshold = (state_ == State::Receive && !tentative()) ? kSolidScThreshold : tuning_.sc_threshold;
     for (;;) {
         if (cand_ready_) {
-            // 需要 S0、S1 與驗證用的酬載符號，外加定時修正的餘裕
-            if (end() < cand_pos_ + (kPreambleSymbols + kVerifySymbols) * kSymbolSamples + 3 * kCyclicPrefix) return false;
+            // 需要 S0、S1 與驗證用的酬載符號，外加定時修正的餘裕（kAcquireMargin：定時最多往後移這麼多）
+            if (end() < cand_pos_ + (kPreambleSymbols + kVerifySymbols) * kSymbolSamples + kAcquireMargin) return false;
             cand_ready_ = false;
             if (try_acquire(cand_pos_, cand_p_, cand_metric_)) return true;
         }
@@ -456,6 +468,11 @@ bool Receiver::search_step() {
 // 取 256 點、修正頻偏後做 FFT。頻偏的相位以取樣編號為準，所以各個視窗之間相位連續。
 void Receiver::fft_window(std::int64_t start, double cfo, cf* out) const {
     assert(start >= base_ && start + kFftSize <= end());
+    // 正式版沒有 assert：萬一呼叫端算錯了範圍，寧可當成那裡沒有訊號（全 0），也不要讀到緩衝區外面
+    if (start < base_ || start + kFftSize > end()) {
+        std::fill(out, out + kFftSize, cf(0.0f, 0.0f));
+        return;
+    }
     const double step = -kTwoPi * cfo;
     // 相位只取小數部分，避免取樣編號很大時損失精度
     double phase0 = std::fmod(step * static_cast<double>(start % (1LL << 40)), kTwoPi);
@@ -630,7 +647,7 @@ bool Receiver::try_acquire(std::int64_t s0_start, cd corr, double metric) {
     // 所以在峰值前後 80、160 個取樣也各檢查一次，取分數最高的；已經很明確時就不必再試。
     PreambleCheck chk;
     std::int64_t w0 = 0;
-    for (int offset : {0, -80, 80, -160, 160}) {
+    for (int offset : {0, -kAcquireMaxOffset / 2, kAcquireMaxOffset / 2, -kAcquireMaxOffset, kAcquireMaxOffset}) {
         const std::int64_t w = s0_start + offset + kCyclicPrefix - kAcquireBackoff;
         if (w < base_ || w + kSymbolSamples + kFftSize > end()) continue;
         const PreambleCheck one = check_preamble(w, eps, acquire_shifts(), -1, tuning_.detect_first, tuning_.detect_last);
@@ -660,7 +677,10 @@ bool Receiver::try_acquire(std::int64_t s0_start, cd corr, double metric) {
     const std::int64_t w1 = w0 + kSymbolSamples;
     const PathDelays paths = s1_path_delays(w1, cfo, chk.mode_id);
     // 路徑的 S1 有效部分從 w1 + 延遲 開始，往前推一個循環字首和一個符號就是 S0 的起點
-    auto frame_start = [&](double delay) { return w1 + std::llround(std::clamp(delay, -64.0, 96.0)) - kCyclicPrefix - kSymbolSamples; };
+    auto frame_start = [&](double delay) {
+        const double limited = std::clamp(delay, static_cast<double>(kAcquireMinDelay), static_cast<double>(kAcquireMaxDelay));
+        return w1 + std::llround(limited) - kCyclicPrefix - kSymbolSamples;
+    };
     double tau = paths.first;
     std::int64_t t0 = frame_start(tau);
     if (t0 + kCyclicPrefix - kTrackBackoff < base_) return false;

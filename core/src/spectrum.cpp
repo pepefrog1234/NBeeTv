@@ -4,6 +4,8 @@
 #include <cassert>
 #include <cmath>
 
+#include "dsp.hpp"
+
 namespace nbtv {
 
 Spectrum::Spectrum() : fft_(kSpectrumFft), window_(kSpectrumFft) {
@@ -19,7 +21,8 @@ void Spectrum::reset() {
 }
 
 void Spectrum::push(std::span<const float> samples) {
-    buffer_.insert(buffer_.end(), samples.begin(), samples.end());
+    // 非有限值當成 0（見 dsp.hpp 的 clean_sample）：不然一個 NaN 會讓包含它的那兩列整列都是 NaN
+    for (float s : samples) buffer_.push_back(clean_sample(s));
     std::vector<cf> x(kSpectrumFft);
     std::size_t pos = 0;
     while (buffer_.size() - pos >= static_cast<std::size_t>(kSpectrumFft)) {

@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -636,6 +637,107 @@ void test_two_widths() {
     nbtv_tx_destroy(tx);
 }
 
+// 壞掉的取樣（NaN、無限大、極大的值）不可以把接收機弄壞：以前只要一個 NaN，搜尋同步訊號用的滑動平均就永遠是 NaN，
+// 之後什麼幀都收不到；音量與頻譜的讀數也變成非數值，外殼把它們轉成整數時會當掉。
+void test_bad_samples(int rate) {
+    nbtv_model* model = load_model("261122-3");
+    if (model == nullptr) return;
+    nbtv_tx* tx = nbtv_tx_create(rate);
+    nbtv_rx* rx = nbtv_rx_create(rate);
+    nbtv_spectrum* sp = nbtv_spectrum_create(rate);
+    nbtv_tx_set_model(tx, model);
+    nbtv_rx_set_model(rx, model);
+    nbtv_model_destroy(model);
+    CHECK_EQ(nbtv_tx_set_mode(tx, 12), 0);
+    nbtv_tx_set_callsign(tx, "N0CALL");
+    const std::vector<std::uint8_t> rgb = test_images::load("rocket");
+    std::vector<float> frame(static_cast<std::size_t>(nbtv_tx_frame_samples(tx)));
+    CHECK_EQ(nbtv_tx_encode_image(tx, rgb.data(), frame.data(), static_cast<int>(frame.size()), nullptr, nullptr), static_cast<int>(frame.size()));
+
+    std::uint32_t seed = 12345;
+    const auto noise = [&seed](std::size_t n) {
+        std::vector<float> x(n);
+        for (float& v : x) {
+            seed = seed * 1664525u + 1013904223u;
+            v = (static_cast<float>(seed >> 8) / 8388608.0f - 1.0f) * 0.01f;
+        }
+        return x;
+    };
+    int decoded = 0, rows = 0;
+    bool finite = true;
+    std::vector<float> row(NBTV_SPECTRUM_BINS);
+    const auto feed = [&](const std::vector<float>& x) {
+        const std::size_t chunk = static_cast<std::size_t>(rate / 50);
+        for (std::size_t pos = 0; pos < x.size(); pos += chunk) {
+            const int n = static_cast<int>(std::min(chunk, x.size() - pos));
+            nbtv_rx_push(rx, x.data() + pos, n);
+            nbtv_spectrum_push(sp, x.data() + pos, n);
+            nbtv_rx_status st{};
+            nbtv_rx_get_status(rx, &st);
+            finite = finite && std::isfinite(st.input_level_db) && std::isfinite(st.freq_offset_hz) && (!st.snr_valid || std::isfinite(st.snr_db));
+            nbtv_rx_frame f;
+            while (nbtv_rx_poll_frame(rx, &f)) {
+                decoded += f.decoded;
+                finite = finite && std::isfinite(f.snr_db) && std::isfinite(f.freq_offset_hz);
+            }
+            while (nbtv_spectrum_poll(sp, row.data())) {
+                ++rows;
+                for (float v : row) finite = finite && std::isfinite(v);
+            }
+        }
+    };
+
+    feed(noise(static_cast<std::size_t>(rate)));
+    feed(frame);
+    feed(noise(static_cast<std::size_t>(rate)));
+    CHECK_EQ(decoded, 1);
+
+    // 各種壞值：單獨一個、連續一段，夾在雜訊中間
+    const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+    const float big = std::numeric_limits<float>::max();
+    for (float bad : {nan, inf, -inf, big, -big, 1e30f}) {
+        std::vector<float> x = noise(static_cast<std::size_t>(rate) / 2);
+        x[x.size() / 3] = bad;
+        std::fill(x.begin() + static_cast<std::ptrdiff_t>(x.size() / 2), x.begin() + static_cast<std::ptrdiff_t>(x.size() / 2) + 200, bad);
+        feed(x);
+    }
+    // 幀的中間也有壞值：這一幀解不解得出來都可以，但不可以交出非有限的讀數
+    std::vector<float> damaged = frame;
+    damaged[damaged.size() / 2] = nan;
+    damaged[damaged.size() / 2 + 1] = inf;
+    feed(noise(static_cast<std::size_t>(rate) / 2));
+    feed(damaged);
+    // 連續一長串極大的值（被限制在 ±100）會讓搜尋同步訊號用的平均值偏掉幾秒（量到約 6 秒），之後自己恢復：等 10 秒
+    feed(noise(static_cast<std::size_t>(rate) * 10));
+    const int before = decoded;
+
+    // 之後照樣收得到幀，讀數也都是有限值
+    feed(frame);
+    feed(noise(static_cast<std::size_t>(rate)));
+    CHECK_EQ(decoded, before + 1);
+    CHECK(finite);
+    CHECK(rows > 100);
+    nbtv_rx_status st{};
+    nbtv_rx_get_status(rx, &st);
+    CHECK(st.input_level_db < -30.0f);  // 音量的讀數也回到只有雜訊時該有的大小
+
+    // 只有非有限值（沒有極大的有限值）的話不用等：下一幀馬上收得到
+    nbtv_rx_reset(rx);
+    feed(noise(static_cast<std::size_t>(rate)));
+    feed(std::vector<float>(300, nan));
+    feed(std::vector<float>(300, inf));
+    const int clean_start = decoded;
+    feed(frame);
+    feed(noise(static_cast<std::size_t>(rate)));
+    CHECK_EQ(decoded, clean_start + 1);
+    CHECK(finite);
+    std::printf("  壞掉的取樣（NaN、無限大、極大值）：%d Hz，之後照樣收到幀，讀數都是有限值（音量 %.1f dB）\n", rate, static_cast<double>(st.input_level_db));
+
+    nbtv_spectrum_destroy(sp);
+    nbtv_rx_destroy(rx);
+    nbtv_tx_destroy(tx);
+}
+
 }  // namespace
 
 int main() {
@@ -655,5 +757,7 @@ int main() {
     test_two_models();
     test_two_widths();
     test_spectrum();
+    test_bad_samples(12000);
+    test_bad_samples(48000);
     return check::finish("c_api");
 }
