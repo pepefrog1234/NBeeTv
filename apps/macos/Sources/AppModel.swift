@@ -128,6 +128,8 @@ final class AppModel: ObservableObject {
     @Published var outputDeviceName = "—"
     /// 要讓使用者看到的訊息（裝置或 PTT 出錯等），顯示在底列。
     @Published var notice: String?
+    /// PTT 的指令沒有成功、電台可能還按著發射時的警告（主視窗疊一條顯示，要使用者自己按掉，見 PTTWarningBanner）；平常是 nil。
+    @Published var pttWarning: String?
     /// 發射模式的選單是否開著
     @Published var showModeMenu = false
 
@@ -214,6 +216,14 @@ final class AppModel: ObservableObject {
     static var scheduleMarginSeconds = 5.0
 
     static let pttLeadSeconds = 0.3      // 按下 PTT 後等多久才開始送音訊
+    /// 輸出裝置超過這麼多秒沒有來取取樣，就當成它壞了（被拔掉、沒有回應）：立刻停止發射、放開 PTT。
+    /// 發射的每一步都是照「已經播到哪裡」在走的，裝置不來取就永遠等不到，PTT 會一直按著。（測試時改小）
+    static var outputStallSeconds = 3.0
+    /// 「結束發射中」要過這麼久，再按一次發射鈕才算「立刻停止」（免得連按兩下就把最後一張切掉）
+    static let abortGuardSeconds = 0.5
+    private var txPulledFrames: Int64 = -1   // 最近一次看到輸出裝置總共取了幾格
+    private var txPulledAt = 0.0             // 那個數字從什麼時候起沒再變（系統開機後的秒數，不受時鐘調整影響）
+    private var txStoppingAt = 0.0           // 什麼時候進到「結束發射中」
     static let prepareLeadSeconds = 0.6  // 目前這張剩多久時開始準備下一張（至少）
     /// 最近準備一張（取畫面＋編碼）花了多久；偶爾特別慢的一次會讓它維持高一陣子。
     private var txPrepareSeconds = 0.0
@@ -245,6 +255,10 @@ final class AppModel: ObservableObject {
                 self.sourceMessage = message
             }
         }
+
+        // 電腦要睡眠了（蓋上筆電、選「睡眠」）：見 systemWillSleep
+        NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.willSleepNotification)
+            .sink { [weak self] _ in self?.systemWillSleep() }.store(in: &cancellables)
 
         // 換了輸入裝置：refreshDevices 發現該用的裝置和正在用的不同，會改從新的裝置接收
         settings.$inputDeviceUID.dropFirst().sink { [weak self] _ in
@@ -301,6 +315,22 @@ final class AppModel: ObservableObject {
             ProcessInfo.processInfo.endActivity(activity)
             scheduleActivity = nil
         }
+    }
+
+    /// 電腦即將睡眠。睡著之後音訊就停了，但用指令按下的 PTT（電台的 CAT 指令、rigctld）不會自己放開，
+    /// 電台會空著發射到電腦醒來為止：所以正在發射的話立刻停止，而且等 PTT 真的放開了才回來
+    /// （系統會等這個通知處理完才睡）。
+    func systemWillSleep() {
+        guard txPhase != .idle else { return }
+        failTransmit(L("電腦進入睡眠，已停止發射並放開 PTT"))
+        pttQueue.sync {}   // 放開 PTT 排在這條佇列上，等它做完
+    }
+
+    /// PTT 的指令沒有成功，電台可能還按著：記下來並在主視窗上顯示警告（底列的一行字太容易沒看到，而且下一次發射就被清掉）。
+    private func warnPTTMayBeKeyed(_ reason: String) {
+        DebugTap.log("警告：PTT 可能還按著（\(reason)）")
+        AppModel.trace?("警告：PTT 可能還按著（\(reason)）")
+        pttWarning = L("PTT 的指令沒有成功（%@），電台可能還在發射。請看一下電台；還在發射的話，直接用電台上的按鍵或開關停下來。", reason)
     }
 
     // MARK: - 裝置
@@ -824,8 +854,19 @@ final class AppModel: ObservableObject {
         switch txPhase {
         case .idle: startTransmit()
         case .starting, .transmitting: stopTransmit()
-        case .stopping: break
+        case .stopping:
+            // 已經在收尾了又按一次：不等這一張送完，立刻停止
+            if ProcessInfo.processInfo.systemUptime - txStoppingAt >= AppModel.abortGuardSeconds { abortTransmit() }
         }
+    }
+
+    /// 不等目前這張送完，立刻停止輸出、放開 PTT、回到接收。最後這一張不完整，對方解不出來。
+    /// 平常按停止是「送完目前這張」；這個是給等不及的時候用的（頻率不對、蓋到別人）。
+    func abortTransmit() {
+        guard txPhase == .transmitting || txPhase == .stopping else { return }
+        DebugTap.log("立刻停止發射")
+        AppModel.trace?("立刻停止發射：最後一張沒有送完")
+        endTransmit(failure: L("按了立刻停止，最後一張沒有送完"))
     }
 
     /// fromStart：來源是影片檔時先回到開頭再開始（定時發射用）；平常是從影片目前的位置接著播。
@@ -919,10 +960,11 @@ final class AppModel: ObservableObject {
     }
 
     /// 測試用：之後的發射不開音訊裝置，改由模擬的輸出照實際的時間把取樣取走（見 AudioOutput.simulated），
-    /// 取走的取樣交給 sink（在別的佇列上呼叫）。
-    func debugUseSimulatedOutput(sink: (([Float]) -> Void)?) {
+    /// 取走的取樣交給 sink（在別的佇列上呼叫）。stallAfter：模擬的輸出取了這麼多秒之後就不再取（見 AudioOutput.simulatedStallAfter）。
+    func debugUseSimulatedOutput(sink: (([Float]) -> Void)?, stallAfter: Double? = nil) {
         engine?.output.simulated = true
         engine?.output.simulatedSink = sink
+        engine?.output.simulatedStallAfter = stallAfter
     }
 
     private func firstFrameReady(_ frame: EncodedFrame?, session: Int) {
@@ -940,9 +982,13 @@ final class AppModel: ObservableObject {
             do {
                 try driver.key(true)
             } catch {
-                try? driver.key(false)
+                // 沒按成功也照樣放開一次。按下的指令可能其實到了電台（見 PTTError.mayBeKeyed），放開也可能失敗：
+                // 有一邊說不準，就要提醒使用者去看電台
+                var uncertain = (error as? PTTError)?.mayBeKeyed == true
+                do { try driver.key(false) } catch { uncertain = true }
                 DispatchQueue.main.async {
                     if self.pttDriver === driver { self.pttDriver = nil }   // 上面已經放開了
+                    if uncertain { self.warnPTTMayBeKeyed(error.localizedDescription) }
                     guard session == self.txSession, self.txPhase == .starting else { return }
                     self.failTransmit(L("PTT 失敗：%@", error.localizedDescription))
                 }
@@ -982,6 +1028,8 @@ final class AppModel: ObservableObject {
         engine.output.enqueue([Float](repeating: 0, count: Int(txLead)))
         txEnd = txLead
         txMonitored = txLead
+        txPulledFrames = -1
+        txPulledAt = ProcessInfo.processInfo.systemUptime
         txPhase = .transmitting
         guard enqueue(first) else { return }
         // 來源是影片檔：開始送音訊的同時讓影片開始播放（已經在播的不動）。
@@ -1029,6 +1077,16 @@ final class AppModel: ObservableObject {
 
     private func txTick() {
         guard let engine, txPhase == .transmitting || txPhase == .stopping else { return }
+        // 輸出裝置還有沒有來取取樣（佇列空了它也照樣來取，取到的是靜音）。USB 音效卡中途斷線、系統的音訊服務卡住時
+        // 它就不來了：已經播到哪裡不會再前進，下面每一步（排下一張、收尾、定時發射的上限）都等不到。
+        let pulled = engine.output.renderedFrames, now = ProcessInfo.processInfo.systemUptime
+        if pulled != txPulledFrames {
+            txPulledFrames = pulled
+            txPulledAt = now
+        } else if now - txPulledAt > AppModel.outputStallSeconds {
+            failTransmit(L("音訊輸出裝置沒有回應（可能被拔掉了），已停止發射並放開 PTT"))
+            return
+        }
         let position = engine.output.playedSamples
         if DebugTap.isEnabled, Date().timeIntervalSince(txTapLogged) >= 1 {
             txTapLogged = Date()
@@ -1138,6 +1196,7 @@ final class AppModel: ObservableObject {
         switch txPhase {
         case .transmitting:
             txPhase = .stopping
+            txStoppingAt = ProcessInfo.processInfo.systemUptime
             pauseVideoWithTransmit()   // 之後不會再取新的畫面，影片不必等這一張送完才停
             dropQueuedFrame()
             if !txPreparing { queueTail() }
@@ -1156,6 +1215,7 @@ final class AppModel: ObservableObject {
         DebugTap.log("影片播完：最後一格已經排入，送完就停止發射")
         AppModel.trace?("影片播完：送完最後一張就停止發射")
         txPhase = .stopping
+        txStoppingAt = ProcessInfo.processInfo.systemUptime
         if !txPreparing { queueTail() }
     }
 
@@ -1259,7 +1319,10 @@ final class AppModel: ObservableObject {
                 DebugTap.log("PTT 已放開")
             } catch {
                 DebugTap.log("放開 PTT 失敗：\(error.localizedDescription)")
-                DispatchQueue.main.async { self.notice = L("放開 PTT 失敗：%@", error.localizedDescription) }
+                DispatchQueue.main.async {
+                    self.notice = L("放開 PTT 失敗：%@", error.localizedDescription)
+                    self.warnPTTMayBeKeyed(error.localizedDescription)
+                }
             }
         }
     }

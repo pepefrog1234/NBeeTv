@@ -253,11 +253,12 @@ struct SidePanel: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .disabled(model.txPhase == .stopping)
+            // 「結束發射中」也按得下去：再按一次就是立刻停止（見 AppModel.abortTransmit）
         }
     }
 
     private var buttonNote: String {
+        if model.txPhase == .stopping { return L("正在送完這張；再按一次立刻停止（這張不完整）") }
         if model.txPhase != .idle, model.scheduledRun { return L("定時發射：影片播完會自動停止，也可以隨時按停止") }
         if model.txPhase == .transmitting, model.videoPlaysOnce { return L("影片播完會自動停止，也可以隨時按停止") }
         if model.txPhase != .idle { return L("送完目前這張後放開 PTT，自動回到接收") }

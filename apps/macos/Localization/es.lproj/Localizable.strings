@@ -29,6 +29,12 @@
 "無法開啟輸出裝置「%@」：%@" = "No se puede abrir el dispositivo de salida «%@»: %@";
 "輸出佇列放不下這一張，已停止發射" = "La imagen no cabe en la cola de salida; se detuvo la transmisión";
 "放開 PTT 失敗：%@" = "No se pudo soltar el PTT: %@";
+"音訊輸出裝置沒有回應（可能被拔掉了），已停止發射並放開 PTT" = "El dispositivo de salida de audio no responde (puede que se haya desconectado); se detuvo la transmisión y se soltó el PTT";
+"按了立刻停止，最後一張沒有送完" = "Se detuvo de inmediato; la última imagen quedó incompleta";
+"電腦進入睡眠，已停止發射並放開 PTT" = "El Mac entró en reposo; se detuvo la transmisión y se soltó el PTT";
+"PTT 可能還按著" = "Puede que el PTT siga pulsado";
+"PTT 的指令沒有成功（%@），電台可能還在發射。請看一下電台；還在發射的話，直接用電台上的按鍵或開關停下來。" = "El comando de PTT no tuvo éxito (%@); puede que el equipo siga transmitiendo. Compruébalo y, si sigue transmitiendo, detenlo con los botones o el interruptor del propio equipo.";
+"知道了" = "Entendido";
 
 // 定時發射：到時間的結果與原因
 "定時發射 %@ 超過影片的長度還沒結束，已自動停止" = "La TX programada de las %@ superó la duración del video y se detuvo sola";
@@ -297,6 +303,7 @@
 "定時發射：影片播完會自動停止，也可以隨時按停止" = "TX programada: se detiene sola al acabar el video; también puedes detenerla cuando quieras";
 "影片播完會自動停止，也可以隨時按停止" = "Se detiene sola al acabar el video; también puedes detenerla cuando quieras";
 "送完目前這張後放開 PTT，自動回到接收" = "Al acabar la imagen en curso se suelta el PTT y se vuelve a recepción";
+"正在送完這張；再按一次立刻停止（這張不完整）" = "Acabando esta imagen. Pulsa otra vez para detener ya; quedará incompleta";
 "還沒設定呼號，請先到設定裡填寫" = "Falta el indicativo; indícalo primero en Ajustes";
 "等來源有畫面後才能發射" = "Se podrá transmitir cuando la fuente tenga imagen";
 "以 %@ 發射，影片播完自動停止" = "Transmite como %@; se detiene sola al acabar el video";

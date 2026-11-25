@@ -29,6 +29,12 @@
 "無法開啟輸出裝置「%@」：%@" = "Cannot open output device “%@”: %@";
 "輸出佇列放不下這一張，已停止發射" = "The output queue has no room for this frame; transmission stopped";
 "放開 PTT 失敗：%@" = "Could not release PTT: %@";
+"音訊輸出裝置沒有回應（可能被拔掉了），已停止發射並放開 PTT" = "The audio output device stopped responding (it may have been unplugged); transmission stopped and PTT released";
+"按了立刻停止，最後一張沒有送完" = "Stopped immediately; the last frame was not sent in full";
+"電腦進入睡眠，已停止發射並放開 PTT" = "The Mac went to sleep; transmission stopped and PTT released";
+"PTT 可能還按著" = "PTT may still be keyed";
+"PTT 的指令沒有成功（%@），電台可能還在發射。請看一下電台；還在發射的話，直接用電台上的按鍵或開關停下來。" = "The PTT command did not succeed (%@), so the radio may still be transmitting. Check the radio; if it is still transmitting, stop it with the radio’s own buttons or power switch.";
+"知道了" = "OK";
 
 // 定時發射：到時間的結果與原因
 "定時發射 %@ 超過影片的長度還沒結束，已自動停止" = "Scheduled TX at %@ ran past the video's length and was stopped automatically";
@@ -297,6 +303,7 @@
 "定時發射：影片播完會自動停止，也可以隨時按停止" = "Scheduled TX: it stops by itself when the video ends; you can also stop at any time";
 "影片播完會自動停止，也可以隨時按停止" = "It stops by itself when the video ends; you can also stop at any time";
 "送完目前這張後放開 PTT，自動回到接收" = "PTT is released after the current frame and the app returns to receive";
+"正在送完這張；再按一次立刻停止（這張不完整）" = "Finishing this frame. Press again to stop now; the frame will be incomplete";
 "還沒設定呼號，請先到設定裡填寫" = "No callsign set; enter it in Settings first";
 "等來源有畫面後才能發射" = "Transmit becomes available once the source has a picture";
 "以 %@ 發射，影片播完自動停止" = "Transmits as %@; stops by itself when the video ends";

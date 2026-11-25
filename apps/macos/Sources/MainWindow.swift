@@ -15,6 +15,14 @@ struct MainWindowView: View {
                 Rectangle().fill(Theme.barBorder).frame(width: 1)
                 SidePanel().frame(width: 319)
             }
+            .overlay(alignment: .top) {
+                // PTT 的指令沒有成功、電台可能還在發射：疊在最上面講，要使用者自己按掉（底列的一行字太容易沒看到）
+                if let warning = model.pttWarning {
+                    PTTWarningBanner(text: warning) { model.pttWarning = nil }
+                        .padding(.top, 14)
+                        .padding(.horizontal, 24)
+                }
+            }
             Rectangle().fill(Theme.barBorder).frame(height: 1)
             FooterBar()
         }
@@ -22,6 +30,44 @@ struct MainWindowView: View {
         .foregroundColor(Theme.text)
         .background(Theme.background)
         .environment(\.colorScheme, .dark)
+    }
+}
+
+/// PTT 的指令沒有成功、電台可能還在發射時的警告：疊在主畫面上方的一條，按了「知道了」才消失。
+/// 不用系統的對話框：對話框開著的時候主視窗的按鈕（包括停止發射）都按不了，app 也結束不了
+/// （連 `kill` 送來的結束要求都被擋住），對一個可能正在發射的 app 來說太危險。
+struct PTTWarningBanner: View {
+    let text: String
+    let dismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 20, weight: .bold))
+                .padding(.top, 1)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(L("PTT 可能還按著")).font(Theme.ui(15, .bold))
+                Text(text).font(Theme.ui(13)).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            Button(action: dismiss) {
+                Text(L("知道了"))
+                    .font(Theme.ui(13, .semibold))
+                    .foregroundColor(Theme.tx)
+                    .padding(.horizontal, 14)
+                    .frame(height: 28)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Theme.txInk))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .foregroundColor(Theme.txInk)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .frame(maxWidth: 760)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Theme.tx))
+        .shadow(color: .black.opacity(0.5), radius: 12, y: 4)
     }
 }
 

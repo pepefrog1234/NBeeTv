@@ -307,6 +307,9 @@ final class AudioOutput {
     var simulated = false
     /// 模擬的裝置取走的取樣（佇列空了的部分是 0），在模擬用的佇列上呼叫。
     var simulatedSink: (([Float]) -> Void)?
+    /// 測試用：模擬的裝置取了這麼多秒的取樣之後就不再來取，重現「USB 音效卡在發射中斷線、系統的音訊服務卡住」。
+    /// 要在 start 之前設定；nil 是不會停。
+    var simulatedStallAfter: Double?
     private var simulationTimer: DispatchSourceTimer?
     private let simulationQueue = DispatchQueue(label: "nbtv.audio.simulated", qos: .userInitiated)
 
@@ -379,6 +382,7 @@ final class AudioOutput {
         timer.schedule(deadline: .now() + .milliseconds(10), repeating: .milliseconds(10), leeway: .milliseconds(1))
         timer.setEventHandler { [weak self] in
             guard let self else { return }
+            if let stall = self.simulatedStallAfter, Double(taken) / Double(NBTV.sampleRate) >= stall { return }
             let due = Int64(Double(DispatchTime.now().uptimeNanoseconds - began) / 1e9 * Double(NBTV.sampleRate))
             let frames = Int(due - taken)
             guard frames > 0 else { return }

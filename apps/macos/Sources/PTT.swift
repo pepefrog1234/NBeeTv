@@ -19,6 +19,9 @@ struct PTTError: LocalizedError {
     let message: String
     /// 連上了、指令也送出去了，但等到逾時都沒有回覆（和「連不上」「對方馬上掛斷」不一樣：那兩種很快就知道）
     var timedOut = false
+    /// 指令可能已經到了電台、PTT 也許還按著：按下的指令送到了卻沒有得到確認，之後補送的放開也沒有成功；或是放開的指令失敗了。
+    /// 外殼看到這個要提醒使用者去看電台。
+    var mayBeKeyed = false
     var errorDescription: String? { message }
 }
 
@@ -336,12 +339,10 @@ final class HamlibPTT: PTTDriver {
         if on {
             let tcp = try start()
             do {
-                // 電台開得起來的話這個指令很快就有回覆。開不起來的時候 rigctld 不會結束，也不會馬上回報，而是把指令卡住十幾秒：
-                // 等三秒沒有回覆就當作開不起來，結束 rigctld，再從它留下的訊息裡找原因。
-                // rigctld 剛開始聽連線的頭一瞬間，偶爾（實測約一成）會把連線直接掛斷、什麼都不回：這種馬上就失敗的再試，最多試兩秒。
-                try command("T 1", to: tcp, timeoutSeconds: 3, retryUntil: Date().addingTimeInterval(2))
+                try HamlibPTT.press(port: tcp)
             } catch {
                 stop()
+                // 電台根本沒有開起來的話，指令到不了它那裡，不可能按著
                 if let reason = HamlibPTT.openFailureReason(in: errorText()) {
                     throw PTTError(message: reason.isEmpty ? L("Hamlib 開不了電台，請檢查型號、序列埠與速率") : L("Hamlib 開不了電台，請檢查型號、序列埠與速率（%@）", reason))
                 }
@@ -350,8 +351,40 @@ final class HamlibPTT: PTTDriver {
         } else {
             guard let tcp = tcpPort else { return }   // 沒有開起來（或已經放開過了）
             defer { stop() }
-            // 放開一定要送到：連線被掛斷這種馬上就知道的失敗也再試
-            try command("T 0", to: tcp, timeoutSeconds: 6, retryUntil: Date().addingTimeInterval(2))
+            try HamlibPTT.release(port: tcp)
+        }
+    }
+
+    /// 對 rigctld 送「T 1」。
+    /// 電台開得起來的話這個指令很快就有回覆。開不起來的時候 rigctld 不會結束，也不會馬上回報，而是把指令卡住十幾秒：
+    /// 等三秒沒有回覆就當作失敗（key 之後會結束 rigctld，再從它留下的訊息裡找原因）。
+    /// rigctld 剛開始聽連線的頭一瞬間，偶爾（實測約一成）會把連線直接掛斷、什麼都不回：這種馬上就失敗的再試，最多試兩秒。
+    ///
+    /// 失敗不代表電台沒有按下：指令可能已經到了（回覆晚到、弄丟，或電台回報失敗卻其實按下了）。接著 rigctld 就要收掉，
+    /// 之後沒有人會再叫電台放開，所以回報失敗之前先補送一次「T 0」。指令有可能到了電台（等到逾時沒有回覆，或電台回報失敗）
+    /// 而補送的那一次又沒成功的話，錯誤上標著 mayBeKeyed；根本連不上、一連上就被掛斷的，指令沒有送到，不標。
+    static func press(port: Int) throws {
+        do {
+            try command("T 1", to: port, timeoutSeconds: 3, retryUntil: Date().addingTimeInterval(2))
+        } catch {
+            var failure = (error as? PTTError) ?? PTTError(message: error.localizedDescription)
+            let delivered = failure.timedOut || failure.mayBeKeyed
+            let released = (try? command("T 0", to: port, timeoutSeconds: 1)) != nil
+            failure.mayBeKeyed = delivered && !released
+            throw failure
+        }
+    }
+
+    /// 對 rigctld 送「T 0」。放開一定要送到：連線被掛斷這種馬上就知道的失敗也再試；等到逾時、或電台回報失敗的，
+    /// 最後再補送一次（之後 rigctld 就要收掉了，沒有別的機會）。還是不行的話，錯誤上標著 mayBeKeyed。
+    static func release(port: Int) throws {
+        do {
+            try command("T 0", to: port, timeoutSeconds: 6, retryUntil: Date().addingTimeInterval(2))
+        } catch {
+            if (try? command("T 0", to: port, timeoutSeconds: 1)) != nil { return }
+            var failure = (error as? PTTError) ?? PTTError(message: error.localizedDescription)
+            failure.mayBeKeyed = true
+            throw failure
         }
     }
 
@@ -498,10 +531,11 @@ final class HamlibPTT: PTTDriver {
         }
     }
 
-    private func command(_ text: String, to tcp: Int, timeoutSeconds: Int, retryUntil: Date? = nil) throws {
-        let reply = try HamlibPTT.request(text, port: tcp, timeoutSeconds: timeoutSeconds, retryUntil: retryUntil)
+    private static func command(_ text: String, to tcp: Int, timeoutSeconds: Int, retryUntil: Date? = nil) throws {
+        let reply = try request(text, port: tcp, timeoutSeconds: timeoutSeconds, retryUntil: retryUntil)
         guard reply.contains("RPRT 0") else {
-            throw PTTError(message: L("電台沒有接受 PTT 指令（Hamlib 回覆「%@」）", reply.trimmingCharacters(in: .whitespacesAndNewlines)))
+            // 指令確實送到了，電台卻回報失敗：PTT 有沒有動說不準
+            throw PTTError(message: L("電台沒有接受 PTT 指令（Hamlib 回覆「%@」）", reply.trimmingCharacters(in: .whitespacesAndNewlines)), mayBeKeyed: true)
         }
     }
 

@@ -111,6 +111,7 @@ private struct OpenSettingsCommand: View {
 ///       every（定時發射每隔幾分鐘）、busy（0／1：定時發射遇到正在收畫面時跳過）
 ///   NBTV_DEBUG_VIDEO=<影片檔>        啟動後開啟這個影片檔當發射來源
 ///   NBTV_DEBUG_SIMULATED_OUTPUT=1    發射時不開音訊輸出裝置：取樣由模擬的輸出照實際的時間取走、丟掉（不會真的送出聲音）
+///                                    寫成 stall=<秒> 的話，模擬的輸出取了這麼多秒之後就不再取（重現輸出裝置在發射中沒有回應）
 ///   NBTV_DEBUG_DUMP=<目錄>           dump 動作把視窗的 PNG 存在這裡（沒設就只印狀態）
 ///   NBTV_DEBUG_SCRIPT="秒:動作;…"    主視窗出現後，在指定的秒數執行動作，並把收發流程的轉折印出來。動作：
 ///       tx、stop、toggle             開始發射、停止發射、按一下發射鈕
@@ -131,6 +132,7 @@ private struct OpenSettingsCommand: View {
 ///       canvas=<文字>                 改畫布要印的字並打開畫布；空的就是關掉
 ///       type=<文字>                   用鍵盤打這些字（送給目前接鍵盤輸入的視圖；先用 click 點進輸入框）。「\n」是 Return
 ///       volume=<dB>                  改輸出音量
+///       willsleep                    送出「電腦即將睡眠」的通知（和系統真的要睡眠時送的是同一個；電腦不會真的睡）
 ///       dump                         印出狀態，並把每個視窗的內容存成 PNG
 ///       quit                         結束 app（走正常的結束流程，會放開 PTT）
 ///   例：NBTV_DEBUG_SCRIPT="2:tx;9.5:stop;12:dump;13:quit"
@@ -193,9 +195,10 @@ enum DebugOptions {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss.SSS"
         log("現在是 \(formatter.string(from: launch))")
-        if environment["NBTV_DEBUG_SIMULATED_OUTPUT"] != nil {
-            model.debugUseSimulatedOutput(sink: nil)
-            log("發射時不開音訊輸出裝置（模擬的輸出）")
+        if let simulated = environment["NBTV_DEBUG_SIMULATED_OUTPUT"] {
+            let stall = simulated.hasPrefix("stall=") ? Double(simulated.dropFirst("stall=".count)) : nil
+            model.debugUseSimulatedOutput(sink: nil, stallAfter: stall)
+            log("發射時不開音訊輸出裝置（模擬的輸出" + (stall.map { String(format: "，取了 %.1f 秒之後就不再取", $0) } ?? "") + "）")
         }
         if let path = environment["NBTV_DEBUG_VIDEO"] {
             model.openVideo(URL(fileURLWithPath: path)) { ok in log("開啟影片檔：\(ok ? "成功" : "失敗")") }
@@ -350,6 +353,10 @@ enum DebugOptions {
                 if piece.offset > 0 { window.firstResponder?.insertNewline(nil) }
                 if !piece.element.isEmpty { window.firstResponder?.insertText(piece.element) }
             }
+        case "willsleep":
+            log("送出「電腦即將睡眠」的通知")
+            NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.willSleepNotification, object: NSWorkspace.shared)
+            log("通知處理完了：\(model.txPhase == .idle ? "已經回到待機" : "還在發射")")
         case "dump":
             dump(model)
         case "quit":
@@ -404,7 +411,7 @@ enum DebugOptions {
         log("狀態：\(phase)，同步 \(model.synced)，收到 \(model.history.count) 張（主畫面那一段 \(model.displayedSequence.count) 張），輸入音量 \(String(format: "%.1f", model.inputLevelDb)) dB，"
             + "發射第 \(model.txFrameNumber) 張／已送出 \(model.txFramesSent) 張，輸入「\(model.inputDeviceName)」，輸出「\(model.outputDeviceName)」，"
             + "影片 \(model.videoPlaying ? "播放中" : "暫停") \(String(format: "%.1f", model.videoPosition))／\(String(format: "%.1f", model.videoDuration)) 秒，"
-            + "訊息：\(model.notice ?? "無")，來源訊息：\(model.sourceMessage ?? "無")")
+            + "訊息：\(model.notice ?? "無")，來源訊息：\(model.sourceMessage ?? "無")，PTT 的警告：\(model.pttWarning ?? "無")")
         for frame in model.history.prefix(6) {
             log("  收到：\(Modes.find(frame.modeID)?.label ?? "?")，呼號 \(frame.callsign)，第 \(frame.sequence + 1) 張\(model.isDisplayed(frame) ? "（主畫面顯示中）" : "")")
         }

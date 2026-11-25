@@ -181,6 +181,7 @@ enum SelfTest {
         run("canvas-onair") { testCanvasOnAir(rocket) }
         run("schedule") { testScheduleTimes() }
         run("schedule-transmit") { testScheduledTransmit(rocket) }
+        run("safety") { testTransmitSafety(rocket) }
         run("l10n") { testLocalization() }
         if only != nil {
             run("serial") { testSerialErrors() }
@@ -901,7 +902,10 @@ enum SelfTest {
     private final class RecordingPTT: PTTDriver {
         private let lock = NSLock()
         private var states: [Bool] = []
+        /// 放開要花幾秒（像真的 PTT 要等電台回覆那樣）；用來分辨「有等放開做完」和「只是把放開排進佇列」
+        var releaseDelay = 0.0
         func key(_ on: Bool) throws {
+            if !on, releaseDelay > 0 { usleep(UInt32(releaseDelay * 1_000_000)) }
             lock.lock()
             states.append(on)
             lock.unlock()
@@ -1378,6 +1382,218 @@ enum SelfTest {
         if abs((early - late) - 20) > 3 { problems.append(String(format: "發射中把音量調低 20 dB，送出去的訊號只差 %.1f dB（%.1f → %.1f dBFS）", early - late, early, late)) }
         detail += String(format: "；輸出音量 −6 → −26 dB，送出去的訊號 %.1f → %.1f dBFS", early, late)
         report(name, problems.isEmpty, problems.isEmpty ? detail : problems.joined(separator: "；"))
+    }
+
+    // MARK: 發射中的保險
+
+    /// 測試用的 PTT：按下或放開時可以丟出指定的錯誤；每一次呼叫都記下來。
+    private final class FailingPTT: PTTDriver {
+        var keyDownError: Error?
+        var keyUpError: Error?
+        private let lock = NSLock()
+        private var states: [Bool] = []
+        func key(_ on: Bool) throws {
+            lock.lock()
+            states.append(on)
+            lock.unlock()
+            if let error = on ? keyDownError : keyUpError { throw error }
+        }
+        func take() -> [Bool] {
+            lock.lock()
+            defer { lock.unlock() }
+            let result = states
+            states.removeAll()
+            return result
+        }
+    }
+
+    /// 發射中出狀況時不可以讓 PTT 一直按著。用的是 app 真正的狀態物件，音訊輸出換成模擬的裝置、PTT 換成記錄用的：
+    ///   * 輸出裝置中途不再來取取樣（USB 音效卡斷線）：超過時限自動停止、放開 PTT、底列寫出原因；
+    ///     已經按了停止、正在等這一張送完的時候停住也一樣
+    ///   * 「結束發射中」再按一次發射鈕：立刻停止（半秒內連按的不算）；之後照常可以發射，送出的幀解得回來
+    ///   * 電腦即將睡眠：通知一處理完，發射就已經停了、PTT 也已經放開了（不必等任何背景的工作）
+    ///   * PTT 的指令說不準有沒有放開（放開失敗、按下沒有得到確認）時跳出警告；確定沒按著的不警告
+    private static func testTransmitSafety(_ image: Data) {
+        let name = "發射中的保險：輸出停住、立刻停止、電腦睡眠、PTT 指令失敗"
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("nbtv-selftest-safety-\(getpid()).mp4")
+        defer { try? FileManager.default.removeItem(at: url) }
+        guard let cg = NBTV.image(fromRGB: image), Demo.makeVideo(at: url, from: cg, seconds: 3, fps: 10) else {
+            report(name, false, "示範影片做不出來")
+            return
+        }
+        setenv("NBTV_NO_DEVICES", "1", 1)   // 狀態物件啟動時不開輸入裝置與鏡頭
+        let settings = AppSettings(store: nil)
+        settings.callsign = "N0CALL"
+        settings.sourceKind = .video
+        settings.loopVideo = true    // 不會自己停，要按停止
+        settings.txModeID = 11       // 模式 11：每張 2.72 秒，「結束發射中」夠久，來得及再按一次
+        let ptt = RecordingPTT()
+        settings.debugPTTDriver = { ptt }
+        let model = AppModel(settings: settings, live: true)
+        let sent = SampleCollector()
+        model.start()
+        defer { model.shutdown() }
+        var opened: Bool?
+        model.openVideo(url) { opened = $0 }
+        guard Demo.wait(timeout: 10, until: { opened != nil }), opened == true, Demo.wait(timeout: 10, until: { model.canTransmit }) else {
+            report(name, false, "影片開不起來，或一直沒有來源畫面")
+            return
+        }
+        let normalStall = AppModel.outputStallSeconds
+        AppModel.outputStallSeconds = 1.0   // 測試時不必真的等三秒
+        defer { AppModel.outputStallSeconds = normalStall }
+        let stallNotice = L("音訊輸出裝置沒有回應（可能被拔掉了），已停止發射並放開 PTT")
+        var problems: [String] = [], details: [String] = []
+
+        /// 開始發射，等到真的在送、而且送了至少 seconds 秒
+        func transmit(for seconds: Double) -> Bool {
+            model.startTransmit()
+            return Demo.wait(timeout: 8) { model.txPhase == .transmitting && model.txElapsed >= seconds }
+        }
+
+        // 1. 發射中輸出裝置停住，沒有人按停止
+        model.debugUseSimulatedOutput(sink: { sent.append($0) }, stallAfter: 1.2)
+        _ = ptt.take()
+        var began = Date()
+        model.startTransmit()
+        if Demo.wait(timeout: 8, until: { model.txPhase == .idle }) {
+            let took = Date().timeIntervalSince(began)
+            Demo.spin(0.3)   // PTT 的放開在背景佇列上做
+            if ptt.take() != [true, false] { problems.append("輸出停住：PTT 不是「按下一次、放開一次」") }
+            if model.notice != stallNotice { problems.append("輸出停住：底列的訊息是「\(model.notice ?? "無")」") }
+            // 輸出取了 1.2 秒之後停住，再過 1 秒的時限才認定；加上開始前的準備
+            if took < 2.0 || took > 4.5 { problems.append(String(format: "輸出停住：%.1f 秒後才停止，預期 2–4.5 秒", took)) }
+            details.append(String(format: "輸出停住 %.1f 秒後自動停止並放開 PTT", max(0, took - 1.2)))
+        } else {
+            problems.append("輸出停住之後發射沒有自動停止（PTT 一直按著）")
+            model.abortTransmit()
+        }
+
+        // 2. 已經按了停止、正在等這一張送完，輸出才停住
+        model.debugUseSimulatedOutput(sink: { sent.append($0) }, stallAfter: 1.6)
+        _ = ptt.take()
+        if transmit(for: 0.5) {
+            model.stopTransmit()
+            began = Date()
+            if model.txPhase != .stopping { problems.append("按停止之後不是「結束發射中」") }
+            if Demo.wait(timeout: 8, until: { model.txPhase == .idle }) {
+                Demo.spin(0.3)
+                if ptt.take() != [true, false] { problems.append("結束發射中輸出停住：PTT 不是「按下一次、放開一次」") }
+                if model.notice != stallNotice { problems.append("結束發射中輸出停住：底列的訊息是「\(model.notice ?? "無")」") }
+                // 這一張要 2.72 秒才送完；輸出在 1.6 秒停住，所以是保險讓它結束的（約按停止後 2.1 秒），不是正常送完
+                let took = Date().timeIntervalSince(began)
+                if took > 3.5 { problems.append(String(format: "結束發射中輸出停住：按停止後 %.1f 秒才結束", took)) }
+            } else {
+                problems.append("結束發射中輸出停住之後一直沒有結束（PTT 一直按著）")
+                model.abortTransmit()
+            }
+        } else {
+            problems.append("第二次發射沒有開始")
+            model.abortTransmit()
+        }
+
+        // 3. 「結束發射中」再按一次：立刻停止
+        model.debugUseSimulatedOutput(sink: { sent.append($0) }, stallAfter: nil)
+        _ = ptt.take()
+        _ = sent.take()
+        if transmit(for: 0.5) {
+            model.toggleTransmit()   // 第一次：送完這一張就停
+            if model.txPhase != .stopping { problems.append("按發射鈕停止之後不是「結束發射中」") }
+            model.toggleTransmit()   // 馬上又按：當成連按，不算
+            if model.txPhase != .stopping { problems.append("連按兩下就立刻停止了（最後一張會被切掉）") }
+            Demo.spin(AppModel.abortGuardSeconds + 0.1)
+            if model.txPhase != .stopping { problems.append("還沒再按一次，這一張就結束了（測試的時間算錯了）") }
+            model.toggleTransmit()   // 隔了半秒再按：立刻停止
+            if model.txPhase != .idle { problems.append("「結束發射中」再按一次沒有立刻停止") }
+            Demo.spin(0.3)
+            if ptt.take() != [true, false] { problems.append("立刻停止：PTT 不是「按下一次、放開一次」") }
+            if model.pttWarning != nil { problems.append("立刻停止：不該有 PTT 的警告") }
+            let complete = Demo.receive(sent.take() + Demo.silence(seconds: 0.5)).flatMap(\.frames).filter(\.decoded)
+            if !complete.isEmpty { problems.append("立刻停止：最後一張居然是完整的（\(complete.count) 張解得出來），沒有真的馬上停") }
+            details.append("「結束發射中」再按一次立刻停止（半秒內連按的不算）")
+        } else {
+            problems.append("第三次發射沒有開始")
+            model.abortTransmit()
+        }
+
+        // 4. 之後照常發射、正常停止：送出的幀都解得回來（立刻停止沒有把發射機的狀態弄亂）
+        _ = ptt.take()
+        _ = sent.take()
+        model.startTransmit()
+        if Demo.wait(timeout: 10, until: { model.txFramesSent >= 1 }) {
+            model.stopTransmit()
+            if Demo.wait(timeout: 10, until: { model.txPhase == .idle }) {
+                Demo.spin(0.3)
+                if ptt.take() != [true, false] { problems.append("之後的發射：PTT 不是「按下一次、放開一次」") }
+                if let notice = model.notice { problems.append("之後的發射：\(notice)") }
+                let good = Demo.receive(sent.take() + Demo.silence(seconds: 0.5)).flatMap(\.frames).filter { $0.decoded && $0.headerOK && $0.callsign == "N0CALL" }
+                if good.count != model.txFramesSent || good.isEmpty { problems.append("之後的發射：送出 \(model.txFramesSent) 張，解回來 \(good.count) 張") }
+                details.append("之後照常發射，\(good.count) 張都解得回來")
+            } else {
+                problems.append("之後的發射：按停止後沒有結束")
+                model.abortTransmit()
+            }
+        } else {
+            problems.append("之後的發射：一張都沒送完")
+            model.abortTransmit()
+        }
+
+        // 5. 電腦即將睡眠：和系統真的要睡眠時送的是同一個通知。處理完就要已經停了、PTT 已經放開了——
+        //    這裡不轉動 run loop、也不等背景佇列，直接看結果
+        _ = ptt.take()
+        if transmit(for: 0.4) {
+            ptt.releaseDelay = 0.3   // 放開要花 0.3 秒：沒有等它做完的話，下面看到的就只有「按下」
+            NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.willSleepNotification, object: NSWorkspace.shared)
+            if model.txPhase != .idle { problems.append("電腦要睡眠時發射沒有停") }
+            if ptt.take() != [true, false] { problems.append("電腦要睡眠時，通知處理完了 PTT 還沒放開") }
+            ptt.releaseDelay = 0
+            if model.notice != L("電腦進入睡眠，已停止發射並放開 PTT") { problems.append("電腦要睡眠時底列的訊息是「\(model.notice ?? "無")」") }
+            details.append("電腦要睡眠時立刻停止，通知處理完 PTT 已經放開")
+        } else {
+            problems.append("第五次發射沒有開始")
+            model.abortTransmit()
+        }
+        // 剛按下發射、還在準備第一張的時候要睡眠：直接取消，PTT 不會按下去
+        model.startTransmit()
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.willSleepNotification, object: NSWorkspace.shared)
+        if model.txPhase != .idle { problems.append("準備第一張時電腦要睡眠：發射沒有取消") }
+        Demo.spin(1.0)
+        if ptt.take().last == true { problems.append("準備第一張時電腦要睡眠：之後 PTT 還是按下去了") }
+        // 沒有在發射的時候：什麼都不做
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.willSleepNotification, object: NSWorkspace.shared)
+        if model.txPhase != .idle || !ptt.take().isEmpty { problems.append("沒有在發射時電腦要睡眠：不該動到 PTT") }
+
+        // 6. PTT 的指令說不準有沒有放開：要跳出警告
+        let failing = FailingPTT()
+        settings.debugPTTDriver = { failing }
+        func attempt(_ label: String, down: Error?, up: Error?, expectWarning: Bool) {
+            failing.keyDownError = down
+            failing.keyUpError = up
+            model.pttWarning = nil
+            _ = failing.take()
+            model.startTransmit()
+            if down == nil {
+                // 按得下去：送一點點之後立刻停止，放開的時候出錯
+                if Demo.wait(timeout: 8, until: { model.txPhase == .transmitting && model.txElapsed >= 0.3 }) { model.abortTransmit() }
+            }
+            guard Demo.wait(timeout: 8, until: { model.txPhase == .idle }) else {
+                problems.append("\(label)：發射沒有結束")
+                model.abortTransmit()
+                return
+            }
+            Demo.spin(0.4)
+            if failing.take() != [true, false] { problems.append("\(label)：PTT 不是「按下一次、放開一次」") }
+            if (model.pttWarning != nil) != expectWarning { problems.append("\(label)：\(expectWarning ? "沒有跳出警告" : "不該跳出警告")") }
+            if expectWarning, let warning = model.pttWarning, !warning.contains("測試用") { problems.append("\(label)：警告裡沒有寫原因") }
+        }
+        attempt("放開失敗", down: nil, up: PTTError(message: "測試用：放開失敗"), expectWarning: true)
+        attempt("按下沒有得到確認", down: PTTError(message: "測試用：按下沒有確認", mayBeKeyed: true), up: nil, expectWarning: true)
+        attempt("按下失敗、之後的放開也失敗", down: PTTError(message: "測試用：按下失敗"), up: PTTError(message: "測試用：放開失敗"), expectWarning: true)
+        attempt("電台根本沒開起來", down: PTTError(message: "測試用：開不起來"), up: nil, expectWarning: false)
+        model.pttWarning = nil
+        details.append("PTT 的指令說不準有沒有放開時跳出警告，確定沒按著的不警告")
+
+        report(name, problems.isEmpty, problems.isEmpty ? details.joined(separator: "；") : problems.joined(separator: "；"))
     }
 
     // MARK: 定時發射
@@ -1966,12 +2182,14 @@ enum SelfTest {
 
     /// 假的 rigctld：聽本機的一個臨時連接埠。前 dropFirst 條連線一接起來就掛斷；之後的每一條，讀到指令就回 reply
     /// （reply 是 nil 的話接起來之後一直不回）。用來重現真的 rigctld 剛啟動時偶爾把連線掛斷、以及電台沒有回應的情形。
+    /// 給了 respond 的話，回什麼由它照收到的指令（「T 1」「T 0」）決定，回 nil 就是不回；收到的指令都記在 commands 裡。
     private final class FakeRigctld {
         private(set) var port = 0
         private let listener: Int32
         private let lock = NSLock()
         private var accepted = 0
         private var held: [Int32] = []
+        private var received: [String] = []
 
         var connections: Int {
             lock.lock()
@@ -1979,7 +2197,14 @@ enum SelfTest {
             return accepted
         }
 
-        init?(dropFirst: Int, reply: String?) {
+        /// 到目前為止收到的指令（去掉換行）
+        var commands: [String] {
+            lock.lock()
+            defer { lock.unlock() }
+            return received
+        }
+
+        init?(dropFirst: Int, reply: String?, respond: ((String) -> String?)? = nil) {
             listener = socket(AF_INET, SOCK_STREAM, 0)
             guard listener >= 0 else { return nil }
             var address = sockaddr_in()
@@ -2010,6 +2235,21 @@ enum SelfTest {
                     setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
                     if number <= dropFirst {
                         close(client)
+                    } else if let respond {
+                        var buffer = [UInt8](repeating: 0, count: 64)
+                        let count = recv(client, &buffer, buffer.count, 0)
+                        let command = String(decoding: buffer[0..<max(0, count)], as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+                        self.lock.lock()
+                        self.received.append(command)
+                        self.lock.unlock()
+                        if let answer = respond(command) {
+                            _ = Array(answer.utf8).withUnsafeBufferPointer { send(client, $0.baseAddress, $0.count, 0) }
+                            close(client)
+                        } else {
+                            self.lock.lock()
+                            self.held.append(client)
+                            self.lock.unlock()
+                        }
                     } else if let reply {
                         var buffer = [UInt8](repeating: 0, count: 64)
                         _ = recv(client, &buffer, buffer.count, 0)
@@ -2120,6 +2360,66 @@ enum SelfTest {
             }
             dead.stop()
         }
+        // 按下失敗時補送放開：「T 1」沒有得到確認（電台回報失敗，或一直沒回覆），指令卻可能已經到了電台，
+        // 所以回報失敗之前要補送一次「T 0」；補送的有成功就不必警告，沒成功的話錯誤上要標著「PTT 可能還按著」
+        func pressFailure(_ label: String, t1: String?, t0: String?, expectKeyed: Bool, seconds: ClosedRange<Double>) {
+            guard let fake = FakeRigctld(dropFirst: 0, reply: nil, respond: { $0 == "T 1" ? t1 : t0 }) else {
+                problems.append("假的 rigctld 開不起來")
+                return
+            }
+            defer { fake.stop() }
+            let began = Date()
+            do {
+                try HamlibPTT.press(port: fake.port)
+                problems.append("\(label)：按下失敗卻當成成功")
+            } catch {
+                let spent = Date().timeIntervalSince(began)
+                if fake.commands != ["T 1", "T 0"] { problems.append("\(label)：送出的指令是 \(fake.commands)，應該是 T 1 之後補送 T 0") }
+                if (error as? PTTError)?.mayBeKeyed != expectKeyed { problems.append("\(label)：「PTT 可能還按著」的標記不對") }
+                if !seconds.contains(spent) { problems.append(String(format: "%@：花了 %.1f 秒", label, spent)) }
+            }
+        }
+        pressFailure("電台回報失敗、補送的放開成功", t1: "RPRT -5\n", t0: "RPRT 0\n", expectKeyed: false, seconds: 0...1)
+        pressFailure("電台回報失敗、補送的放開也失敗", t1: "RPRT -5\n", t0: "RPRT -5\n", expectKeyed: true, seconds: 0...1)
+        pressFailure("按下沒有回覆、補送的放開成功", t1: nil, t0: "RPRT 0\n", expectKeyed: false, seconds: 2.8...4)
+        pressFailure("按下與補送的放開都沒有回覆", t1: nil, t0: nil, expectKeyed: true, seconds: 3.8...5.5)
+        // 連線一直被掛斷：指令根本沒有送到，不必警告
+        if let dead = FakeRigctld(dropFirst: 1000, reply: "RPRT 0\n") {
+            do {
+                try HamlibPTT.press(port: dead.port)
+                problems.append("連線一直被掛斷卻按下成功")
+            } catch {
+                if (error as? PTTError)?.mayBeKeyed != false { problems.append("連線一直被掛斷（指令沒送到）卻標著「PTT 可能還按著」") }
+            }
+            dead.stop()
+        }
+        // 放開失敗時最後再補送一次：第二次成功就算放開了；兩次都失敗要標著「PTT 可能還按著」
+        var releaseReplies = ["RPRT -5\n", "RPRT 0\n"]
+        let replyLock = NSLock()
+        if let fake = FakeRigctld(dropFirst: 0, reply: nil, respond: { _ in
+            replyLock.lock()
+            defer { replyLock.unlock() }
+            return releaseReplies.isEmpty ? "RPRT 0\n" : releaseReplies.removeFirst()
+        }) {
+            do {
+                try HamlibPTT.release(port: fake.port)
+                if fake.commands != ["T 0", "T 0"] { problems.append("放開第一次失敗時：送出的指令是 \(fake.commands)，應該再補送一次 T 0") }
+            } catch {
+                problems.append("放開第二次成功了卻回報失敗：\(error.localizedDescription)")
+            }
+            fake.stop()
+        }
+        if let fake = FakeRigctld(dropFirst: 0, reply: nil, respond: { _ in "RPRT -5\n" }) {
+            do {
+                try HamlibPTT.release(port: fake.port)
+                problems.append("放開兩次都失敗卻當成成功")
+            } catch {
+                if (error as? PTTError)?.mayBeKeyed != true || fake.commands != ["T 0", "T 0"] {
+                    problems.append("放開兩次都失敗時：指令 \(fake.commands)、「PTT 可能還按著」的標記 \((error as? PTTError)?.mayBeKeyed == true)")
+                }
+            }
+            fake.stop()
+        }
         // 還沒選型號：不用啟動任何東西就知道
         do {
             try HamlibPTT(model: 0, port: "", baud: 0).key(true)
@@ -2129,7 +2429,8 @@ enum SelfTest {
         }
         report("CAT 指令的 PTT：型號清單、序列埠規格與參數", problems.isEmpty,
                problems.isEmpty ? "清單 \(parsed.count) 個型號（含名稱有空白、比欄位長的）；速率與控制線的參數正確；"
-                   + "連線被掛斷會再試（頭兩次被掛斷、第三次送到），對方不回覆則等到逾時就回報" : problems.joined(separator: "；"))
+                   + "連線被掛斷會再試（頭兩次被掛斷、第三次送到），對方不回覆則等到逾時就回報；"
+                   + "按下失敗會補送放開、放開失敗會再補送一次，還是不行的標著「PTT 可能還按著」" : problems.joined(separator: "；"))
 
         // 2. 需要這台電腦上的 Hamlib
         let name = "CAT 指令的 PTT：經 Hamlib 按下與放開（不接電台的示範機）"
