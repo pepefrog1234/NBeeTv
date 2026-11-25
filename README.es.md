@@ -1,0 +1,189 @@
+# NBeeTv
+
+[繁體中文](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · **Español** · [English](README.en.md)
+
+[![build](https://github.com/pepefrog1234/NBeeTv/actions/workflows/build.yml/badge.svg)](https://github.com/pepefrog1234/NBeeTv/actions/workflows/build.yml)
+
+Televisión de banda estrecha (NBTV) para radioaficionados en HF. Envía y recibe imágenes en color de 96×72 a través del audio de un equipo de SSB corriente, hasta una imagen cada 0.67 segundos.
+
+Una red neuronal convierte cada imagen directamente en los valores que llevan las portadoras OFDM. No hay cuantización ni código corrector de errores, así que cuando la señal se debilita la imagen se vuelve más borrosa en lugar de perderse por completo.
+
+![La ventana principal de la app NBTV mientras recibe](docs/images/app-receiving.es.png)
+
+> Todavía es experimental: la modulación, los modelos y el receptor se han validado sobre todo con simulación de canal, y las pruebas en el aire han sido pocas hasta ahora.
+
+## Cómo se ve una imagen recibida
+
+![La misma imagen recibida con distintas relaciones señal/ruido](docs/images/reception.png)
+
+La columna de la izquierda (TX) es la imagen enviada. Las cuatro columnas de su derecha (RX) muestran cómo sale de un canal de HF simulado con relaciones señal/ruido de 20, 10, 5 y 0 dB.
+De arriba abajo están los modos 14, 12 y 11, que tardan 0.67, 1.04 y 2.72 segundos por imagen. Un modo más lento envía más valores por imagen, así que la imagen tiene más detalle.
+
+- El canal es el canal «pobre» (poor) del modelo de Watterson: dos trayectos de igual intensidad separados 2 ms, cada uno con su propio desvanecimiento, y una dispersión Doppler de 1 Hz. La SNR se mide en un ancho de banda de ruido de 3 kHz.
+- Cada casilla es la trama de calidad mediana entre 9 enviadas seguidas, no la mejor. En el receptor estaba desactivada la combinación de las últimas tramas.
+  A 0 dB no se recibieron entre 1 y 4 de las 9 tramas; la casilla muestra la mediana de las que sí llegaron.
+- La figura se hizo con las herramientas de línea de comandos de los paquetes de descarga: `nbtv-tx` → `nbtv-chan` → `nbtv-rx`.
+
+## Cómo funciona
+
+- **Señal**: OFDM con 49 portadoras separadas 46.875 Hz, que ocupa de 352 a 2648 Hz y cabe en la banda de paso de voz de SSB.
+  Cada trama es una imagen. Empieza con dos símbolos de preámbulo para la sincronización y lleva pilotos repartidos por toda la trama.
+- **Codificación de la imagen**: una red convolucional convierte la imagen de 96×72 en una lista de números reales, que se envían de dos en dos como los valores I y Q de las portadoras.
+  Otra red convierte los valores recibidos, junto con la SNR medida, de nuevo en una imagen. El entrenamiento ya incluía ruido, desvanecimiento y valores perdidos, así que por malos que sean los valores recibidos el resultado es solo una imagen más borrosa.
+- **Cabecera**: cada trama lleva además el indicativo y un número de trama, protegidos con un código convolucional y un CRC. La imagen se puede decodificar sin la cabecera.
+- **Receptor**: detecta el modo automáticamente y tolera un error de frecuencia de ±150 Hz y un error del reloj de muestreo de ±100 ppm. Cuando la señal es demasiado débil para decodificar la cabecera, sigue recibiendo al ritmo de las tramas.
+  También puede combinar los valores recibidos en las últimas tramas antes de decodificar, con lo que las partes de la imagen que no han cambiado salen más nítidas. Esto ocurre solo en el receptor; el transmisor no hace nada distinto.
+- **Los dos extremos necesitan el mismo modelo**: los archivos de pesos están en `models/` y vienen incluidos en los paquetes de descarga y en la app.
+
+## Los cuatro modos
+
+| Modo | Por imagen | Números reales por imagen | 0 dB | 10 dB | 20 dB | Notas |
+| --- | --- | --- | --- | --- | --- | --- |
+| 14 | 0.67 s | 1512 | 20.8 | 24.3 | 26.2 | El más rápido |
+| 12 | 1.04 s | 2592 | 21.8 | 25.6 | 27.8 | |
+| 11 | 2.72 s | 7776 | 24.3 | 29.2 | 32.8 | La imagen con más detalle |
+| 13 | 2.72 s | 7776 | 24.4 | 29.4 | 33.1 | La misma trama que el modo 11, con una red cuatro veces mayor |
+
+Las tres columnas numéricas son la calidad de imagen (PSNR, en dB): la media de 16 fotos que no se usaron en el entrenamiento, pasando por toda la cadena de transmisión y recepción y por el canal «pobre» simulado descrito arriba.
+Los resultados con el canal de ruido blanco y con otras SNR, y cómo se midieron, están en las [notas técnicas](docs/TECHNICAL.md).
+
+## Descarga
+
+Descarga el archivo de tu plataforma desde [Releases](https://github.com/pepefrog1234/NBeeTv/releases). Cada uno se compila y se prueba en una máquina de esa plataforma y con ese tipo de procesador.
+
+| Plataforma | Procesador | Archivo | Contenido |
+| --- | --- | --- | --- |
+| macOS 14 o posterior | Chip de Apple | `NBeeTv-<versión>-macos-arm64-app.zip` | NBTV.app, la aplicación gráfica para recibir y transmitir |
+| macOS 14 o posterior | Intel | `NBeeTv-<versión>-macos-x86_64-app.zip` | NBTV.app |
+| macOS 11 o posterior | Chip de Apple | `NBeeTv-<versión>-macos-arm64.tar.gz` | Herramientas de línea de comandos |
+| macOS 11 o posterior | Intel | `NBeeTv-<versión>-macos-x86_64.tar.gz` | Herramientas de línea de comandos |
+| Linux | x86_64 | `NBeeTv-<versión>-linux-x86_64.tar.gz` | Herramientas de línea de comandos (enlazadas estáticamente, para cualquier distribución) |
+| Linux | arm64 | `NBeeTv-<versión>-linux-arm64.tar.gz` | Herramientas de línea de comandos (enlazadas estáticamente) |
+| Windows 10, 11 | x86_64 | `NBeeTv-<versión>-windows-x86_64.zip` | Herramientas de línea de comandos |
+| Windows 11 | arm64 | `NBeeTv-<versión>-windows-arm64.zip` | Herramientas de línea de comandos |
+
+Todos los paquetes incluyen los archivos de pesos de los cuatro modos y funcionan nada más descomprimirlos. Las compilaciones de versiones aún no publicadas se pueden descargar de los Artifacts de cada ejecución en [Actions](https://github.com/pepefrog1234/NBeeTv/actions/workflows/build.yml) (hay que iniciar sesión en GitHub; se conservan 7 días).
+
+### La app de macOS
+
+NBTV.app no está firmada con un certificado de desarrollador de Apple ni notarizada; solo tiene una firma ad-hoc. Por eso macOS la bloquea la primera vez que la abres después de descargarla.
+Cuando estés seguro de que el archivo viene de este repositorio, permítela de una de estas dos formas:
+
+- Ábrela una vez (se bloqueará) y luego ve a Ajustes del Sistema → Privacidad y seguridad, baja hasta el final y haz clic en «Abrir igualmente» (en algunas variantes del español del sistema: Configuración del Sistema y «Abrir de todos modos»); o
+- Ejecuta `xattr -dr com.apple.quarantine /Applications/NBTV.app` en Terminal (usa la ruta donde hayas puesto la app).
+
+Primer uso:
+
+1. Haz clic en el botón de ajustes de arriba a la derecha (o pulsa ⌘,). Escribe tu indicativo, elige los dispositivos de entrada y salida de audio y elige cómo se acciona el PTT:
+   sin control (se usa el VOX del equipo), RTS o DTR de un puerto serie, comandos CAT o un rigctld que ya esté en marcha. Los dos últimos necesitan tener [Hamlib](https://github.com/Hamlib/Hamlib) instalado aparte.
+2. macOS pide acceso al micrófono (la recepción lee del dispositivo de entrada de audio) y, si eliges la cámara como fuente de transmisión, acceso a la cámara.
+3. Al volver a la ventana principal ya está recibiendo. Elige la fuente de transmisión (cámara o archivo de video) y el modo de transmisión en la barra lateral y haz clic en «Transmitir».
+
+La app también puede transmitir a horas programadas, imprimir una línea de texto sobre la imagen (Lienzo) y guardar las imágenes recibidas como imagen o como video. La interfaz está en chino tradicional, chino simplificado, japonés, español e inglés, y sigue el idioma del sistema.
+La guía completa está en [apps/macos/README.md](apps/macos/README.md).
+
+### Herramientas de línea de comandos
+
+Linux y Windows solo tienen por ahora las herramientas de línea de comandos, sin recepción ni transmisión en directo. Para transmitir se reproduce en el equipo el archivo WAV generado; para recibir se graba el audio del equipo en un archivo WAV y se decodifica.
+
+Al descomprimir el paquete, los ejecutables y `models/` quedan en la misma carpeta y se pueden usar ahí mismo. Las imágenes son siempre archivos PPM binarios de 96×72, que se pueden generar con ffmpeg.
+
+```sh
+# Convertir una foto en un PPM de 96×72
+ffmpeg -i photo.jpg -vf scale=96:72 -pix_fmt rgb24 photo.ppm
+
+# Crear un WAV para reproducirlo directamente en el equipo (--mode va de 11 a 14, --call es tu indicativo)
+./nbtv-tx --mode 14 --call N0CALL --out tx.wav photo.ppm
+
+# Decodificar una grabación en imágenes: received/frame_0.ppm, frame_1.ppm, ... (--merge: combina las últimas tramas antes de decodificar)
+mkdir received
+./nbtv-rx --merge --out-dir received recording.wav
+
+# Probar sin equipo: pasar tx.wav por un canal de HF simulado y decodificarlo
+./nbtv-chan --channel poor --snr 10 tx.wav rx.wav
+./nbtv-rx --out-dir received rx.wav
+```
+
+- En Windows, usa `.\nbtv-tx.exe` en lugar de `./nbtv-tx`, y lo mismo con las demás herramientas.
+- En macOS, si las herramientas quedan bloqueadas, ejecuta antes `xattr -dr com.apple.quarantine <carpeta>` sobre la carpeta descomprimida.
+- Las grabaciones deben ser archivos WAV de 12000 o 48000 Hz, PCM de 16 bits o coma flotante de 32 bits. Si hay más de un canal, se usa el primero.
+
+| Herramienta | Para qué sirve |
+| --- | --- |
+| `nbtv-tx` | Imágenes → un WAV para reproducir en el equipo |
+| `nbtv-rx` | WAV → las imágenes recibidas; `--json` da una salida pensada para otros programas |
+| `nbtv-chan` | Pasa un WAV por un canal de HF simulado (desvanecimiento, ruido, desplazamiento de frecuencia, error del reloj de muestreo) |
+| `nbtv-sim` | Repite muchas veces transmisión → canal → recepción e informa de cuántas tramas llegan y con qué calidad |
+| `nbtv-learned` | Prueba solo el modelo que convierte una imagen en valores del canal y viceversa, sin el módem |
+
+Cada herramienta muestra todas sus opciones con `--help` (por ahora el texto de ayuda solo está en chino tradicional).
+
+## Tarjeta de recepción
+
+La estación del autor, **BX4ACP**, transmite esta señal. Graba el audio de tu equipo en un archivo WAV y súbelo a <https://nbeetv.yakumo.tw>.
+Si se decodifican más de 10 imágenes y también el indicativo, el sitio te emite una tarjeta de recepción con firma digital. No hace falta iniciar sesión, y la grabación puede durar hasta 5 minutos.
+
+El código de ese sitio también está en este repositorio ([apps/web/](apps/web/README.md)), así que puedes montar uno para tu propia estación.
+
+## Antes de conectar un equipo
+
+- Usa USB (o un modo de datos) en los dos extremos. Los filtros de transmisión y de recepción deben cubrir de 352 a 2648 Hz; si son más estrechos, recortan las portadoras de los bordes.
+- Los dos equipos deben estar a menos de ±150 Hz uno del otro.
+- Desactiva todo lo que altere la forma de onda: el compresor de voz y el ecualizador en transmisión, y la reducción de ruido (NR) y el notch automático en recepción.
+- OFDM tiene picos muy por encima de su nivel medio. Baja el nivel de salida hasta que el ALC deje de actuar; la potencia media quedará bastante por debajo de la potencia nominal del equipo, y eso es normal.
+- Antes de transmitir, comprueba que la normativa de tu país permite este tipo de emisión.
+
+## Compilar desde el código fuente
+
+Hace falta CMake 3.20 o posterior y un compilador de C++20 (sirven GCC, el clang de Xcode y el MSVC de Visual Studio). El núcleo no necesita ninguna otra biblioteca.
+
+```sh
+git clone https://github.com/pepefrog1234/NBeeTv.git
+cd NBeeTv
+cmake -S . -B build
+cmake --build build --config Release
+ctest --test-dir build -C Release --output-on-failure
+```
+
+Las herramientas quedan en `build/tools/` (`build/tools/Release/` con Visual Studio). Las pruebas usan los archivos de pesos de `models/` y tardan unos minutos.
+
+La app de macOS usa otro directorio de compilación y necesita Xcode y Ninja:
+
+```sh
+cmake -S . -B build-app -G Ninja -DNBTV_BUILD_MACOS_APP=ON -DNBTV_BUILD_TESTS=OFF -DNBTV_BUILD_TOOLS=OFF
+cmake --build build-app
+open build-app/apps/macos/NBTV.app
+```
+
+| Ruta | Contenido |
+| --- | --- |
+| `core/` | Biblioteca principal en C++20, independiente de la plataforma: transmisión y recepción OFDM, sincronización, estimación de canal e inferencia de la red neuronal. Su única interfaz pública es una API en C (`core/include/nbtv/nbtv.h`) |
+| `sim/` | Simulación del canal de HF |
+| `tools/` | Herramientas de línea de comandos; `tools/learned/` contiene el código de entrenamiento y exportación de los modelos (Python, PyTorch) |
+| `models/` | Archivos de pesos de los modelos |
+| `apps/macos/` | La app de macOS (SwiftUI) |
+| `apps/web/` | El sitio web de las tarjetas de recepción (Python, FastAPI) |
+
+## Limitaciones actuales
+
+- El texto y los subtítulos salen emborronados, y las zonas pequeñas de color vivo pierden intensidad.
+- Nada autentica una trama ni su indicativo: cualquiera puede enviar imágenes con cualquier indicativo.
+- Linux y Windows todavía no tienen interfaz gráfica ni pueden recibir o transmitir en directo.
+- El texto de ayuda de las herramientas de línea de comandos y los documentos detallados de abajo solo están en chino tradicional por ahora.
+
+## Documentación
+
+Estos documentos están en chino tradicional.
+
+- [Notas técnicas](docs/TECHNICAL.md): resultados de simulación, comportamiento del receptor, estructura de la trama y decisiones de diseño, y lo que falta por hacer
+- [La app de macOS](apps/macos/README.md)
+- [Modelos y entrenamiento](tools/learned/README.md)
+- [El sitio web de las tarjetas de recepción](apps/web/README.md)
+- [Borrador de especificación v0.1](短波%20NBTV%20軟體規格草案%20v0.1.md): escrito antes de pasar a la codificación con red neuronal; siguen siendo válidas las partes sobre los parámetros OFDM, el preámbulo y los pilotos
+
+## Licencia
+
+El código se publica bajo la [Licencia Pública General de GNU, versión 3 (GPL-3.0)](LICENSE).
+
+Los pesos de los modelos (`models/`) se entrenaron con fotos de [COCO](https://cocodataset.org/) val2017. Los derechos de autor de esas fotos pertenecen a sus fotógrafos, que las publicaron con distintas licencias Creative Commons, algunas de las cuales solo permiten el uso no comercial.
+Los pesos se ofrecen junto con el proyecto. Antes de usarlos para algo que no sean experimentos de radioafición, comprueba por tu cuenta que ese uso está permitido.
