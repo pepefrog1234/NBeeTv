@@ -2222,10 +2222,12 @@ enum SelfTest {
                 return nil
             }
             port = Int(UInt16(bigEndian: address.sin_port))
-            let listener = self.listener
+            // 執行緒只帶著這個數字，不抓住 self。名稱不能和屬性 listener 一樣：上面的閉包用的是屬性，
+            // 同一個範圍裡後面再宣告同名的區域變數，Xcode 26 的 Swift 會當成「宣告之前就用到」而編不過。
+            let listeningSocket = self.listener
             Thread.detachNewThread { [weak self] in
                 while true {
-                    let client = accept(listener, nil, nil)
+                    let client = accept(listeningSocket, nil, nil)
                     guard client >= 0, let self else { return }
                     self.lock.lock()
                     self.accepted += 1
