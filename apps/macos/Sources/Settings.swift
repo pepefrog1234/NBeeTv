@@ -80,9 +80,9 @@ final class AppSettings: ObservableObject {
     /// 底列與設定視窗顯示的 PTT 說明
     var pttSummary: String {
         switch pttMode {
-        case .none: return "不控制（VOX）"
-        case .serial: return "序列埠 \(serialLine.title)"
-        case .cat: return rigModel > 0 ? "CAT \(rigModelTitle)" : "CAT（還沒選電台型號）"
+        case .none: return L("不控制（VOX）")
+        case .serial: return L("序列埠 %@", serialLine.title)
+        case .cat: return rigModel > 0 ? "CAT \(rigModelTitle)" : L("CAT（還沒選電台型號）")
         case .rigctld: return "rigctld \(rigHost):\(rigPort)"
         }
     }
@@ -90,7 +90,7 @@ final class AppSettings: ObservableObject {
     /// 選的電台型號的名稱；還沒選的時候是空的
     var rigModelTitle: String {
         guard rigModel > 0 else { return "" }
-        return rigModelName.isEmpty ? "型號 \(rigModel)" : rigModelName
+        return rigModelName.isEmpty ? L("型號 %d", rigModel) : rigModelName
     }
 
     /// 畫布目前的內容；沒有打開（或沒有字）的時候是 nil

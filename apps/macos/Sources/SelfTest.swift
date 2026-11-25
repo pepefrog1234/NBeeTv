@@ -36,6 +36,7 @@ enum SelfTest {
     static func transmitTest(arguments: [String]) -> Int32 {
         NSApplication.shared.setActivationPolicy(.prohibited)
         setvbuf(stdout, nil, _IOLBF, 0)
+        L10n.use(L10n.source)
         let name = option("--device", in: arguments) ?? "BlackHole"
         guard let device = AudioDevices.outputs().first(where: { $0.name.contains(name) }) else {
             print("[transmit-test] 找不到輸出裝置「\(name)」")
@@ -81,6 +82,7 @@ enum SelfTest {
     static func receiveTest(arguments: [String]) -> Int32 {
         NSApplication.shared.setActivationPolicy(.prohibited)
         setvbuf(stdout, nil, _IOLBF, 0)
+        L10n.use(L10n.source)
         let name = option("--device", in: arguments) ?? "BlackHole"
         let seconds = option("--seconds", in: arguments).flatMap(Double.init) ?? 15
         guard let device = AudioDevices.inputs().first(where: { $0.name.contains(name) }) else {
@@ -130,6 +132,9 @@ enum SelfTest {
     static func run(arguments: [String]) -> Int32 {
         NSApplication.shared.setActivationPolicy(.prohibited)
         setvbuf(stdout, nil, _IOLBF, 0)
+        // 測試裡會比對 app 產生的文字，所以固定用原始碼的語言（繁體中文），不跟著這台電腦的系統語言變；
+        // 各語言的翻譯另外有一項專門檢查（testLocalization）
+        L10n.use(L10n.source)
         print("[selftest] 核心 \(NBTV.version)，模式 \(Modes.all.count) 個")
         guard let coffee = Demo.testImage("coffee"), let rocket = Demo.testImage("rocket") else {
             report("內附的測試圖", false)
@@ -176,6 +181,7 @@ enum SelfTest {
         run("canvas-onair") { testCanvasOnAir(rocket) }
         run("schedule") { testScheduleTimes() }
         run("schedule-transmit") { testScheduledTransmit(rocket) }
+        run("l10n") { testLocalization() }
         if only != nil {
             run("serial") { testSerialErrors() }
             run("hamlib") { testHamlib() }
@@ -1833,6 +1839,127 @@ enum SelfTest {
             }
         }
         report("序列埠 PTT（虛擬終端機 \(path)）", true, outcomes.joined(separator: "；") + "。真的控制線沒有測")
+    }
+
+    // MARK: 介面的語言
+
+    /// 一句話裡要填的值，依位置排好的型別（%1$@ 這種指定位置的照它指定的）：「@」「d」「f」。
+    private static func placeholders(_ text: String) -> [String] {
+        var found: [(position: Int, kind: String)] = []
+        let characters = Array(text)
+        var index = 0, next = 0
+        while index < characters.count {
+            guard characters[index] == "%" else {
+                index += 1
+                continue
+            }
+            var cursor = index + 1
+            if cursor < characters.count, characters[cursor] == "%" {   // %% 是一個百分比符號
+                index = cursor + 1
+                continue
+            }
+            var digits = ""
+            while cursor < characters.count, characters[cursor].isNumber {
+                digits.append(characters[cursor])
+                cursor += 1
+            }
+            var explicit: Int?
+            if cursor < characters.count, characters[cursor] == "$" {
+                explicit = Int(digits)
+                cursor += 1
+            }
+            while cursor < characters.count, "0123456789.-+ #l".contains(characters[cursor]) { cursor += 1 }
+            guard cursor < characters.count, "@dfs".contains(characters[cursor]) else {
+                index += 1
+                continue
+            }
+            next += 1
+            found.append((explicit ?? next, String(characters[cursor])))
+            index = cursor + 1
+        }
+        return found.sorted { $0.position < $1.position }.map(\.kind)
+    }
+
+    /// 介面的語言：系統的語言對到哪一份翻譯、四份翻譯齊不齊、要填的值對不對得上，以及查表本身。
+    /// （原始碼裡的每一句有沒有都翻到，是建置時由 Localization/check_strings.py 對著原始碼檢查的；這裡檢查的是 app 裡實際帶著的檔案。）
+    private static func testLocalization() {
+        let name = "介面的語言：偵測、翻譯表與查表"
+        defer { L10n.use(L10n.source) }
+        var problems: [String] = []
+
+        // 1. 系統的語言清單 → 用哪一種語言。清單裡排最前面、而且有翻譯的那一個；都沒有就是英文
+        let cases: [([String], String)] = [
+            (["zh-Hant-TW"], "zh-Hant"), (["zh-TW"], "zh-Hant"), (["zh-HK"], "zh-Hant"), (["zh-Hant-HK", "en-HK"], "zh-Hant"),
+            (["zh-Hans-CN"], "zh-Hans"), (["zh-CN"], "zh-Hans"), (["zh-SG"], "zh-Hans"), (["zh-Hans-TW", "zh-Hant-TW"], "zh-Hans"),
+            (["ja-JP"], "ja"), (["ja"], "ja"), (["es-ES"], "es"), (["es-MX"], "es"), (["es-419"], "es"), (["es-US", "en-US"], "es"),
+            (["en-US"], "en"), (["en-GB"], "en"), (["en-AU", "zh-Hant-TW"], "en"),
+            (["fr-FR"], "en"), (["ko-KR"], "en"), (["de-DE"], "en"), (["pt-BR"], "en"), (["ru-RU"], "en"), (["th-TH", "en-TH"], "en"),
+            (["fr-FR", "ja-JP"], "ja"), (["ko-KR", "zh-Hant-TW", "en-US"], "zh-Hant"), ([], "en"),
+        ]
+        for (preferences, expected) in cases {
+            let got = L10n.language(forPreferences: preferences)
+            if got != expected { problems.append("系統語言 \(preferences) 應該用 \(expected)，結果是 \(got)") }
+        }
+
+        // 2. 四份翻譯：每一份的句子都一樣多、同樣的那幾句，沒有空的，要填的值和原文對得上
+        var tables: [String: [String: String]] = [:]
+        for language in L10n.languages where language != L10n.source {
+            let table = L10n.loadTable(language)
+            tables[language] = table
+            if table.count < 250 { problems.append("\(language) 的翻譯表只有 \(table.count) 句（檔案不在 app 裡，或讀不懂）") }
+            for (key, value) in table {
+                let original = key.hasSuffix("#1") ? String(key.dropLast(2)) : key
+                if value.trimmingCharacters(in: .whitespaces).isEmpty, !original.trimmingCharacters(in: .whitespaces).isEmpty {
+                    problems.append("\(language)：「\(key.prefix(20))」的翻譯是空的")
+                }
+                if placeholders(value) != placeholders(original) {
+                    problems.append("\(language)：「\(key.prefix(24))」要填的值對不上（原文 \(placeholders(original))，翻譯 \(placeholders(value))）")
+                }
+            }
+        }
+        let plain = tables.mapValues { Set($0.keys.filter { !$0.hasSuffix("#1") }) }
+        if let reference = plain["en"] {
+            for (language, keys) in plain where keys != reference {
+                problems.append("\(language) 和英文的句子不一樣：多了 \(keys.subtracting(reference).count) 句、少了 \(reference.subtracting(keys).count) 句")
+            }
+            // 原文必須是繁體字；簡體中文的翻譯裡不能留著繁體字（挑幾個兩邊寫法不同的常用字來看）
+            let traditionalOnly = Set("設檔訊號畫發鏡會時這個裝輸連線網頻預選擇開關張圖顯還沒電錯誤麥風權隱與產儲無從聲隨"), simplifiedOnly = Set("设档讯号画发镜会时这个装输连线网频预选择开关张图显还没电错误麦风权隐与产储无从声随")
+            for key in reference where key.contains(where: { simplifiedOnly.contains($0) }) { problems.append("原文裡有簡體字：「\(key.prefix(20))」") }
+            for (key, value) in tables["zh-Hans"] ?? [:] where value.contains(where: { traditionalOnly.contains($0) }) {
+                problems.append("簡體中文的翻譯裡有繁體字：「\(key.prefix(16))」→「\(value.prefix(16))」")
+            }
+        }
+
+        // 3. 查表：每種語言各看幾句（含要填值的、調換順序的、單數的），不支援的語言用英文
+        let samples: [(String, [String])] = [   // 依序是 zh-Hant、zh-Hans、ja、es、en
+            (L10n.source, ["開始發射", "第 3 張", "1 張", "2 張", "無法控制 /dev/x 的 RTS：原因", "模式 11"]),
+            ("zh-Hans", ["开始发射", "第 3 张", "1 张", "2 张", "无法控制 /dev/x 的 RTS：原因", "模式 11"]),
+            ("ja", ["送信開始", "3 枚目", "1 枚", "2 枚", "/dev/x の RTS を制御できません：原因", "モード 11"]),
+            ("es", ["Transmitir", "Imagen 3", "1 imagen", "2 imágenes", "No se puede controlar la línea RTS de /dev/x: 原因", "Modo 11"]),
+            ("en", ["Start transmitting", "Frame 3", "1 frame", "2 frames", "Cannot control RTS on /dev/x: 原因", "Mode 11"]),
+            ("fr", ["Start transmitting", "Frame 3", "1 frame", "2 frames", "Cannot control RTS on /dev/x: 原因", "Mode 11"]),
+        ]
+        for (language, expected) in samples {
+            L10n.use(language)
+            let got = [L("開始發射"), L("第 %d 張", 3), L("%d 張", 1), L("%d 張", 2), L("無法控制 %@ 的 %@：%@", "/dev/x", "RTS", "原因"), L("模式 %d", 11)]
+            if got != expected { problems.append("\(language)：查出來的是 \(got)") }
+            if language != "fr", L10n.language != language { problems.append("改用 \(language) 之後目前的語言是 \(L10n.language)") }
+            // 每個語言都有 app 的名稱與兩句權限的說明
+            let info = Bundle.main.url(forResource: "InfoPlist", withExtension: "strings", subdirectory: nil, localization: L10n.language)
+                .flatMap { NSDictionary(contentsOf: $0) as? [String: String] } ?? [:]
+            if (L10n.appName ?? "").isEmpty || (info["NSCameraUsageDescription"] ?? "").isEmpty || (info["NSMicrophoneUsageDescription"] ?? "").isEmpty {
+                problems.append("\(L10n.language) 的 InfoPlist.strings 少了名稱或權限的說明")
+            }
+        }
+        // 沒有翻譯的句子原樣顯示（不會變成空的或當掉）
+        L10n.use("en")
+        let untranslated = "這一句" + "沒有翻譯 %d"   // 拆開來寫：建置時的檢查會把 L 後面直接寫的句子都當成要翻譯的
+        if L(untranslated, 5) != "這一句沒有翻譯 5" { problems.append("沒有翻譯的句子沒有原樣顯示") }
+
+        let counts = L10n.languages.filter { $0 != L10n.source }.map { "\($0) \(tables[$0]?.count ?? 0) 句" }.joined(separator: "、")
+        report(name, problems.isEmpty, problems.isEmpty
+               ? "系統語言 \(cases.count) 種情形都對到該用的語言；翻譯表 \(counts)，句子相同、要填的值都對得上；這台電腦目前會用 \(L10n.systemLanguage())"
+               : problems.prefix(8).joined(separator: "；") + (problems.count > 8 ? "…（共 \(problems.count) 個問題）" : ""))
     }
 
     // MARK: 用 CAT 指令的 PTT（Hamlib）

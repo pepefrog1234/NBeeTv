@@ -9,29 +9,29 @@ struct SidePanel: View {
     var body: some View {
         let settings = model.settings
         VStack(alignment: .leading, spacing: 12) {
-            SectionTitle("發射來源")
-            SegmentedControl(options: [(SourceKind.camera, "鏡頭"), (SourceKind.video, "影片檔")],
+            SectionTitle(L("發射來源"))
+            SegmentedControl(options: [(SourceKind.camera, L("鏡頭")), (SourceKind.video, L("影片檔"))],
                              selection: Binding(get: { settings.sourceKind }, set: { model.setSourceKind($0) }))
             if settings.sourceKind == .camera { cameraPicker } else { videoPicker }
             // 欄位不夠高時（視窗縮到最小、下面的說明又折成兩行）縮的是預覽，其他的控制元件都留著
             preview.layoutPriority(1)
             HStack(spacing: 12) {
                 if settings.sourceKind == .video, model.videoName != nil {
-                    CheckBox(isOn: Binding(get: { settings.loopVideo }, set: { settings.loopVideo = $0 }), title: "循環播放")
-                        .help("沒有勾：按下發射才開始播放，播完自動停止發射。勾了：影片循環播放，要自己按停止。兩種都是每送一張取當下那一格")
+                    CheckBox(isOn: Binding(get: { settings.loopVideo }, set: { settings.loopVideo = $0 }), title: L("循環播放"))
+                        .help(L("沒有勾：按下發射才開始播放，播完自動停止發射。勾了：影片循環播放，要自己按停止。兩種都是每送一張取當下那一格"))
                 } else {
-                    Text("縮放方式").font(Theme.ui(12)).foregroundColor(Theme.secondary)
+                    Text(L("縮放方式")).font(Theme.ui(12)).foregroundColor(Theme.secondary)
                 }
                 Spacer(minLength: 0)
-                SegmentedControl(options: [(ScaleMode.fill, "填滿"), (ScaleMode.fit, "完整")],
+                SegmentedControl(options: [(ScaleMode.fill, L("填滿")), (ScaleMode.fit, L("完整"))],
                                  selection: Binding(get: { settings.scaleMode }, set: { settings.scaleMode = $0 }),
                                  horizontalPadding: 14, fillWidth: false)
-                    .accessibilityLabel("縮放方式")
-                    .help("縮放方式。填滿：把畫面放大到蓋滿，裁掉多出來的邊。完整：整個畫面都留著，上下或左右補黑邊")
+                    .accessibilityLabel(L("縮放方式"))
+                    .help(L("縮放方式。填滿：把畫面放大到蓋滿，裁掉多出來的邊。完整：整個畫面都留著，上下或左右補黑邊"))
             }
             canvasRow
             Rectangle().fill(Theme.separator).frame(height: 1)
-            SectionTitle("發射模式")
+            SectionTitle(L("發射模式"))
             modeButton
             Text(modeNote)
                 .font(Theme.ui(12))
@@ -47,6 +47,7 @@ struct SidePanel: View {
                 .foregroundColor(Theme.secondary)
                 .multilineTextAlignment(.center)
                 .lineSpacing(3)
+                .fixedSize(horizontal: false, vertical: true)   // 別的語言這一句比較長：折成兩行，不要截掉
                 .frame(maxWidth: .infinity)
                 .lineHeight()
         }
@@ -62,19 +63,19 @@ struct SidePanel: View {
             model.refreshDevices()
             showPopupMenu(model.cameras.map { camera in
                 PopupItem(title: camera.name, selected: camera.name == model.cameraName) { model.selectCamera(camera.id) }
-            }, emptyTitle: "（沒有鏡頭）")
+            }, emptyTitle: L("（沒有鏡頭）"))
         } label: {
             PopupButtonLabel(title: model.cameraName, icon: .camera)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("選擇鏡頭：\(model.cameraName)")
+        .accessibilityLabel(L("選擇鏡頭：%@", model.cameraName))
     }
 
     private var videoPicker: some View {
         HStack(spacing: 8) {
             HStack(spacing: 8) {
                 Icon(kind: .videoFile, lineWidth: 1.4)
-                Text(model.videoName ?? "尚未選擇影片檔")
+                Text(model.videoName ?? L("尚未選擇影片檔"))
                     .foregroundColor(model.videoName == nil ? Theme.tertiary : Theme.text)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -84,7 +85,7 @@ struct SidePanel: View {
             .frame(height: 28)
             .background(RoundedRectangle(cornerRadius: 6).fill(Theme.disabledFill))
             .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Theme.separator, lineWidth: 1))
-            Button("選擇…") { model.chooseVideoFile() }
+            Button(L("選擇…")) { model.chooseVideoFile() }
                 .buttonStyle(SmallButtonStyle())
         }
     }
@@ -95,9 +96,9 @@ struct SidePanel: View {
                 Color.black
                 if let image = model.sourcePreview {
                     PixelImage(image: image)
-                        .accessibilityLabel(model.settings.sourceKind == .camera ? "鏡頭畫面縮成 96×72 後的預覽" : "影片目前這一格縮成 96×72 後的預覽")
+                        .accessibilityLabel(model.settings.sourceKind == .camera ? L("鏡頭畫面縮成 96×72 後的預覽") : L("影片目前這一格縮成 96×72 後的預覽"))
                 } else {
-                    Text(model.sourceMessage ?? "等待來源畫面")
+                    Text(model.sourceMessage ?? L("等待來源畫面"))
                         .font(Theme.ui(12))
                         .foregroundColor(Theme.tertiary)
                         .multilineTextAlignment(.center)
@@ -125,9 +126,9 @@ struct SidePanel: View {
     private var canvasRow: some View {
         let settings = model.settings
         return HStack(spacing: 8) {
-            CheckBox(isOn: Binding(get: { settings.canvasEnabled }, set: { model.setCanvasEnabled($0) }), title: "畫布")
-                .help("在送出去的每一張畫面上印字，例如「CQ \(settings.callsign.isEmpty ? "呼號" : settings.callsign)」。上面的預覽就是送出去的樣子")
-            TextField("要印的字", text: Binding(get: { settings.canvasText },
+            CheckBox(isOn: Binding(get: { settings.canvasEnabled }, set: { model.setCanvasEnabled($0) }), title: L("畫布"))
+                .help(L("在送出去的每一張畫面上印字，例如「CQ %@」。上面的預覽就是送出去的樣子", settings.callsign.isEmpty ? L("呼號") : settings.callsign))
+            TextField(L("要印的字"), text: Binding(get: { settings.canvasText },
                                               set: { settings.canvasText = String($0.prefix(CanvasLayer.maximumCharacters)) }))
                 .textFieldStyle(.plain)
                 .font(Theme.ui(13))
@@ -139,17 +140,17 @@ struct SidePanel: View {
                 .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(canvasFocused ? Theme.rx : Theme.buttonRing, lineWidth: 1))
                 .focused($canvasFocused)
                 .onSubmit { canvasFocused = false }   // 按 Return 就離開輸入框，之後按到的鍵不會再改到這些字
-                .accessibilityLabel("畫布要印的字")
-            SegmentedControl(options: [(CanvasPosition.top, "上"), (CanvasPosition.bottom, "下")],
+                .accessibilityLabel(L("畫布要印的字"))
+            SegmentedControl(options: [(CanvasPosition.top, L("上")), (CanvasPosition.bottom, L("下"))],
                              selection: Binding(get: { settings.canvasPosition }, set: { settings.canvasPosition = $0 }),
                              horizontalPadding: 9, fillWidth: false)
-                .accessibilityLabel("字印在畫面的上緣或下緣")
+                .accessibilityLabel(L("字印在畫面的上緣或下緣"))
         }
     }
 
     private var sourceCaption: String {
-        guard let size = model.sourceSize, model.sourcePreview != nil else { return "來源 — → 送出 96×72" }
-        return "來源 \(Int(size.width))×\(Int(size.height)) → 送出 96×72"
+        guard let size = model.sourceSize, model.sourcePreview != nil else { return L("來源 — → 送出 96×72") }
+        return L("來源 %d×%d → 送出 96×72", Int(size.width), Int(size.height))
     }
 
     private var videoControls: some View {
@@ -164,12 +165,12 @@ struct SidePanel: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(model.videoPlaying ? "暫停" : "播放")
+            .accessibilityLabel(model.videoPlaying ? L("暫停") : L("播放"))
 
             PlainSlider(value: Binding(get: { model.videoPosition }, set: { model.scrubVideo(to: $0, editing: true) }),
                         range: 0...max(model.videoDuration, 0.1),
                         onEditingChanged: { editing in if !editing { model.scrubVideo(to: model.videoPosition, editing: false) } })
-                .accessibilityLabel("播放位置")
+                .accessibilityLabel(L("播放位置"))
 
             Text("\(AppModel.clock(model.videoPosition)) / \(AppModel.clock(model.videoDuration))")
                 .font(Theme.mono(12))
@@ -188,7 +189,7 @@ struct SidePanel: View {
                 PopupButtonLabel(title: label)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("選擇發射模式：\(label)")
+            .accessibilityLabel(L("選擇發射模式：%@", label))
             .popover(isPresented: Binding(get: { model.showModeMenu }, set: { model.showModeMenu = $0 }), arrowEdge: .leading) {
                 ModeMenuView(selectedID: model.settings.txModeID, standalone: false) { id in
                     model.settings.txModeID = id
@@ -197,12 +198,12 @@ struct SidePanel: View {
             }
         } else {
             PopupButtonLabel(title: label, locked: true)
-                .accessibilityLabel("發射模式：\(label)，發射中不能更換")
+                .accessibilityLabel(L("發射模式：%@，發射中不能更換", label))
         }
     }
 
     private var modeNote: String {
-        if model.txPhase != .idle { return "發射中不能更換模式；來源可以隨時切換，下一張生效" }
+        if model.txPhase != .idle { return L("發射中不能更換模式；來源可以隨時切換，下一張生效") }
         return Modes.find(model.settings.txModeID)?.summary ?? ""
     }
 
@@ -210,15 +211,15 @@ struct SidePanel: View {
     private var volumeRow: some View {
         let settings = model.settings
         return HStack(spacing: 8) {
-            Text("輸出音量").font(Theme.ui(12)).foregroundColor(Theme.secondary)
+            Text(L("輸出音量")).font(Theme.ui(12)).foregroundColor(Theme.secondary)
             PlainSlider(value: Binding(get: { settings.outputLevelDb }, set: { settings.outputLevelDb = $0 }), range: -40...0, step: 1,
                         tint: Theme.tx)
-                .accessibilityLabel("輸出音量")
+                .accessibilityLabel(L("輸出音量"))
                 .accessibilityValue(AppModel.dbText(settings.outputLevelDb))
             Text(AppModel.dbText(settings.outputLevelDb)).font(Theme.mono(12)).fixedSize().frame(width: 44, alignment: .trailing)
         }
         .frame(height: 20)
-        .help("送去電台的聲音大小。發射中看著電台的 ALC 調：ALC 剛好不動或只動一點點")
+        .help(L("送去電台的聲音大小。發射中看著電台的 ALC 調：ALC 剛好不動或只動一點點"))
     }
 
     private var ready: Bool { model.canTransmit && !model.settings.callsign.isEmpty }
@@ -228,7 +229,7 @@ struct SidePanel: View {
             Button {
                 model.toggleTransmit()
             } label: {
-                Text("開始發射")
+                Text(L("開始發射"))
                     .font(Theme.ui(15, .bold))
                     .foregroundColor(Theme.txInk)
                     .frame(maxWidth: .infinity)
@@ -243,7 +244,7 @@ struct SidePanel: View {
             Button {
                 model.toggleTransmit()
             } label: {
-                Text(model.txPhase == .stopping ? "這張送完就停止…" : "停止發射")
+                Text(model.txPhase == .stopping ? L("這張送完就停止…") : L("停止發射"))
                     .font(Theme.ui(15, .bold))
                     .foregroundColor(Theme.tx)
                     .frame(maxWidth: .infinity)
@@ -257,12 +258,12 @@ struct SidePanel: View {
     }
 
     private var buttonNote: String {
-        if model.txPhase != .idle, model.scheduledRun { return "定時發射：影片播完會自動停止，也可以隨時按停止" }
-        if model.txPhase == .transmitting, model.videoPlaysOnce { return "影片播完會自動停止，也可以隨時按停止" }
-        if model.txPhase != .idle { return "送完目前這張後放開 PTT，自動回到接收" }
-        if model.settings.callsign.isEmpty { return "還沒設定呼號，請先到設定裡填寫" }
-        if model.live, !model.canTransmit { return "等來源有畫面後才能發射" }
-        if model.videoPlaysOnce { return "以 \(model.settings.callsign) 發射，影片播完自動停止" }
-        return "以 \(model.settings.callsign) 發射，停止後自動回到接收"
+        if model.txPhase != .idle, model.scheduledRun { return L("定時發射：影片播完會自動停止，也可以隨時按停止") }
+        if model.txPhase == .transmitting, model.videoPlaysOnce { return L("影片播完會自動停止，也可以隨時按停止") }
+        if model.txPhase != .idle { return L("送完目前這張後放開 PTT，自動回到接收") }
+        if model.settings.callsign.isEmpty { return L("還沒設定呼號，請先到設定裡填寫") }
+        if model.live, !model.canTransmit { return L("等來源有畫面後才能發射") }
+        if model.videoPlaysOnce { return L("以 %@ 發射，影片播完自動停止", model.settings.callsign) }
+        return L("以 %@ 發射，停止後自動回到接收", model.settings.callsign)
     }
 }

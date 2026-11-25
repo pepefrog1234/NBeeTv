@@ -1,0 +1,5 @@
+// 系統顯示的文字：app 的名稱，以及詢問相機、麥克風權限時說明用途的那一句。
+
+"CFBundleDisplayName" = "NBTV en HF";
+"NSCameraUsageDescription" = "La imagen de la cámara se usa como fuente de transmisión: en cada envío se toma la imagen de ese instante, reducida a 96×72.";
+"NSMicrophoneUsageDescription" = "Para recibir hay que leer el dispositivo de entrada de audio (el sonido que llega del equipo) y decodificar las imágenes.";

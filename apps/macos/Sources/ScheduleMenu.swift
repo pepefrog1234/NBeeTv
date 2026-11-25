@@ -25,7 +25,7 @@ struct ScheduleButton: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(active ? model.scheduleSummary : "定時發射：關閉")
+        .accessibilityLabel(active ? model.scheduleSummary : L("定時發射：關閉"))
         .popover(isPresented: Binding(get: { model.showScheduleMenu }, set: { model.showScheduleMenu = $0 }), arrowEdge: .bottom) {
             ScheduleMenuView(standalone: false).environmentObject(model)
         }
@@ -41,29 +41,30 @@ struct ScheduleMenuView: View {
         let settings = model.settings
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 0) {
-                Text("定時發射").font(Theme.ui(13, .semibold)).frame(height: 18)
-                Text("到了時間自動把影片檔從頭發射一次，播完就停止")
-                    .font(Theme.ui(12)).foregroundColor(Theme.secondary).frame(height: 18)
+                Text(L("定時發射")).font(Theme.ui(13, .semibold)).frame(height: 18)
+                Text(L("到了時間自動把影片檔從頭發射一次，播完就停止"))
+                    .font(Theme.ui(12)).foregroundColor(Theme.secondary).lineSpacing(3)
+                    .fixedSize(horizontal: false, vertical: true).frame(minHeight: 18)
             }
 
-            CheckBox(isOn: Binding(get: { model.scheduleArmed }, set: { model.setScheduleArmed($0) }), title: "開啟定時發射")
+            CheckBox(isOn: Binding(get: { model.scheduleArmed }, set: { model.setScheduleArmed($0) }), title: L("開啟定時發射"))
                 .frame(height: 18)
 
             VStack(alignment: .leading, spacing: 6) {
-                label("每隔幾分鐘")
+                label(L("每隔幾分鐘"))
                 SegmentedControl(options: TransmitSchedule.intervals.map { (value: $0, title: "\($0)") },
                                  selection: Binding(get: { settings.scheduleIntervalMinutes }, set: { settings.scheduleIntervalMinutes = $0 }))
-                    .accessibilityLabel("每隔幾分鐘")
-                Text("每小時的 \(TransmitSchedule.minutesText(settings.scheduleIntervalMinutes)) 分整")
+                    .accessibilityLabel(L("每隔幾分鐘"))
+                Text(L("每小時的 %@ 分整", TransmitSchedule.minutesText(settings.scheduleIntervalMinutes)))
                     .font(Theme.ui(12)).foregroundColor(Theme.secondary).frame(height: 18)
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                label("要播的影片")
+                label(L("要播的影片"))
                 HStack(spacing: 8) {
                     HStack(spacing: 8) {
                         Icon(kind: .videoFile, lineWidth: 1.4)
-                        Text(model.videoName ?? "尚未選擇影片檔")
+                        Text(model.videoName ?? L("尚未選擇影片檔"))
                             .foregroundColor(model.videoName == nil ? Theme.tertiary : Theme.text)
                             .lineLimit(1)
                             .truncationMode(.middle)
@@ -76,7 +77,7 @@ struct ScheduleMenuView: View {
                     .frame(height: 28)
                     .background(RoundedRectangle(cornerRadius: 6).fill(Theme.disabledFill))
                     .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Theme.separator, lineWidth: 1))
-                    Button("選擇…") {
+                    Button(L("選擇…")) {
                         model.showScheduleMenu = false   // 開檔的對話框一出來，這個面板本來就會收起來
                         model.chooseVideoFile()
                     }
@@ -85,7 +86,7 @@ struct ScheduleMenuView: View {
             }
 
             CheckBox(isOn: Binding(get: { settings.scheduleSkipWhenBusy }, set: { settings.scheduleSkipWhenBusy = $0 }),
-                     title: "正在收別人的畫面時，那一次不發射")
+                     title: L("正在收別人的畫面時，那一次不發射"))
                 .frame(height: 18)
 
             Rectangle().fill(Theme.separator).frame(height: 1)
@@ -98,8 +99,8 @@ struct ScheduleMenuView: View {
             }
             .font(Theme.ui(12))
 
-            Text("用當時選的發射模式；來源是鏡頭的話，播完會換回鏡頭。正在發射時到了時間，那一次就跳過。"
-                 + "開著的時候電腦不會因為閒置而睡眠；重新開啟 app 之後要再打開一次。")
+            Text(L("用當時選的發射模式；來源是鏡頭的話，播完會換回鏡頭。正在發射時到了時間，那一次就跳過。")
+                 + L("開著的時候電腦不會因為閒置而睡眠；重新開啟 app 之後要再打開一次。"))
                 .font(Theme.ui(12))
                 .foregroundColor(Theme.tertiary)
                 .lineSpacing(3)
@@ -123,18 +124,18 @@ struct ScheduleMenuView: View {
     private var statusLines: [(text: String, warning: Bool)] {
         var lines: [(text: String, warning: Bool)] = []
         if let problem = model.scheduleProblem {
-            lines.append(("\(problem)，到了時間不會發射", true))
+            lines.append((L("%@，到了時間不會發射", problem), true))
         }
         if model.scheduledRun {
-            lines.append(("正在發射這一次的影片", false))
+            lines.append((L("正在發射這一次的影片"), false))
         }
         if let next = model.scheduleNextFire {
-            lines.append(("下一次 \(TransmitSchedule.clockText(next))", false))
+            lines.append((L("下一次 %@", TransmitSchedule.clockText(next)), false))
         } else {
-            lines.append(("目前關著，不會自己發射", false))
+            lines.append((L("目前關著，不會自己發射"), false))
         }
         if let last = model.scheduleLastEvent {
-            lines.append(("上一次：\(last)", false))
+            lines.append((L("上一次：%@", last), false))
         }
         return lines
     }

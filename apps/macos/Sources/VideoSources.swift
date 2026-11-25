@@ -132,15 +132,15 @@ final class CameraSource: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
                 guard self.currentID == id else { return }
                 if self.session.isRunning { self.session.stopRunning() }
                 self.currentID = nil
-                self.onInterrupted?("鏡頭「\(name)」中斷連線了")
+                self.onInterrupted?(L("鏡頭「%@」中斷連線了", name))
             }
         })
         observers.append(center.addObserver(forName: AVCaptureSession.runtimeErrorNotification, object: session, queue: nil) { [weak self] note in
-            let reason = (note.userInfo?[AVCaptureSessionErrorKey] as? NSError)?.localizedDescription ?? "不明的錯誤"
+            let reason = (note.userInfo?[AVCaptureSessionErrorKey] as? NSError)?.localizedDescription ?? L("不明的錯誤")
             self?.sessionQueue.async {
                 guard let self, self.currentID != nil else { return }
                 self.currentID = nil
-                self.onInterrupted?("鏡頭擷取中斷：\(reason)")
+                self.onInterrupted?(L("鏡頭擷取中斷：%@", reason))
             }
         })
     }
@@ -160,7 +160,7 @@ final class CameraSource: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         sessionQueue.async { [self] in
             let device = AVCaptureDevice(uniqueID: deviceID) ?? AVCaptureDevice.default(for: .video)
             guard let device else {
-                completion("找不到鏡頭")
+                completion(L("找不到鏡頭"))
                 return
             }
             if session.isRunning && currentID == device.uniqueID {
@@ -174,12 +174,12 @@ final class CameraSource: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             session.sessionPreset = .high
             do {
                 let input = try AVCaptureDeviceInput(device: device)
-                guard session.canAddInput(input) else { throw AudioIOError(message: "無法使用這個鏡頭") }
+                guard session.canAddInput(input) else { throw AudioIOError(message: L("無法使用這個鏡頭")) }
                 session.addInput(input)
             } catch {
                 session.commitConfiguration()
                 currentID = nil
-                completion("無法開啟鏡頭：\(error.localizedDescription)")
+                completion(L("無法開啟鏡頭：%@", error.localizedDescription))
                 return
             }
             if session.canSetSessionPreset(.hd1280x720) { session.sessionPreset = .hd1280x720 }

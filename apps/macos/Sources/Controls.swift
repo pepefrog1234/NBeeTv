@@ -67,7 +67,7 @@ private final class ClosureMenuItem: NSMenuItem {
 var popupMenuInterceptor: (([PopupItem]) -> Void)?
 
 /// 在滑鼠位置跳出系統選單。
-func showPopupMenu(_ items: [PopupItem], emptyTitle: String = "（沒有可選的項目）") {
+func showPopupMenu(_ items: [PopupItem], emptyTitle: String = L("（沒有可選的項目）")) {
     if let interceptor = popupMenuInterceptor {
         interceptor(items.flatMap(\.leaves))
         return
@@ -76,7 +76,7 @@ func showPopupMenu(_ items: [PopupItem], emptyTitle: String = "（沒有可選�
 }
 
 /// 把項目做成系統選單（有 children 的項目是子選單）。沒有項目時放一列不能選的 emptyTitle。
-func makePopupMenu(_ items: [PopupItem], emptyTitle: String = "（沒有可選的項目）") -> NSMenu {
+func makePopupMenu(_ items: [PopupItem], emptyTitle: String = L("（沒有可選的項目）")) -> NSMenu {
     let menu = NSMenu()
     menu.autoenablesItems = false
     for item in items {

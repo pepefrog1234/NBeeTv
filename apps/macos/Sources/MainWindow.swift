@@ -52,8 +52,8 @@ struct HeaderBar: View {
             StatusPill()
 
             HStack(spacing: 10) {
-                Text("我的呼號").font(Theme.ui(12)).foregroundColor(Theme.secondary)
-                Text(model.settings.callsign.isEmpty ? "未設定" : model.settings.callsign)
+                Text(L("我的呼號")).font(Theme.ui(12)).foregroundColor(Theme.secondary)
+                Text(model.settings.callsign.isEmpty ? L("未設定") : model.settings.callsign)
                     .font(Theme.mono(13, .semibold))
                     .foregroundColor(model.settings.callsign.isEmpty ? Theme.tertiary : Theme.text)
                 ScheduleButton().padding(.leading, 6)
@@ -66,7 +66,7 @@ struct HeaderBar: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("設定")
+                .accessibilityLabel(L("設定"))
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
         }
@@ -84,7 +84,7 @@ struct StatusPill: View {
         if model.txPhase != .idle {
             HStack(spacing: 8) {
                 Circle().fill(Theme.txInk).frame(width: 8, height: 8)
-                Text(model.txPhase == .starting ? "準備發射" : "發射中").font(Theme.ui(13, .bold))
+                Text(model.txPhase == .starting ? L("準備發射") : L("發射中")).font(Theme.ui(13, .bold))
                 if model.isOnAir { Text(AppModel.clock(model.txElapsed)).font(Theme.mono(13, .semibold)) }
             }
             .foregroundColor(Theme.txInk)
@@ -94,7 +94,7 @@ struct StatusPill: View {
         } else {
             HStack(spacing: 8) {
                 Circle().fill(Theme.rx).frame(width: 8, height: 8)
-                Text("接收中").font(Theme.ui(13, .semibold)).foregroundColor(Theme.rx)
+                Text(L("接收中")).font(Theme.ui(13, .semibold)).foregroundColor(Theme.rx)
                 Text(detail).foregroundColor(Theme.secondary)
             }
             .padding(.horizontal, 14)
@@ -106,8 +106,8 @@ struct StatusPill: View {
     }
 
     private var detail: String {
-        guard model.synced else { return "等待訊號" }
-        return model.syncCallsign.isEmpty ? "已同步" : "已同步 \(model.syncCallsign)"
+        guard model.synced else { return L("等待訊號") }
+        return model.syncCallsign.isEmpty ? L("已同步") : L("已同步 %@", model.syncCallsign)
     }
 }
 
@@ -116,8 +116,8 @@ struct FooterBar: View {
 
     var body: some View {
         HStack(spacing: 24) {
-            item("音訊輸入", model.inputDeviceName)
-            item("音訊輸出", model.outputDeviceName)
+            item(L("音訊輸入"), model.inputDeviceName)
+            item(L("音訊輸出"), model.outputDeviceName)
             item("PTT", model.settings.pttSummary)
             Spacer(minLength: 12)
             if let notice = model.notice {
@@ -127,7 +127,7 @@ struct FooterBar: View {
                     Text(notice).foregroundColor(Theme.tx).lineLimit(1).truncationMode(.tail)
                 }
                 .buttonStyle(.plain)
-                .help("按一下關閉這則訊息")
+                .help(L("按一下關閉這則訊息"))
             }
         }
         .font(Theme.ui(12))

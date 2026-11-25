@@ -10,6 +10,9 @@ enum SnapshotRunner {
     static func run(outputDirectory: String) -> Int32 {
         let app = NSApplication.shared
         app.setActivationPolicy(.prohibited)
+        // 示範圖固定用繁體中文算（不跟著開發機的系統語言變）；NBTV_LANGUAGE=<語言> 改算別的語言的版面
+        // （zh-Hans、ja、es、en；要連系統的字型挑選也一樣，另外加上參數 -AppleLanguages "(ja)"）
+        L10n.use(ProcessInfo.processInfo.environment["NBTV_LANGUAGE"] ?? L10n.source)
         let directory = URL(fileURLWithPath: outputDirectory, isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
@@ -79,19 +82,19 @@ enum SnapshotRunner {
                to: directory.appendingPathComponent("4-settings.png"))
 
         // 5. 發射模式選單：欄位標題、一組說明，每個模式一列 30 點，外加四周的留白
-        let menuHeight: CGFloat = 112 + 30 * CGFloat(Modes.menuOrder.count)
-        let menu = ModeMenuView(selectedID: Modes.defaultID, standalone: true) { _ in }
-            .padding(16)
+        // 別的語言的說明折成比較多行時，照內容實際的高度
+        let menuContent = ModeMenuView(selectedID: Modes.defaultID, standalone: true) { _ in }.padding(16).frame(width: 400)
+        let menuHeight = max(112 + 30 * CGFloat(Modes.menuOrder.count), ceil(NSHostingView(rootView: menuContent).fittingSize.height))
+        let menu = menuContent
             .frame(width: 400, height: menuHeight, alignment: .top)
             .background(Theme.background)
         render(menu, width: 400, height: menuHeight, to: directory.appendingPathComponent("5-mode-menu.png"))
 
         // 6. 定時發射的面板（開著、已經選好影片的樣子）
         idle.setScheduleArmed(true)
-        let scheduleHeight: CGFloat = 430
-        let schedule = ScheduleMenuView(standalone: true)
-            .environmentObject(idle)
-            .padding(16)
+        let scheduleContent = ScheduleMenuView(standalone: true).environmentObject(idle).padding(16).frame(width: 372)
+        let scheduleHeight = max(430, ceil(NSHostingView(rootView: scheduleContent).fittingSize.height))
+        let schedule = scheduleContent
             .frame(width: 372, height: scheduleHeight, alignment: .top)
             .background(Theme.background)
         render(schedule, width: 372, height: scheduleHeight, to: directory.appendingPathComponent("6-schedule.png"))
@@ -307,7 +310,8 @@ enum SnapshotRunner {
     /// scrollBy：算圖之前，把畫面裡第一個可以捲動的區域（主視窗裡只有「最近收到」）往下捲這麼多點。
     private static func render<V: View>(_ view: V, width: CGFloat, height: CGFloat, to url: URL, scrollBy: Double? = nil) {
         let size = CGSize(width: width, height: height)
-        let host = NSHostingView(rootView: view.frame(width: width, height: height))
+        // 文字的語言也交代給 SwiftUI：漢字要用哪一種字形（日文、簡體、繁體的寫法不同）是照這個挑的
+        let host = NSHostingView(rootView: view.frame(width: width, height: height).environment(\.locale, Locale(identifier: L10n.language)))
         host.frame = CGRect(origin: .zero, size: size)
         let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.appearance = NSAppearance(named: .darkAqua)

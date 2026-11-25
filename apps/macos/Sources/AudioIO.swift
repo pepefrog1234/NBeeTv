@@ -10,8 +10,9 @@ struct AudioIOError: LocalizedError {
     var errorDescription: String? { message }
 }
 
-private func check(_ status: OSStatus, _ what: String) throws {
-    if status != noErr { throw AudioIOError(message: "\(what)失敗（錯誤碼 \(status)）") }
+/// failure：失敗時的訊息，一整句、裡面有一個 %d 給錯誤碼（已經照目前的語言翻好的）。
+private func check(_ status: OSStatus, _ failure: String) throws {
+    if status != noErr { throw AudioIOError(message: String(format: failure, Int(status))) }
 }
 
 /// 即時音訊執行緒與一般執行緒之間的環狀緩衝。臨界區很短，用 os_unfair_lock 保護。
@@ -107,10 +108,10 @@ final class FloatRing {
 private func makeHALUnit() throws -> AudioUnit {
     var desc = AudioComponentDescription(componentType: kAudioUnitType_Output, componentSubType: kAudioUnitSubType_HALOutput,
                                          componentManufacturer: kAudioUnitManufacturer_Apple, componentFlags: 0, componentFlagsMask: 0)
-    guard let component = AudioComponentFindNext(nil, &desc) else { throw AudioIOError(message: "找不到音訊輸出單元") }
+    guard let component = AudioComponentFindNext(nil, &desc) else { throw AudioIOError(message: L("找不到音訊輸出單元")) }
     var unit: AudioUnit?
-    try check(AudioComponentInstanceNew(component, &unit), "建立音訊單元")
-    guard let unit else { throw AudioIOError(message: "建立音訊單元失敗") }
+    try check(AudioComponentInstanceNew(component, &unit), L("建立音訊單元失敗（錯誤碼 %d）"))
+    guard let unit else { throw AudioIOError(message: L("建立音訊單元失敗")) }
     return unit
 }
 
@@ -203,28 +204,28 @@ final class AudioInput {
         let unit = try makeHALUnit()
         do {
             // AUHAL 預設只開輸出；改成只開輸入（第 1 匯流排）
-            try setProperty(unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1, UInt32(1), "啟用輸入")
-            try setProperty(unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0, UInt32(0), "停用輸出")
-            try setProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, deviceID, "指定輸入裝置")
+            try setProperty(unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1, UInt32(1), L("啟用輸入失敗（錯誤碼 %d）"))
+            try setProperty(unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0, UInt32(0), L("停用輸出失敗（錯誤碼 %d）"))
+            try setProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, deviceID, L("指定輸入裝置失敗（錯誤碼 %d）"))
 
             var deviceFormat = AudioStreamBasicDescription()
             var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-            try check(AudioUnitGetProperty(unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 1, &deviceFormat, &size), "讀取輸入格式")
+            try check(AudioUnitGetProperty(unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 1, &deviceFormat, &size), L("讀取輸入格式失敗（錯誤碼 %d）"))
             guard deviceFormat.mSampleRate > 0, deviceFormat.mChannelsPerFrame > 0 else {
-                throw AudioIOError(message: "這個裝置沒有輸入聲道")
+                throw AudioIOError(message: L("這個裝置沒有輸入聲道"))
             }
             deviceRate = deviceFormat.mSampleRate
             // 向 AUHAL 要單聲道 float（取第一個聲道），取樣率維持裝置的值；AUHAL 的輸入端不做取樣率轉換
-            try setProperty(unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 1, floatFormat(rate: deviceRate, channels: 1), "設定輸入格式")
+            try setProperty(unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 1, floatFormat(rate: deviceRate, channels: 1), L("設定輸入格式失敗（錯誤碼 %d）"))
             let callback = AURenderCallbackStruct(inputProc: inputProc, inputProcRefCon: Unmanaged.passUnretained(self).toOpaque())
-            try setProperty(unit, kAudioOutputUnitProperty_SetInputCallback, kAudioUnitScope_Global, 0, callback, "設定輸入回呼")
-            try check(AudioUnitInitialize(unit), "初始化輸入裝置")
+            try setProperty(unit, kAudioOutputUnitProperty_SetInputCallback, kAudioUnitScope_Global, 0, callback, L("設定輸入回呼失敗（錯誤碼 %d）"))
+            try check(AudioUnitInitialize(unit), L("初始化輸入裝置失敗（錯誤碼 %d）"))
 
             // 裝置不是 48 kHz 時要轉換
             resampler = abs(deviceRate - Double(NBTV.sampleRate)) > 0.5 ? StreamResampler(from: deviceRate, to: Double(NBTV.sampleRate)) : nil
             ring.clear()
             self.unit = unit
-            try check(AudioOutputUnitStart(unit), "啟動輸入裝置")
+            try check(AudioOutputUnitStart(unit), L("啟動輸入裝置失敗（錯誤碼 %d）"))
         } catch {
             self.unit = nil
             AudioUnitUninitialize(unit)
@@ -324,24 +325,24 @@ final class AudioOutput {
         }
         let unit = try makeHALUnit()
         do {
-            try setProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, deviceID, "指定輸出裝置")
+            try setProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, deviceID, L("指定輸出裝置失敗（錯誤碼 %d）"))
             var deviceFormat = AudioStreamBasicDescription()
             var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-            try check(AudioUnitGetProperty(unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0, &deviceFormat, &size), "讀取輸出格式")
-            guard deviceFormat.mChannelsPerFrame > 0 else { throw AudioIOError(message: "這個裝置沒有輸出聲道") }
+            try check(AudioUnitGetProperty(unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0, &deviceFormat, &size), L("讀取輸出格式失敗（錯誤碼 %d）"))
+            guard deviceFormat.mChannelsPerFrame > 0 else { throw AudioIOError(message: L("這個裝置沒有輸出聲道")) }
             // 給 AUHAL 48 kHz 的 float；它會自己轉成裝置的取樣率。立體聲裝置兩個聲道送一樣的訊號。
             let channels = min(deviceFormat.mChannelsPerFrame, 2)
             try setProperty(unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0,
-                            floatFormat(rate: Double(NBTV.sampleRate), channels: channels), "設定輸出格式")
+                            floatFormat(rate: Double(NBTV.sampleRate), channels: channels), L("設定輸出格式失敗（錯誤碼 %d）"))
             let callback = AURenderCallbackStruct(inputProc: outputProc, inputProcRefCon: Unmanaged.passUnretained(self).toOpaque())
-            try setProperty(unit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, callback, "設定輸出回呼")
-            try check(AudioUnitInitialize(unit), "初始化輸出裝置")
+            try setProperty(unit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, callback, L("設定輸出回呼失敗（錯誤碼 %d）"))
+            try check(AudioUnitInitialize(unit), L("初始化輸出裝置失敗（錯誤碼 %d）"))
             ring.clear()
             underruns = 0
             renderedFrames = 0
             silentFrames = 0
             self.unit = unit
-            try check(AudioOutputUnitStart(unit), "啟動輸出裝置")
+            try check(AudioOutputUnitStart(unit), L("啟動輸出裝置失敗（錯誤碼 %d）"))
         } catch {
             self.unit = nil
             AudioUnitUninitialize(unit)

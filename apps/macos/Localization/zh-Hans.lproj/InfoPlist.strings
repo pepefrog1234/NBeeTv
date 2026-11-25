@@ -1,0 +1,5 @@
+// 系統顯示的文字：app 的名稱，以及詢問相機、麥克風權限時說明用途的那一句。
+
+"CFBundleDisplayName" = "短波 NBTV";
+"NSCameraUsageDescription" = "以摄像头画面作为发射来源：每发一张就取当时的画面，缩成 96×72 后发出。";
+"NSMicrophoneUsageDescription" = "接收时需要读取音频输入设备（电台送来的声音），以解出画面。";

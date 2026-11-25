@@ -1,0 +1,311 @@
+// 短波 NBTV 的介面文字：美式英文（其他沒有翻譯的語言也用這一份）。
+// 等號左邊是原始碼裡的繁體中文原文（也是索引，不能改），右邊是翻譯。%@、%d 這些記號是程式要填進去的值，
+// 個數與型別要和原文相同；要調換順序時寫成 %1$@、%2$d。「原文#1」是數量剛好是 1 的時候用的說法。
+// 改完請執行 check_strings.py（建置時也會檢查）。
+
+
+// 收發時的訊息（顯示在視窗底列、來源預覽的位置）
+"沒有輸入裝置" = "No input device";
+"沒有輸出裝置" = "No output device";
+"沒有麥克風權限，無法接收（系統設定 → 隱私權與安全性 → 麥克風）" = "No microphone access, so it cannot receive (System Settings → Privacy & Security → Microphone)";
+"找不到音訊輸入裝置" = "Audio input device not found";
+"無法開啟輸入裝置「%@」：%@" = "Cannot open input device “%@”: %@";
+"無法產生圖檔" = "Could not create the image file";
+"存檔失敗：%@" = "Save failed: %@";
+"影片已存成「%@」：%d 張，%@" = "Video saved as “%@”: %d frames, %@";
+"影片存檔失敗：%@" = "Could not save the video: %@";
+"沒有鏡頭" = "No camera";
+"還沒選擇影片檔" = "No video file selected";
+"沒有開鏡頭（NBTV_NO_DEVICES）" = "Camera disabled (NBTV_NO_DEVICES)";
+"沒有相機權限（系統設定 → 隱私權與安全性 → 相機）" = "No camera access (System Settings → Privacy & Security → Camera)";
+"無法播放這個影片檔" = "Cannot play this video file";
+"無法播放影片檔「%@」" = "Cannot play video file “%@”";
+"還沒設定呼號，不能發射" = "No callsign set — cannot transmit";
+"沒有來源畫面可以發射" = "No source picture to transmit";
+"app 裡沒有這個模式的模型，不能發射" = "The app has no model for this mode — cannot transmit";
+"畫面編碼失敗" = "Picture encoding failed";
+"PTT 失敗：%@" = "PTT failed: %@";
+"找不到音訊輸出裝置" = "Audio output device not found";
+"無法開啟輸出裝置「%@」：%@" = "Cannot open output device “%@”: %@";
+"輸出佇列放不下這一張，已停止發射" = "The output queue has no room for this frame; transmission stopped";
+"放開 PTT 失敗：%@" = "Could not release PTT: %@";
+
+// 定時發射：到時間的結果與原因
+"定時發射 %@ 超過影片的長度還沒結束，已自動停止" = "Scheduled TX at %@ ran past the video's length and was stopped automatically";
+"還沒開始送就取消了" = "canceled before it started";
+"錯過了時間（電腦剛從睡眠醒來，或時鐘被調整過）" = "missed the time (the Mac had just woken up, or the clock was changed)";
+"正在發射" = "already transmitting";
+"正在收別人的畫面" = "receiving another station";
+"app 裡沒有這個發射模式的模型" = "the app has no model for this transmit mode";
+"沒有開始" = "did not start";
+"%@ 沒有發射：%@" = "%@ not sent: %@";
+"定時發射 %@ 沒有發射：%@" = "Scheduled TX at %@ not sent: %@";
+"%@ 送出 %d 張後中止：%@" = "%@: stopped after %d frames: %@";
+"%@ 送出 %d 張後中止：%@#1" = "%@: stopped after %d frame: %@";
+"%@ 送出 %d 張（超過影片的長度，自動停止）" = "%@: sent %d frames (stopped automatically past the video's length)";
+"%@ 送出 %d 張（超過影片的長度，自動停止）#1" = "%@: sent %d frame (stopped automatically past the video's length)";
+"%@ 送出 %d 張" = "%@: sent %d frames";
+"%@ 送出 %d 張#1" = "%@: sent %d frame";
+"還沒設定呼號" = "No callsign set";
+"定時發射中" = "Scheduled TX on air";
+"定時發射" = "Scheduled TX";
+"定時發射：%@" = "Scheduled TX: %@";
+"%d 秒後發射" = "TX in %d s";
+"定時 %@" = "TX at %@";
+
+// 音訊裝置開不起來時的訊息
+"找不到音訊輸出單元" = "Audio output unit not found";
+"建立音訊單元失敗（錯誤碼 %d）" = "Could not create the audio unit (error code %d)";
+"建立音訊單元失敗" = "Could not create the audio unit";
+"啟用輸入失敗（錯誤碼 %d）" = "Could not enable input (error code %d)";
+"停用輸出失敗（錯誤碼 %d）" = "Could not disable output (error code %d)";
+"指定輸入裝置失敗（錯誤碼 %d）" = "Could not select the input device (error code %d)";
+"讀取輸入格式失敗（錯誤碼 %d）" = "Could not read the input format (error code %d)";
+"這個裝置沒有輸入聲道" = "This device has no input channels";
+"設定輸入格式失敗（錯誤碼 %d）" = "Could not set the input format (error code %d)";
+"設定輸入回呼失敗（錯誤碼 %d）" = "Could not set the input callback (error code %d)";
+"初始化輸入裝置失敗（錯誤碼 %d）" = "Could not initialize the input device (error code %d)";
+"啟動輸入裝置失敗（錯誤碼 %d）" = "Could not start the input device (error code %d)";
+"指定輸出裝置失敗（錯誤碼 %d）" = "Could not select the output device (error code %d)";
+"讀取輸出格式失敗（錯誤碼 %d）" = "Could not read the output format (error code %d)";
+"這個裝置沒有輸出聲道" = "This device has no output channels";
+"設定輸出格式失敗（錯誤碼 %d）" = "Could not set the output format (error code %d)";
+"設定輸出回呼失敗（錯誤碼 %d）" = "Could not set the output callback (error code %d)";
+"初始化輸出裝置失敗（錯誤碼 %d）" = "Could not initialize the output device (error code %d)";
+"啟動輸出裝置失敗（錯誤碼 %d）" = "Could not start the output device (error code %d)";
+"（沒有可選的項目）" = "(Nothing to choose)";
+
+// 模式
+"模式 %d" = "Mode %d";
+"%.2f 秒" = "%.2f s";
+"大型網路" = "Large net";
+"類神經網路" = "Neural net";
+"每張 %@ · 大型的類神經網路編碼，實驗中" = "%@ per frame · large neural network, experimental";
+"每張 %@ · 類神經網路編碼，實驗中" = "%@ per frame · neural network, experimental";
+" · 模型 %@" = " · model %@";
+"快速" = "Fast";
+"粗略" = "Coarse";
+"中等" = "Medium";
+"細緻" = "Fine";
+"模式" = "Mode";
+"每張" = "Per frame";
+"內容" = "Content";
+"沒有可以用的模式" = "No modes available";
+"app 裡找不到模型的權重檔" = "The model weight files are missing from the app";
+"類神經網路編碼（實驗中）" = "Neural-network coding (experimental)";
+"訊號愈弱畫面愈糊，不會整張收不到；兩邊要用同一份權重" = "The weaker the signal, the blurrier the picture — it never drops out entirely. Both ends must use the same weights";
+
+// 主視窗：頂列與底列
+"我的呼號" = "My callsign";
+"未設定" = "Not set";
+"設定" = "Settings";
+"準備發射" = "Preparing";
+"發射中" = "Transmitting";
+"接收中" = "Receiving";
+"等待訊號" = "Waiting for signal";
+"已同步" = "Synced";
+"已同步 %@" = "Synced: %@";
+"音訊輸入" = "Audio in";
+"音訊輸出" = "Audio out";
+"按一下關閉這則訊息" = "Click to dismiss this message";
+"設定 — %@" = "Settings — %@";
+"設定…" = "Settings…";
+
+// PTT 的錯誤訊息
+"還沒選擇序列埠" = "No serial port selected";
+"無法開啟 %@：%@" = "Cannot open %@: %@";
+"無法控制 %@ 的 %@：%@" = "Cannot control %2$@ on %1$@: %3$@";
+"rigctld 回覆「%@」" = "rigctld replied “%@”";
+"找不到 rigctld 的位址 %@" = "Cannot resolve the rigctld address %@";
+"無法連線" = "could not connect";
+"連線逾時" = "connection timed out";
+"無法送指令給 rigctld（%@）" = "Could not send the command to rigctld (%@)";
+"rigctld（%@）沒有回覆" = "No reply from rigctld (%@)";
+"無法連線到 rigctld（%@）：%@" = "Could not connect to rigctld (%@): %@";
+"Hamlib 開不了電台，請檢查型號、序列埠與速率" = "Hamlib could not open the radio; check the model, serial port and baud rate";
+"Hamlib 開不了電台，請檢查型號、序列埠與速率（%@）" = "Hamlib could not open the radio; check the model, serial port and baud rate (%@)";
+"還沒選擇電台型號" = "No radio model selected";
+"這台電腦沒有裝 Hamlib（找不到 rigctld）；可以用 Homebrew 安裝：brew install hamlib" = "Hamlib is not installed on this Mac (rigctld not found); install it with Homebrew: brew install hamlib";
+"找不到可以用的本機連接埠" = "No free local port available";
+"無法啟動 rigctld：%@" = "Could not start rigctld: %@";
+"rigctld 自己結束了" = "rigctld exited unexpectedly";
+"rigctld 自己結束了（%@）" = "rigctld exited unexpectedly (%@)";
+"電台一直沒有回應 CAT 指令，請檢查型號、序列埠與速率" = "The radio is not answering CAT commands; check the model, serial port and baud rate";
+"電台一直沒有回應 CAT 指令，請檢查型號、序列埠與速率（%@）" = "The radio is not answering CAT commands; check the model, serial port and baud rate (%@)";
+"電台沒有回應 CAT 指令，請檢查型號、序列埠與速率" = "The radio did not answer the CAT command; check the model, serial port and baud rate";
+"電台沒有接受 PTT 指令（Hamlib 回覆「%@」）" = "The radio rejected the PTT command (Hamlib replied “%@”)";
+
+// 主視窗：收到的畫面與它下面的資訊列
+"訊雜比 %@" = "SNR %@";
+"正在送出的畫面：壓縮後對方會看到的 96×72 影像" = "Picture being sent: the 96×72 image the other station will see after compression";
+"正在處理第一張畫面" = "Processing the first picture";
+"收到的畫面：%@ 傳來的 96×72 影像" = "Received picture: 96×72 image sent by %@";
+"偵測到同步訊號後會自動解碼並顯示畫面" = "Pictures are decoded and shown automatically once a sync signal is detected";
+"尚未收到畫面" = "Nothing received yet";
+"儲存圖片" = "Save image";
+"把這一段連續收到的 %d 張串成影片檔（.mp4）：同一個呼號，兩張之間的空檔不到 %d 秒" = "Join the %d consecutive frames of this sequence into a video file (.mp4): same callsign, less than %d s between frames";
+"儲存影片，這一段有 %d 張" = "Save video: this sequence has %d frames";
+"正在存影片檔" = "Saving the video file";
+"這一張前後沒有連續收到的畫面：同一個呼號、空檔不到 %d 秒的才能串成影片" = "No consecutive frames around this one: only frames from the same callsign less than %d s apart can be joined into a video";
+"正在儲存影片" = "Saving video";
+"儲存影片：這一段只有一張，不能存" = "Save video: this sequence has only one frame, so there is nothing to save";
+"儲存中…" = "Saving…";
+"儲存影片" = "Save video";
+"%d 張" = "%d frames";
+"%d 張#1" = "%d frame";
+"第 %d 張" = "Frame %d";
+"對方收到的樣子（沒有雜訊時）" = "As the other station sees it (without noise)";
+
+// 主視窗：訊號／發射面板
+"訊號" = "Signal";
+"搜尋同步訊號中" = "Searching for sync";
+"訊雜比" = "SNR";
+"頻率偏移" = "Frequency offset";
+"模式（自動偵測）" = "Mode (detected)";
+"上一張" = "Last frame";
+"解碼成功" = "Decoded";
+"解碼失敗" = "Decode failed";
+"模型不符" = "Model mismatch";
+"發射" = "Transmit";
+"已發射" = "On air";
+"已送出" = "Sent";
+"接收" = "Receive";
+"暫停，停止發射後自動恢復" = "Paused; resumes after transmit";
+"準備中" = "Preparing";
+"發射中（VOX）" = "Transmitting (VOX)";
+"PTT 已按下" = "PTT keyed";
+
+// 主視窗：最近收到、音訊頻譜
+"最近收到" = "Recent";
+"共 %d 張，往下捲看更早的" = "%d total — scroll for older";
+"收到的畫面會依時間排在這裡" = "Received pictures appear here, newest first";
+"%@ 收到的畫面，%@，訊雜比 %@，目前顯示中" = "Picture received at %@, %@, SNR %@, currently shown";
+"%@ 收到的畫面，%@，訊雜比 %@" = "Picture received at %@, %@, SNR %@";
+"音訊頻譜 0–3 kHz" = "Audio spectrum 0–3 kHz";
+"發射中顯示送出的訊號" = "Showing the transmitted signal";
+"白線之間是訊號頻帶 352–2648 Hz" = "White lines mark the signal band: 352–2648 Hz";
+"輸出音量" = "Output level";
+"輸入音量" = "Input level";
+"音訊的頻譜瀑布圖，最新的在上方" = "Audio spectrum waterfall, newest at the top";
+
+// 定時發射的面板
+"、" = ", ";
+"定時發射：關閉" = "Scheduled transmit: off";
+"到了時間自動把影片檔從頭發射一次，播完就停止" = "At each scheduled time the video file is transmitted once from the start, then it stops";
+"開啟定時發射" = "Enable scheduled transmit";
+"每隔幾分鐘" = "Interval (minutes)";
+"每小時的 %@ 分整" = "At minutes %@ of every hour";
+"要播的影片" = "Video to play";
+"尚未選擇影片檔" = "No video file selected";
+"選擇…" = "Choose…";
+"正在收別人的畫面時，那一次不發射" = "Skip a run while receiving another station";
+"用當時選的發射模式；來源是鏡頭的話，播完會換回鏡頭。正在發射時到了時間，那一次就跳過。" = "Uses the transmit mode selected at that moment; if the source is the camera, it switches back afterwards. A run is skipped if a transmission is already under way. ";
+"開著的時候電腦不會因為閒置而睡眠；重新開啟 app 之後要再打開一次。" = "While it is on, the Mac will not sleep when idle; turn it on again each time the app is reopened.";
+"%@，到了時間不會發射" = "%@ — it will not transmit at the scheduled time";
+"正在發射這一次的影片" = "Transmitting this run's video";
+"下一次 %@" = "Next: %@";
+"目前關著，不會自己發射" = "Off — it will not transmit on its own";
+"上一次：%@" = "Last: %@";
+
+// 存成影片時的錯誤
+"沒有畫面可以存" = "There are no frames to save";
+"無法建立影片檔：%@" = "Could not create the video file: %@";
+"這台電腦不能編 H.264 的影片" = "This Mac cannot encode H.264 video";
+"無法開始寫入影片檔" = "Could not start writing the video file";
+"無法準備影片的畫面" = "Could not prepare the video frames";
+"寫入影片檔時失敗" = "Writing the video file failed";
+"影片檔沒有寫完" = "The video file was not completed";
+"%@：%@" = "%@: %@";
+
+// PTT 的摘要（視窗底列）
+"不控制（VOX）" = "None (VOX)";
+"序列埠 %@" = "Serial port %@";
+"CAT（還沒選電台型號）" = "CAT (no radio model chosen)";
+"型號 %d" = "Model %d";
+
+// 設定視窗
+"電台" = "Station";
+"音訊" = "Audio";
+"PTT 控制" = "PTT control";
+"顯示" = "Display";
+"寫進每張畫面的標頭，最多 9 個字元" = "Sent in every frame header; up to 9 characters";
+"在收到的畫面上標示訊雜比" = "Show SNR on received pictures";
+"畫面與縮圖的左上角，標出收到那一張當下的訊雜比" = "At the top-left of the picture and of each thumbnail";
+"輸入裝置" = "Input device";
+"從電台收進來的聲音" = "Audio coming from the radio";
+"輸出裝置" = "Output device";
+"送去電台發射的聲音" = "Audio sent to the radio to transmit";
+"系統預設" = "System default";
+"不控制，使用電台的 VOX" = "None — use the radio's VOX";
+"序列埠的 RTS 或 DTR" = "Serial port RTS or DTR";
+"電台的 CAT 指令（經序列埠，由 Hamlib 翻譯）" = "Radio CAT commands (serial port, via Hamlib)";
+"Hamlib rigctld（TCP）" = "Hamlib rigctld (TCP)";
+"序列埠" = "Serial port";
+"RTS／DTR、CAT 共用" = "For RTS/DTR and CAT";
+"（沒有序列埠）" = "(No serial ports)";
+"尚未選擇" = "Not selected";
+"電台型號" = "Radio model";
+"（這台電腦沒有裝 Hamlib）" = "(Hamlib is not installed on this Mac)";
+"電台型號：%@" = "Radio model: %@";
+"序列速率" = "Baud rate";
+"要和電台裡設定的 CAT 速率相同" = "Must match the radio's CAT rate";
+"依型號的預設" = "Model default";
+"序列速率：%@" = "Baud rate: %@";
+"rigctld 位址" = "rigctld address";
+"TCP 連線，本機或遠端都可以" = "TCP connection, local or remote";
+"rigctld 連接埠" = "rigctld port";
+"找不到 Hamlib，請先安裝" = "Hamlib not found; install it first";
+"用 CAT 指令時要選" = "Required for CAT commands";
+"其他" = "Other";
+
+// 右側欄：發射來源、畫布、發射模式、輸出音量、發射鈕
+"發射來源" = "Transmit source";
+"鏡頭" = "Camera";
+"影片檔" = "Video file";
+"循環播放" = "Loop";
+"沒有勾：按下發射才開始播放，播完自動停止發射。勾了：影片循環播放，要自己按停止。兩種都是每送一張取當下那一格" = "Off: the video starts when you transmit, and transmission stops by itself when it ends. On: the video loops and you stop manually. Either way, each frame sent is the video frame at that moment";
+"縮放方式" = "Scaling";
+"填滿" = "Fill";
+"完整" = "Fit";
+"縮放方式。填滿：把畫面放大到蓋滿，裁掉多出來的邊。完整：整個畫面都留著，上下或左右補黑邊" = "Scaling. Fill: enlarge the picture to cover the frame and crop the excess. Fit: keep the whole picture and add black bars at the top and bottom or at the sides";
+"發射模式" = "Transmit mode";
+"（沒有鏡頭）" = "(No cameras)";
+"選擇鏡頭：%@" = "Choose camera: %@";
+"鏡頭畫面縮成 96×72 後的預覽" = "Preview of the camera picture scaled to 96×72";
+"影片目前這一格縮成 96×72 後的預覽" = "Preview of the current video frame scaled to 96×72";
+"等待來源畫面" = "Waiting for the source picture";
+"畫布" = "Canvas";
+"在送出去的每一張畫面上印字，例如「CQ %@」。上面的預覽就是送出去的樣子" = "Stamps text on every picture sent, for example “CQ %@”. The preview above shows exactly what goes out";
+"呼號" = "callsign";
+"要印的字" = "Text";
+"畫布要印的字" = "Canvas text";
+"上" = "↑";
+"下" = "↓";
+"字印在畫面的上緣或下緣" = "Put the text at the top or the bottom of the picture";
+"來源 — → 送出 96×72" = "Source — → sent as 96×72";
+"來源 %d×%d → 送出 96×72" = "Source %d×%d → sent as 96×72";
+"暫停" = "Pause";
+"播放" = "Play";
+"播放位置" = "Playback position";
+"選擇發射模式：%@" = "Choose transmit mode: %@";
+"發射模式：%@，發射中不能更換" = "Transmit mode: %@; it cannot be changed while transmitting";
+"發射中不能更換模式；來源可以隨時切換，下一張生效" = "The mode cannot be changed while transmitting; the source can, and takes effect on the next frame";
+"送去電台的聲音大小。發射中看著電台的 ALC 調：ALC 剛好不動或只動一點點" = "Level of the audio sent to the radio. Adjust it while transmitting and watching the radio's ALC: it should stay still or barely move";
+"開始發射" = "Start transmitting";
+"這張送完就停止…" = "Stopping after this frame…";
+"停止發射" = "Stop transmitting";
+"定時發射：影片播完會自動停止，也可以隨時按停止" = "Scheduled TX: it stops by itself when the video ends; you can also stop at any time";
+"影片播完會自動停止，也可以隨時按停止" = "It stops by itself when the video ends; you can also stop at any time";
+"送完目前這張後放開 PTT，自動回到接收" = "PTT is released after the current frame and the app returns to receive";
+"還沒設定呼號，請先到設定裡填寫" = "No callsign set; enter it in Settings first";
+"等來源有畫面後才能發射" = "Transmit becomes available once the source has a picture";
+"以 %@ 發射，影片播完自動停止" = "Transmits as %@; stops by itself when the video ends";
+"以 %@ 發射，停止後自動回到接收" = "Transmits as %@; returns to receive when stopped";
+
+// 鏡頭的錯誤
+"鏡頭「%@」中斷連線了" = "Camera “%@” was disconnected";
+"不明的錯誤" = "unknown error";
+"鏡頭擷取中斷：%@" = "Camera capture was interrupted: %@";
+"找不到鏡頭" = "No camera found";
+"無法使用這個鏡頭" = "This camera cannot be used";
+"無法開啟鏡頭：%@" = "Could not open the camera: %@";

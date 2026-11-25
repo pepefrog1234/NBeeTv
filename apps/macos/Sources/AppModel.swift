@@ -312,8 +312,8 @@ final class AppModel: ObservableObject {
         serialPorts = SerialPTT.availablePorts()
         cameras = CameraSource.devices()
         let input = AudioDevices.resolve(uid: settings.inputDeviceUID, input: true)
-        inputDeviceName = input?.name ?? "沒有輸入裝置"
-        outputDeviceName = AudioDevices.resolve(uid: settings.outputDeviceUID, input: false)?.name ?? "沒有輸出裝置"
+        inputDeviceName = input?.name ?? L("沒有輸入裝置")
+        outputDeviceName = AudioDevices.resolve(uid: settings.outputDeviceUID, input: false)?.name ?? L("沒有輸出裝置")
 
         // 該用的輸入裝置和正在用的不一樣了（改了設定、裝置被拔掉或插回來、系統預設換了、取樣率改了，
         // 或是先前沒開成功）：改從現在該用的那一個接收。
@@ -327,7 +327,7 @@ final class AppModel: ObservableObject {
     }
 
     private func requestAudioAccessAndReceive() {
-        let denied = "沒有麥克風權限，無法接收（系統設定 → 隱私權與安全性 → 麥克風）"
+        let denied = L("沒有麥克風權限，無法接收（系統設定 → 隱私權與安全性 → 麥克風）")
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
             receiveWanted = true
@@ -355,7 +355,7 @@ final class AppModel: ObservableObject {
         activeInputID = nil
         clearSyncState()
         guard let device = AudioDevices.resolve(uid: settings.inputDeviceUID, input: true) else {
-            notice = "找不到音訊輸入裝置"
+            notice = L("找不到音訊輸入裝置")
             return
         }
         do {
@@ -366,7 +366,7 @@ final class AppModel: ObservableObject {
             DebugTap.log("開始接收：輸入「\(device.name)」，裝置取樣率 \(Int(activeInputRate)) Hz")
         } catch {
             DebugTap.log("開始接收失敗：\(error.localizedDescription)")
-            notice = "無法開啟輸入裝置「\(device.name)」：\(error.localizedDescription)"
+            notice = L("無法開啟輸入裝置「%@」：%@", device.name, error.localizedDescription)
         }
     }
 
@@ -448,7 +448,7 @@ final class AppModel: ObservableObject {
     func saveDisplayedFrame() {
         guard let frame = displayedFrame else { return }
         guard let file = AppModel.exportFile(for: frame) else {
-            notice = "無法產生圖檔"
+            notice = L("無法產生圖檔")
             return
         }
         let panel = NSSavePanel()
@@ -459,7 +459,7 @@ final class AppModel: ObservableObject {
             do {
                 try file.data.write(to: url)
             } catch {
-                self?.notice = "存檔失敗：\(error.localizedDescription)"
+                self?.notice = L("存檔失敗：%@", error.localizedDescription)
             }
         }
     }
@@ -548,9 +548,9 @@ final class AppModel: ObservableObject {
                 self.exportingVideo = false
                 switch result {
                 case .success(let summary):
-                    self.notice = "影片已存成「\(url.lastPathComponent)」：\(summary.pictures) 張，\(AppModel.clock(summary.seconds))"
+                    self.notice = L("影片已存成「%@」：%d 張，%@", url.lastPathComponent, summary.pictures, AppModel.clock(summary.seconds))
                 case .failure(let error):
-                    self.notice = "影片存檔失敗：\(error.localizedDescription)"
+                    self.notice = L("影片存檔失敗：%@", error.localizedDescription)
                 }
                 completion?(result)
             }
@@ -574,7 +574,7 @@ final class AppModel: ObservableObject {
     /// 目前選的鏡頭名稱。
     var cameraName: String {
         if let camera = cameras.first(where: { $0.id == settings.cameraID }) { return camera.name }
-        return cameras.first?.name ?? "沒有鏡頭"
+        return cameras.first?.name ?? L("沒有鏡頭")
     }
 
     func restartSource() {
@@ -588,7 +588,7 @@ final class AppModel: ObservableObject {
         case .video:
             camera.stop()
             if video.url == nil {
-                sourceMessage = "還沒選擇影片檔"
+                sourceMessage = L("還沒選擇影片檔")
             } else if settings.loopVideo {
                 video.play()   // 不循環的影片停在原來的位置，按下發射才開始播（見 goOnAir）
             }
@@ -631,7 +631,7 @@ final class AppModel: ObservableObject {
     private func startCamera() {
         // 開發用：設了 NBTV_NO_DEVICES 就完全不開鏡頭（也就不會跳出相機權限的詢問）
         guard ProcessInfo.processInfo.environment["NBTV_NO_DEVICES"] == nil else {
-            sourceMessage = "沒有開鏡頭（NBTV_NO_DEVICES）"
+            sourceMessage = L("沒有開鏡頭（NBTV_NO_DEVICES）")
             return
         }
         let begin = { [weak self] in
@@ -648,11 +648,11 @@ final class AppModel: ObservableObject {
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
                 DispatchQueue.main.async {
-                    if granted { begin() } else { self?.sourceMessage = "沒有相機權限（系統設定 → 隱私權與安全性 → 相機）" }
+                    if granted { begin() } else { self?.sourceMessage = L("沒有相機權限（系統設定 → 隱私權與安全性 → 相機）") }
                 }
             }
         default:
-            sourceMessage = "沒有相機權限（系統設定 → 隱私權與安全性 → 相機）"
+            sourceMessage = L("沒有相機權限（系統設定 → 隱私權與安全性 → 相機）")
         }
     }
 
@@ -699,9 +699,9 @@ final class AppModel: ObservableObject {
                 self.videoDuration = 0
                 // 來源是鏡頭時，預覽那一格是鏡頭的地方，訊息改放底列
                 if self.settings.sourceKind == .video {
-                    self.sourceMessage = "無法播放這個影片檔"
+                    self.sourceMessage = L("無法播放這個影片檔")
                 } else {
-                    self.notice = "無法播放影片檔「\(url.lastPathComponent)」"
+                    self.notice = L("無法播放影片檔「%@」", url.lastPathComponent)
                 }
             }
             completion?(ok)
@@ -832,7 +832,7 @@ final class AppModel: ObservableObject {
     func startTransmit(fromStart: Bool = false) {
         guard live, txPhase == .idle, let mode = Modes.find(settings.txModeID) else { return }
         guard !settings.callsign.isEmpty else {
-            notice = "還沒設定呼號，不能發射"
+            notice = L("還沒設定呼號，不能發射")
             return
         }
         notice = nil
@@ -859,7 +859,7 @@ final class AppModel: ObservableObject {
             self.captureSourceFrame { [weak self] rgb in
                 guard let self, session == self.txSession else { return }
                 guard let rgb else {
-                    self.failTransmit("沒有來源畫面可以發射")
+                    self.failTransmit(L("沒有來源畫面可以發射"))
                     return
                 }
                 self.txLastRGB = rgb
@@ -928,7 +928,7 @@ final class AppModel: ObservableObject {
     private func firstFrameReady(_ frame: EncodedFrame?, session: Int) {
         guard session == txSession, txPhase == .starting else { return }
         guard let frame else {
-            failTransmit(Modes.find(txModeID) == nil ? "app 裡沒有這個模式的模型，不能發射" : "畫面編碼失敗")
+            failTransmit(Modes.find(txModeID) == nil ? L("app 裡沒有這個模式的模型，不能發射") : L("畫面編碼失敗"))
             return
         }
         DebugTap.log("第一張編好（\(frame.samples.count) 個取樣），按下 PTT（\(settings.pttMode.rawValue)）")
@@ -944,7 +944,7 @@ final class AppModel: ObservableObject {
                 DispatchQueue.main.async {
                     if self.pttDriver === driver { self.pttDriver = nil }   // 上面已經放開了
                     guard session == self.txSession, self.txPhase == .starting else { return }
-                    self.failTransmit("PTT 失敗：\(error.localizedDescription)")
+                    self.failTransmit(L("PTT 失敗：%@", error.localizedDescription))
                 }
                 return
             }
@@ -961,7 +961,7 @@ final class AppModel: ObservableObject {
         engine.resetSpectrum()
         let device = engine.output.simulated ? nil : AudioDevices.resolve(uid: settings.outputDeviceUID, input: false)
         guard device != nil || engine.output.simulated else {
-            failTransmit("找不到音訊輸出裝置")
+            failTransmit(L("找不到音訊輸出裝置"))
             return
         }
         let deviceName = device?.name ?? "模擬的輸出"
@@ -970,7 +970,7 @@ final class AppModel: ObservableObject {
             try engine.output.start(deviceID: device?.id ?? 0)
             if let device { outputDeviceName = device.name }
         } catch {
-            failTransmit("無法開啟輸出裝置「\(deviceName)」：\(error.localizedDescription)")
+            failTransmit(L("無法開啟輸出裝置「%@」：%@", deviceName, error.localizedDescription))
             return
         }
         txLead = Int64(AppModel.pttLeadSeconds * Double(NBTV.sampleRate))
@@ -1006,7 +1006,7 @@ final class AppModel: ObservableObject {
         guard let engine else { return false }
         guard engine.output.enqueue(frame.samples) else {
             // 不應該發生：佇列的長度是照最長的模式配置的
-            failTransmit("輸出佇列放不下這一張，已停止發射")
+            failTransmit(L("輸出佇列放不下這一張，已停止發射"))
             return false
         }
         let start = txEnd
@@ -1043,7 +1043,7 @@ final class AppModel: ObservableObject {
         if scheduledRun, txPhase == .transmitting, let limit = scheduleLimit, Double(position - txLead) / Double(NBTV.sampleRate) > limit {
             scheduleLimit = nil
             scheduleCutShort = true
-            notice = "定時發射 \(scheduleLabel) 超過影片的長度還沒結束，已自動停止"
+            notice = L("定時發射 %@ 超過影片的長度還沒結束，已自動停止", scheduleLabel)
             AppModel.trace?("定時發射超過上限：自動停止")
             stopTransmit()
         }
@@ -1218,7 +1218,7 @@ final class AppModel: ObservableObject {
         if let message { notice = message }
         DebugTap.log(message.map { "發射中止：\($0)" } ?? "發射取消")
         AppModel.trace?(message.map { "發射中止：\($0)" } ?? "發射取消")
-        endTransmit(failure: message ?? "還沒開始送就取消了")
+        endTransmit(failure: message ?? L("還沒開始送就取消了"))
     }
 
     /// 停止輸出、放開 PTT、回到接收。failure：不是正常送完的話，原因是什麼（定時發射記錄結果用）。
@@ -1259,7 +1259,7 @@ final class AppModel: ObservableObject {
                 DebugTap.log("PTT 已放開")
             } catch {
                 DebugTap.log("放開 PTT 失敗：\(error.localizedDescription)")
-                DispatchQueue.main.async { self.notice = "放開 PTT 失敗：\(error.localizedDescription)" }
+                DispatchQueue.main.async { self.notice = L("放開 PTT 失敗：%@", error.localizedDescription) }
             }
         }
     }
@@ -1316,7 +1316,7 @@ final class AppModel: ObservableObject {
         scheduleNextFire = TransmitSchedule.nextFire(after: now, intervalMinutes: interval)
         let label = TransmitSchedule.clockText(due)
         if -remaining > AppModel.scheduleLateLimit {
-            skipSchedule(label, "錯過了時間（電腦剛從睡眠醒來，或時鐘被調整過）")
+            skipSchedule(label, L("錯過了時間（電腦剛從睡眠醒來，或時鐘被調整過）"))
         } else {
             fireSchedule(label)
         }
@@ -1324,10 +1324,10 @@ final class AppModel: ObservableObject {
 
     /// 到時間了：把影片檔從頭發射一次。不能發射就跳過這一次。
     private func fireSchedule(_ label: String) {
-        guard txPhase == .idle else { return skipSchedule(label, "正在發射") }
+        guard txPhase == .idle else { return skipSchedule(label, L("正在發射")) }
         if let problem = scheduleProblem { return skipSchedule(label, problem) }
-        if settings.scheduleSkipWhenBusy, receivingSomeone { return skipSchedule(label, "正在收別人的畫面") }
-        guard let mode = Modes.find(settings.txModeID) else { return skipSchedule(label, "app 裡沒有這個發射模式的模型") }
+        if settings.scheduleSkipWhenBusy, receivingSomeone { return skipSchedule(label, L("正在收別人的畫面")) }
+        guard let mode = Modes.find(settings.txModeID) else { return skipSchedule(label, L("app 裡沒有這個發射模式的模型")) }
 
         DebugTap.log("定時發射 \(label)：開始")
         AppModel.trace?("定時發射 \(label)：開始")
@@ -1349,7 +1349,7 @@ final class AppModel: ObservableObject {
         scheduleLimit = video.duration + 2 * mode.frameSeconds + AppModel.scheduleMarginSeconds
         startTransmit(fromStart: true)
         // 不應該發生（能不能發射上面都檢查過了）：真的沒有開始的話，把狀態收乾淨
-        if txPhase == .idle { finishScheduledRun(failure: notice ?? "沒有開始", sent: 0) }
+        if txPhase == .idle { finishScheduledRun(failure: notice ?? L("沒有開始"), sent: 0) }
     }
 
     /// 頻率上有人正在送這個 app 的訊號：接收機現在同步著，或 3 秒內還同步著
@@ -1360,8 +1360,8 @@ final class AppModel: ObservableObject {
     }
 
     private func skipSchedule(_ label: String, _ reason: String) {
-        scheduleLastEvent = "\(label) 沒有發射：\(reason)"
-        notice = "定時發射 \(label) 沒有發射：\(reason)"
+        scheduleLastEvent = L("%@ 沒有發射：%@", label, reason)
+        notice = L("定時發射 %@ 沒有發射：%@", label, reason)
         DebugTap.log("定時發射 \(label) 沒有發射：\(reason)")
         AppModel.trace?("定時發射 \(label) 沒有發射：\(reason)")
     }
@@ -1373,9 +1373,9 @@ final class AppModel: ObservableObject {
         video.loop = settings.loopVideo
         let sent = sent ?? txFramesSent
         if let failure {
-            scheduleLastEvent = sent > 0 ? "\(scheduleLabel) 送出 \(sent) 張後中止：\(failure)" : "\(scheduleLabel) 沒有發射：\(failure)"
+            scheduleLastEvent = sent > 0 ? L("%@ 送出 %d 張後中止：%@", scheduleLabel, sent, failure) : L("%@ 沒有發射：%@", scheduleLabel, failure)
         } else {
-            scheduleLastEvent = "\(scheduleLabel) 送出 \(sent) 張" + (scheduleCutShort ? "（超過影片的長度，自動停止）" : "")
+            scheduleLastEvent = scheduleCutShort ? L("%@ 送出 %d 張（超過影片的長度，自動停止）", scheduleLabel, sent) : L("%@ 送出 %d 張", scheduleLabel, sent)
         }
         DebugTap.log("定時發射 " + (scheduleLastEvent ?? ""))
         AppModel.trace?("定時發射 " + (scheduleLastEvent ?? ""))
@@ -1388,18 +1388,18 @@ final class AppModel: ObservableObject {
 
     /// 定時發射到了時間也發射不了的原因；沒有問題時是 nil。
     var scheduleProblem: String? {
-        if settings.callsign.isEmpty { return "還沒設定呼號" }
-        if videoName == nil { return "還沒選擇影片檔" }
+        if settings.callsign.isEmpty { return L("還沒設定呼號") }
+        if videoName == nil { return L("還沒選擇影片檔") }
         return nil
     }
 
     /// 頂列「定時發射」鈕上的字。
     var scheduleSummary: String {
-        if scheduledRun { return "定時發射中" }
-        guard scheduleArmed, let next = scheduleNextFire else { return "定時發射" }
-        if let problem = scheduleProblem { return "定時發射：\(problem)" }
-        if let seconds = scheduleCountdown { return "\(seconds) 秒後發射" }
-        return "定時 \(TransmitSchedule.clockText(next))"
+        if scheduledRun { return L("定時發射中") }
+        guard scheduleArmed, let next = scheduleNextFire else { return L("定時發射") }
+        if let problem = scheduleProblem { return L("定時發射：%@", problem) }
+        if let seconds = scheduleCountdown { return L("%d 秒後發射", seconds) }
+        return L("定時 %@", TransmitSchedule.clockText(next))
     }
 
     // MARK: - 顯示用的文字

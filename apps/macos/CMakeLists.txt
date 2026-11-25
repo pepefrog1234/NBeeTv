@@ -15,6 +15,7 @@ set(NBTV_APP_SOURCES
   Sources/Canvas.swift
   Sources/SequenceVideo.swift
   Sources/Settings.swift
+  Sources/Localization.swift
   Sources/Waterfall.swift
   Sources/Theme.swift
   Sources/Controls.swift
@@ -51,6 +52,27 @@ set(NBTV_APP_RESOURCES
 )
 # （CMake 的 Swift＋Ninja 不會照 MACOSX_PACKAGE_LOCATION 複製資源，所以在下面建置完成後自己複製。）
 
+# 介面的翻譯：原始碼裡寫的是繁體中文，其他語言在 Localization/<語言>.lproj/Localizable.strings；
+# 每個語言另外有一份 InfoPlist.strings（app 的名稱，以及系統詢問相機、麥克風權限時的說明）。
+# 啟動時系統照使用者的語言從這幾個裡挑一個，都不合就用英文（Info.plist 的開發語言是 en）。
+set(NBTV_APP_LANGUAGES zh-Hant zh-Hans ja es en)
+set(NBTV_APP_STRINGS "")
+set(NBTV_APP_LPROJ_COMMANDS "")
+foreach(language ${NBTV_APP_LANGUAGES})
+  list(APPEND NBTV_APP_STRINGS
+    "${CMAKE_CURRENT_SOURCE_DIR}/Localization/${language}.lproj/Localizable.strings"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Localization/${language}.lproj/InfoPlist.strings")
+  list(APPEND NBTV_APP_LPROJ_COMMANDS
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/Localization/${language}.lproj"
+            "$<TARGET_BUNDLE_CONTENT_DIR:nbtv_mac>/Resources/${language}.lproj")
+endforeach()
+# 找得到 python3 的話，每次建置都檢查翻譯齊不齊（原始碼裡的每一句在每個語言都有、要填的值對得上）；有問題就建不過。
+find_program(NBTV_PYTHON3 python3)
+set(NBTV_APP_STRINGS_CHECK "")
+if(NBTV_PYTHON3)
+  set(NBTV_APP_STRINGS_CHECK COMMAND ${NBTV_PYTHON3} "${CMAKE_CURRENT_SOURCE_DIR}/Localization/check_strings.py")
+endif()
+
 # Swift 匯入的 C 標頭：列進來，標頭改了才會重新編譯。
 set(NBTV_APP_HEADERS
   CNBTV/nbtv_shim.h
@@ -60,6 +82,8 @@ set(NBTV_APP_HEADERS
 set_source_files_properties(${NBTV_APP_HEADERS} PROPERTIES HEADER_FILE_ONLY ON)
 
 add_executable(nbtv_mac MACOSX_BUNDLE ${NBTV_APP_SOURCES} ${NBTV_APP_HEADERS})
+# 翻譯檔改了也要重新連結一次，下面「建置完成後」的那幾步（檢查、複製、簽章）才會再跑
+set_property(TARGET nbtv_mac APPEND PROPERTY LINK_DEPENDS ${NBTV_APP_STRINGS} "${CMAKE_CURRENT_SOURCE_DIR}/Localization/check_strings.py")
 
 set_target_properties(nbtv_mac PROPERTIES
   OUTPUT_NAME "NBTV"
@@ -94,13 +118,15 @@ target_link_libraries(nbtv_mac PRIVATE nbtvcore)
 # ad-hoc 簽章：系統的相機／麥克風權限需要 bundle 有簽章才認得。
 # swiftc 會把相依檔（NBTV.d）寫在執行檔旁邊，也就是 bundle 的 Contents/MacOS 裡；簽章前要先拿掉。
 add_custom_command(TARGET nbtv_mac POST_BUILD
+  ${NBTV_APP_STRINGS_CHECK}
   COMMAND ${CMAKE_COMMAND} -E rm -f "$<TARGET_FILE:nbtv_mac>.d"
   # Resources 每次重新建立：換了權重檔的版本時，舊的那一份才不會留在 bundle 裡
   COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_BUNDLE_CONTENT_DIR:nbtv_mac>/Resources"
   COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_CONTENT_DIR:nbtv_mac>/Resources"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different ${NBTV_APP_RESOURCES} "$<TARGET_BUNDLE_CONTENT_DIR:nbtv_mac>/Resources"
+  ${NBTV_APP_LPROJ_COMMANDS}
   COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:nbtv_mac>"
-  COMMENT "複製資源並做 ad-hoc 簽章：NBTV.app"
+  COMMENT "檢查翻譯、複製資源並做 ad-hoc 簽章：NBTV.app"
   VERBATIM)
 
 # 第二個 app（-DNBTV_MACOS_SECOND_APP=ON）：同一台電腦要同時開兩個、兩部電台互相收發時用。
@@ -115,8 +141,11 @@ if(NBTV_MACOS_SECOND_APP)
     COMMAND ${CMAKE_COMMAND} -E copy_directory "$<TARGET_BUNDLE_DIR:nbtv_mac>" "${NBTV_APP2_DIR}"
     COMMAND plutil -replace CFBundleIdentifier -string "tw.hf-nbtv.mac2" "${NBTV_APP2_PLIST}"
     COMMAND plutil -replace CFBundleName -string "NBTV 2" "${NBTV_APP2_PLIST}"
-    COMMAND plutil -replace CFBundleDisplayName -string "短波 NBTV 2" "${NBTV_APP2_PLIST}"
+    COMMAND plutil -replace CFBundleDisplayName -string "HF NBTV 2" "${NBTV_APP2_PLIST}"
     COMMAND plutil -replace NBTVInstance -string "2" "${NBTV_APP2_PLIST}"
+    # 各語言的名稱在 InfoPlist.strings 裡：每一份都在後面加上「 2」。plutil 不能把檔案寫回原來「"鍵" = "值";」的格式，
+    # 所以先轉成 XML 再改（.strings 是 XML 的格式系統照樣讀得懂）
+    COMMAND /bin/sh -c "for f in \"$0\"/Contents/Resources/*.lproj/InfoPlist.strings; do n=$(plutil -extract CFBundleDisplayName raw -o - \"$f\") && plutil -convert xml1 \"$f\" && plutil -replace CFBundleDisplayName -string \"$n 2\" \"$f\" || exit 1; done" "${NBTV_APP2_DIR}"
     COMMAND codesign --force --sign - "${NBTV_APP2_DIR}"
     COMMENT "複製成第二個 app 並重新簽章：NBTV 2.app"
     VERBATIM)

@@ -22,8 +22,9 @@ enum TransmitSchedule {
     /// 一小時裡是哪幾分：「00、15、30、45」。太多個時只列頭三個與最後一個：「00、05、10 … 55」。
     static func minutesText(_ intervalMinutes: Int) -> String {
         let minutes = stride(from: 0, to: 60, by: max(intervalMinutes, 1)).map { String(format: "%02d", $0) }
-        guard minutes.count > 6, let last = minutes.last else { return minutes.joined(separator: "、") }
-        return minutes.prefix(3).joined(separator: "、") + " … " + last
+        let separator = L("、")   // 列舉的分隔：中文、日文是頓號，英文、西班牙文是逗號加空白
+        guard minutes.count > 6, let last = minutes.last else { return minutes.joined(separator: separator) }
+        return minutes.prefix(3).joined(separator: separator) + " … " + last
     }
 
     /// 「12:15」：本地時間，24 小時制。

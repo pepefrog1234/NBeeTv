@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleDevelopmentRegion</key>
-    <string>zh-Hant</string>
+    <string>en</string>
     <key>CFBundleExecutable</key>
     <string>${MACOSX_BUNDLE_EXECUTABLE_NAME}</string>
     <key>CFBundleIdentifier</key>
@@ -13,7 +13,7 @@
     <key>CFBundleName</key>
     <string>${MACOSX_BUNDLE_BUNDLE_NAME}</string>
     <key>CFBundleDisplayName</key>
-    <string>短波 NBTV</string>
+    <string>HF NBTV</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -27,8 +27,8 @@
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
     <key>NSCameraUsageDescription</key>
-    <string>以鏡頭畫面作為發射來源：每送一張就取當下的畫面，縮成 96×72 後送出。</string>
+    <string>The camera picture is used as the transmit source: each frame sent is a snapshot taken at that moment, scaled to 96×72.</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>接收時需要讀取音訊輸入裝置（電台送進來的聲音），解出畫面。</string>
+    <string>Receiving requires reading the audio input device (the sound coming from the radio) to decode pictures.</string>
 </dict>
 </plist>

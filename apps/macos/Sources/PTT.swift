@@ -49,10 +49,10 @@ final class SerialPTT: PTTDriver {
             release()
             return
         }
-        guard !path.isEmpty else { throw PTTError(message: "還沒選擇序列埠") }
+        guard !path.isEmpty else { throw PTTError(message: L("還沒選擇序列埠")) }
         if fd < 0 {
             fd = open(path, O_RDWR | O_NOCTTY | O_NONBLOCK)
-            if fd < 0 { throw PTTError(message: "無法開啟 \(path)：\(String(cString: strerror(errno)))") }
+            if fd < 0 { throw PTTError(message: L("無法開啟 %@：%@", path, String(cString: strerror(errno)))) }
         }
         // 剛開啟時驅動程式通常會把兩條線都拉高，先把不用的那條放掉
         let wanted: Int32 = line == .rts ? 0 : 1
@@ -60,7 +60,7 @@ final class SerialPTT: PTTDriver {
         if nbtv_shim_set_modem_line(fd, wanted, 1) != 0 {
             let reason = String(cString: strerror(errno))
             release()
-            throw PTTError(message: "無法控制 \(path) 的 \(line.title)：\(reason)")
+            throw PTTError(message: L("無法控制 %@ 的 %@：%@", path, line.title, reason))
         }
     }
 
@@ -95,7 +95,7 @@ final class RigctldPTT: PTTDriver {
     func key(_ on: Bool) throws {
         let reply = try send(command: "T \(on ? 1 : 0)\n")
         guard reply.contains("RPRT 0") else {
-            throw PTTError(message: "rigctld 回覆「\(reply.trimmingCharacters(in: .whitespacesAndNewlines))」")
+            throw PTTError(message: L("rigctld 回覆「%@」", reply.trimmingCharacters(in: .whitespacesAndNewlines)))
         }
     }
 
@@ -107,11 +107,11 @@ final class RigctldPTT: PTTDriver {
         hints.ai_socktype = SOCK_STREAM
         var result: UnsafeMutablePointer<addrinfo>?
         guard getaddrinfo(host, port, &hints, &result) == 0, let first = result else {
-            throw PTTError(message: "找不到 rigctld 的位址 \(where_)")
+            throw PTTError(message: L("找不到 rigctld 的位址 %@", where_))
         }
         defer { freeaddrinfo(result) }
 
-        var lastError = "無法連線"
+        var lastError = L("無法連線")
         var cursor: UnsafeMutablePointer<addrinfo>? = first
         while let info = cursor {
             cursor = info.pointee.ai_next
@@ -134,7 +134,7 @@ final class RigctldPTT: PTTDriver {
                     ok = soError == 0
                     if !ok { lastError = String(cString: strerror(soError)) }
                 } else {
-                    lastError = "連線逾時"
+                    lastError = L("連線逾時")
                 }
             } else if !ok {
                 lastError = String(cString: strerror(errno))
@@ -147,7 +147,7 @@ final class RigctldPTT: PTTDriver {
 
             let bytes = Array(command.utf8)
             guard Darwin.send(fd, bytes, bytes.count, 0) == bytes.count else {
-                throw PTTError(message: "無法送指令給 rigctld（\(where_)）")
+                throw PTTError(message: L("無法送指令給 rigctld（%@）", where_))
             }
             var reply = ""
             var buffer = [UInt8](repeating: 0, count: 256)
@@ -160,10 +160,10 @@ final class RigctldPTT: PTTDriver {
                 }
                 reply += String(decoding: buffer[0..<n], as: UTF8.self)
             }
-            if reply.isEmpty { throw PTTError(message: "rigctld（\(where_)）沒有回覆", timedOut: timedOut) }
+            if reply.isEmpty { throw PTTError(message: L("rigctld（%@）沒有回覆", where_), timedOut: timedOut) }
             return reply
         }
-        throw PTTError(message: "無法連線到 rigctld（\(where_)）：\(lastError)")
+        throw PTTError(message: L("無法連線到 rigctld（%@）：%@", where_, lastError))
     }
 }
 
@@ -343,7 +343,7 @@ final class HamlibPTT: PTTDriver {
             } catch {
                 stop()
                 if let reason = HamlibPTT.openFailureReason(in: errorText()) {
-                    throw PTTError(message: "Hamlib 開不了電台，請檢查型號、序列埠與速率" + (reason.isEmpty ? "" : "（\(reason)）"))
+                    throw PTTError(message: reason.isEmpty ? L("Hamlib 開不了電台，請檢查型號、序列埠與速率") : L("Hamlib 開不了電台，請檢查型號、序列埠與速率（%@）", reason))
                 }
                 throw error
             }
@@ -403,13 +403,13 @@ final class HamlibPTT: PTTDriver {
         lock.unlock()
         if let running { return running }
         stop()
-        guard model > 0 else { throw PTTError(message: "還沒選擇電台型號") }
+        guard model > 0 else { throw PTTError(message: L("還沒選擇電台型號")) }
         guard let rigctld = Hamlib.rigctld else {
-            throw PTTError(message: "這台電腦沒有裝 Hamlib（找不到 rigctld）；可以用 Homebrew 安裝：brew install hamlib")
+            throw PTTError(message: L("這台電腦沒有裝 Hamlib（找不到 rigctld）；可以用 Homebrew 安裝：brew install hamlib"))
         }
         let caps = Hamlib.serialCaps(model: model)
-        if caps != nil, port.isEmpty { throw PTTError(message: "還沒選擇序列埠") }
-        guard let tcp = HamlibPTT.freePort() else { throw PTTError(message: "找不到可以用的本機連接埠") }
+        if caps != nil, port.isEmpty { throw PTTError(message: L("還沒選擇序列埠")) }
+        guard let tcp = HamlibPTT.freePort() else { throw PTTError(message: L("找不到可以用的本機連接埠")) }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: rigctld)
@@ -429,7 +429,7 @@ final class HamlibPTT: PTTDriver {
             try process.run()
         } catch {
             errors.fileHandleForReading.readabilityHandler = nil
-            throw PTTError(message: "無法啟動 rigctld：\(error.localizedDescription)")
+            throw PTTError(message: L("無法啟動 rigctld：%@", error.localizedDescription))
         }
         let dog = HamlibPTT.makeWatchdog(tcpPort: tcp, pid: process.processIdentifier)
         lock.lock()
@@ -447,12 +447,12 @@ final class HamlibPTT: PTTDriver {
             if !process.isRunning {
                 stop()
                 let reason = lastErrorLine()
-                throw PTTError(message: "rigctld 自己結束了" + (reason.isEmpty ? "" : "（\(reason)）"))
+                throw PTTError(message: reason.isEmpty ? L("rigctld 自己結束了") : L("rigctld 自己結束了（%@）", reason))
             }
             if Date() > deadline {
                 stop()
                 let reason = HamlibPTT.openFailureReason(in: errorText()) ?? ""
-                throw PTTError(message: "電台一直沒有回應 CAT 指令，請檢查型號、序列埠與速率" + (reason.isEmpty ? "" : "（\(reason)）"))
+                throw PTTError(message: reason.isEmpty ? L("電台一直沒有回應 CAT 指令，請檢查型號、序列埠與速率") : L("電台一直沒有回應 CAT 指令，請檢查型號、序列埠與速率（%@）", reason))
             }
             usleep(30_000)
         }
@@ -489,7 +489,7 @@ final class HamlibPTT: PTTDriver {
             } catch {
                 let timedOut = (error as? PTTError)?.timedOut == true
                 guard !timedOut, let retryUntil, Date() < retryUntil else {
-                    throw PTTError(message: "電台沒有回應 CAT 指令，請檢查型號、序列埠與速率", timedOut: timedOut)
+                    throw PTTError(message: L("電台沒有回應 CAT 指令，請檢查型號、序列埠與速率"), timedOut: timedOut)
                 }
                 DebugTap.log("rigctld 沒有接這個指令（\(error.localizedDescription)），再試一次")
                 retries += 1
@@ -501,7 +501,7 @@ final class HamlibPTT: PTTDriver {
     private func command(_ text: String, to tcp: Int, timeoutSeconds: Int, retryUntil: Date? = nil) throws {
         let reply = try HamlibPTT.request(text, port: tcp, timeoutSeconds: timeoutSeconds, retryUntil: retryUntil)
         guard reply.contains("RPRT 0") else {
-            throw PTTError(message: "電台沒有接受 PTT 指令（Hamlib 回覆「\(reply.trimmingCharacters(in: .whitespacesAndNewlines))」）")
+            throw PTTError(message: L("電台沒有接受 PTT 指令（Hamlib 回覆「%@」）", reply.trimmingCharacters(in: .whitespacesAndNewlines)))
         }
     }
 

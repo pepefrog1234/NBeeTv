@@ -44,14 +44,14 @@ enum SequenceVideo {
     /// 寫成影片檔（已經有同名的檔案會被換掉）。要花一點時間，請在背景佇列上呼叫。
     @discardableResult
     static func write(_ pictures: [Picture], lastHold: Double, to url: URL) throws -> Summary {
-        guard !pictures.isEmpty else { throw ExportError(message: "沒有畫面可以存") }
+        guard !pictures.isEmpty else { throw ExportError(message: L("沒有畫面可以存")) }
         let plan = layout(starts: pictures.map(\.start), lastHold: lastHold)
         try? FileManager.default.removeItem(at: url)
         let writer: AVAssetWriter
         do {
             writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
         } catch {
-            throw ExportError(message: "無法建立影片檔：\(error.localizedDescription)")
+            throw ExportError(message: L("無法建立影片檔：%@", error.localizedDescription))
         }
         writer.shouldOptimizeForNetworkUse = true   // 索引放在檔案開頭，傳到網路上可以邊下載邊播
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
@@ -73,16 +73,16 @@ enum SequenceVideo {
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
             kCVPixelBufferWidthKey as String: width, kCVPixelBufferHeightKey as String: height,
         ])
-        guard writer.canAdd(input) else { throw ExportError(message: "這台電腦不能編 H.264 的影片") }
+        guard writer.canAdd(input) else { throw ExportError(message: L("這台電腦不能編 H.264 的影片")) }
         writer.add(input)
-        guard writer.startWriting() else { throw failure(writer, "無法開始寫入影片檔") }
+        guard writer.startWriting() else { throw failure(writer, L("無法開始寫入影片檔")) }
         writer.startSession(atSourceTime: .zero)
 
         var frame = 0
         for (index, picture) in pictures.enumerated() {
             guard let buffer = pixelBuffer(for: picture.image, pool: adaptor.pixelBufferPool) else {
                 writer.cancelWriting()
-                throw ExportError(message: "無法準備影片的畫面")
+                throw ExportError(message: L("無法準備影片的畫面"))
             }
             // 這一張顯示到下一張開始為止：同一格畫面重複寫進去，影片的格率才是固定的每秒 24 格
             let end = index + 1 < pictures.count ? plan.first[index + 1] : plan.total
@@ -94,7 +94,7 @@ enum SequenceVideo {
                 }
                 guard input.isReadyForMoreMediaData,
                       adaptor.append(buffer, withPresentationTime: CMTime(value: CMTimeValue(frame), timescale: frameRate)) else {
-                    let error = failure(writer, "寫入影片檔時失敗")
+                    let error = failure(writer, L("寫入影片檔時失敗"))
                     writer.cancelWriting()
                     throw error
                 }
@@ -106,12 +106,12 @@ enum SequenceVideo {
         let done = DispatchSemaphore(value: 0)
         writer.finishWriting { done.signal() }
         done.wait()
-        guard writer.status == .completed else { throw failure(writer, "影片檔沒有寫完") }
+        guard writer.status == .completed else { throw failure(writer, L("影片檔沒有寫完")) }
         return Summary(pictures: pictures.count, videoFrames: plan.total)
     }
 
     private static func failure(_ writer: AVAssetWriter, _ what: String) -> ExportError {
-        ExportError(message: writer.error.map { "\(what)：\($0.localizedDescription)" } ?? what)
+        ExportError(message: writer.error.map { L("%@：%@", what, $0.localizedDescription) } ?? what)
     }
 
     /// 把一張 96×72 的畫面放大畫進影片用的緩衝（最近鄰，不內插）。

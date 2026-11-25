@@ -1,0 +1,5 @@
+// 系統顯示的文字：app 的名稱，以及詢問相機、麥克風權限時說明用途的那一句。
+
+"CFBundleDisplayName" = "短波 NBTV";
+"NSCameraUsageDescription" = "カメラの映像を送信ソースとして使用します。1 枚送るたびにその時点の映像を取り込み、96×72 に縮小して送信します。";
+"NSMicrophoneUsageDescription" = "受信のためにオーディオ入力デバイス（無線機からの音声）を読み取り、画像をデコードします。";

@@ -102,7 +102,7 @@ struct ModeInfo: Identifiable, Hashable {
     var largeModel = false  // 用的是加寬的大型網路（運算量約四倍）
 
     /// 「模式 11」
-    var name: String { "模式 \(id)" }
+    var name: String { L("模式 %d", id) }
 
     /// 「中等」
     var detail: String { quality }
@@ -111,20 +111,21 @@ struct ModeInfo: Identifiable, Hashable {
     var label: String { detail.isEmpty ? name : "\(name) · \(detail)" }
 
     /// 「2.72 秒」
-    var secondsText: String { String(format: "%.2f 秒", frameSeconds) }
+    var secondsText: String { L("%.2f 秒", frameSeconds) }
 
     /// 「類神經網路」或「大型網路」
-    var contentText: String { largeModel ? "大型網路" : "類神經網路" }
+    var contentText: String { largeModel ? L("大型網路") : L("類神經網路") }
 
     /// 右側欄模式鈕下面的說明
     var summary: String {
-        "每張 \(secondsText) · \(largeModel ? "大型的類神經網路" : "類神經網路")編碼，實驗中" + (modelName.isEmpty ? "" : " · 模型 \(modelName)")
+        let text = largeModel ? L("每張 %@ · 大型的類神經網路編碼，實驗中", secondsText) : L("每張 %@ · 類神經網路編碼，實驗中", secondsText)
+        return modelName.isEmpty ? text : text + L(" · 模型 %@", modelName)
     }
 
     /// 依每幀的酬載符號數取的名字：愈長的幀放得下愈多的值，畫面愈細，但每張也愈久。
     /// 目前的模式是 23（快速）、37（粗略）、100（中等）個符號。
     static func qualityName(payloadSymbols: Int) -> String {
-        payloadSymbols < 30 ? "快速" : payloadSymbols < 60 ? "粗略" : payloadSymbols < 150 ? "中等" : "細緻"
+        payloadSymbols < 30 ? L("快速") : payloadSymbols < 60 ? L("粗略") : payloadSymbols < 150 ? L("中等") : L("細緻")
     }
 }
 

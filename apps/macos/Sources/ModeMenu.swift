@@ -12,9 +12,9 @@ struct ModeMenuView: View {
             // 欄位標題
             HStack(spacing: 8) {
                 Color.clear.frame(width: 16, height: 1)
-                Text("模式").frame(maxWidth: .infinity, alignment: .leading)
-                Text("每張").frame(width: 64, alignment: .trailing)
-                Text("內容").frame(width: 84, alignment: .trailing)
+                Text(L("模式")).frame(maxWidth: .infinity, alignment: .leading)
+                Text(L("每張")).frame(width: 64, alignment: .trailing)
+                Text(L("內容")).frame(width: 84, alignment: .trailing)
             }
             .font(Theme.ui(12))
             .foregroundColor(Theme.tertiary)
@@ -23,9 +23,9 @@ struct ModeMenuView: View {
             .accessibilityHidden(true)
 
             if Modes.menuOrder.isEmpty {
-                group("沒有可以用的模式", "app 裡找不到模型的權重檔")
+                group(L("沒有可以用的模式"), L("app 裡找不到模型的權重檔"))
             } else {
-                group("類神經網路編碼（實驗中）", "訊號愈弱畫面愈糊，不會整張收不到；兩邊要用同一份權重")
+                group(L("類神經網路編碼（實驗中）"), L("訊號愈弱畫面愈糊，不會整張收不到；兩邊要用同一份權重"))
                 ForEach(Modes.menuOrder) { row($0) }
             }
         }

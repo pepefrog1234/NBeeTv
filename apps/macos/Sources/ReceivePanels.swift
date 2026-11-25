@@ -37,7 +37,7 @@ struct SNRBadge: View {
             .padding(.vertical, compact ? 1 : 3)
             .background(RoundedRectangle(cornerRadius: compact ? 2 : 4).fill(Color.black.opacity(0.62)))
             .padding(compact ? 2 : 8)
-            .accessibilityLabel("訊雜比 \(AppModel.snrText(snrDb))")
+            .accessibilityLabel(L("訊雜比 %@", AppModel.snrText(snrDb)))
     }
 }
 
@@ -63,18 +63,18 @@ struct PictureSection: View {
         if model.txPhase != .idle {
             if let preview = model.txPreview {
                 PixelImage(image: preview)
-                    .accessibilityLabel("正在送出的畫面：壓縮後對方會看到的 96×72 影像")
+                    .accessibilityLabel(L("正在送出的畫面：壓縮後對方會看到的 96×72 影像"))
             } else {
-                placeholder("準備發射", "正在處理第一張畫面")
+                placeholder(L("準備發射"), L("正在處理第一張畫面"))
             }
         } else if let frame = model.displayedFrame {
             PixelImage(image: frame.image)
-                .accessibilityLabel("收到的畫面：\(frame.callsign) 傳來的 96×72 影像")
+                .accessibilityLabel(L("收到的畫面：%@ 傳來的 96×72 影像", frame.callsign))
                 .overlay(alignment: .topLeading) {
                     if model.settings.showFrameSNR { SNRBadge(snrDb: frame.snrDb) }
                 }
         } else {
-            placeholder("等待訊號", "偵測到同步訊號後會自動解碼並顯示畫面")
+            placeholder(L("等待訊號"), L("偵測到同步訊號後會自動解碼並顯示畫面"))
         }
     }
 
@@ -97,76 +97,91 @@ struct PictureSection: View {
                 Spacer(minLength: 0)
                 Text(onAirNote).font(Theme.ui(12)).foregroundColor(Theme.secondary).lineLimit(1)
             } else if let frame = model.displayedFrame {
-                // 視窗窄的時候放不下完整的說明與兩顆按鈕：改用精簡的寫法（按鈕不帶圖示與張數，說明不寫「中等」那一段）
+                // 視窗窄（或別的語言字比較長）的時候放不下完整的說明與兩顆按鈕：先改用精簡的寫法
+                // （按鈕不帶圖示與張數，說明不寫「中等」那一段），再放不下就讓按鈕只剩圖示
                 let count = model.displayedSequence.count
                 ViewThatFits(in: .horizontal) {
-                    received(frame, sequence: count, compact: false)
-                    received(frame, sequence: count, compact: true)
+                    received(frame, sequence: count, level: .full)
+                    received(frame, sequence: count, level: .compact)
+                    received(frame, sequence: count, level: .iconsOnly)
                 }
             } else {
-                Text("尚未收到畫面").foregroundColor(Theme.secondary).frame(height: 28)
+                Text(L("尚未收到畫面")).foregroundColor(Theme.secondary).frame(height: 28)
                 Spacer(minLength: 0)
-                HStack(spacing: 8) {
-                    videoLabel(count: 0, enabled: false, compact: false).modifier(DisabledSmallButton())
-                    saveLabel(compact: false).modifier(DisabledSmallButton())
+                ViewThatFits(in: .horizontal) {
+                    ForEach([InfoBarLevel.full, .compact, .iconsOnly], id: \.self) { level in
+                        HStack(spacing: 8) {
+                            videoLabel(count: 0, enabled: false, level: level).modifier(DisabledSmallButton())
+                            saveLabel(level: level).modifier(DisabledSmallButton())
+                        }
+                        .fixedSize()
+                    }
                 }
-                .fixedSize()
             }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
     }
 
+    /// 資訊列的三種寫法，由完整到精簡
+    private enum InfoBarLevel: Hashable {
+        case full        // 按鈕有圖示、文字與張數，說明完整
+        case compact     // 按鈕只有文字，說明不寫模式的「中等」那一段
+        case iconsOnly   // 按鈕只有圖示（文字在滑鼠提示與輔助使用的說明裡）
+    }
+
     /// 收到畫面時的資訊列：左邊是呼號與說明，右邊是「儲存影片」「儲存圖片」。
-    private func received(_ frame: AppModel.ReceivedFrame, sequence count: Int, compact: Bool) -> some View {
+    private func received(_ frame: AppModel.ReceivedFrame, sequence count: Int, level: InfoBarLevel) -> some View {
         HStack(spacing: 12) {
-            title(frame.callsign.isEmpty ? "—" : frame.callsign, meta(frame, compact: compact))
+            title(frame.callsign.isEmpty ? "—" : frame.callsign, meta(frame, compact: level != .full))
             Spacer(minLength: 0)
             HStack(spacing: 8) {
-                saveVideoButton(count: count, compact: compact)
+                saveVideoButton(count: count, level: level)
                 Button {
                     model.saveDisplayedFrame()
                 } label: {
-                    saveLabel(compact: compact)
+                    saveLabel(level: level)
                 }
                 .buttonStyle(SmallButtonStyle())
+                .help(level == .iconsOnly ? L("儲存圖片") : "")
+                .accessibilityLabel(L("儲存圖片"))
             }
             .fixedSize()   // 還是放不下時，縮短的是左邊的說明，不是按鈕
         }
     }
 
-    private func saveLabel(compact: Bool) -> some View {
+    private func saveLabel(level: InfoBarLevel) -> some View {
         HStack(spacing: 6) {
-            if !compact { Icon(kind: .download, width: 14, height: 14) }
-            Text("儲存圖片")
+            if level != .compact { Icon(kind: .download, width: 14, height: 14) }
+            if level != .iconsOnly { Text(L("儲存圖片")) }
         }
     }
 
     /// 「儲存影片」：把主畫面這一張所在的那一段（同一個呼號、一張接一張，空檔不到 10 秒）串成一個 .mp4。只有一張時不能按。
-    @ViewBuilder private func saveVideoButton(count: Int, compact: Bool) -> some View {
+    @ViewBuilder private func saveVideoButton(count: Int, level: InfoBarLevel) -> some View {
         let enabled = count >= 2 && !model.exportingVideo
         if enabled {
             Button {
                 model.saveDisplayedSequence()
             } label: {
-                videoLabel(count: count, enabled: true, compact: compact)
+                videoLabel(count: count, enabled: true, level: level)
             }
             .buttonStyle(SmallButtonStyle())
-            .help("把這一段連續收到的 \(count) 張串成影片檔（.mp4）：同一個呼號，兩張之間的空檔不到 \(Int(AppModel.sequenceGapSeconds)) 秒")
-            .accessibilityLabel("儲存影片，這一段有 \(count) 張")
+            .help(L("把這一段連續收到的 %d 張串成影片檔（.mp4）：同一個呼號，兩張之間的空檔不到 %d 秒", count, Int(AppModel.sequenceGapSeconds)))
+            .accessibilityLabel(L("儲存影片，這一段有 %d 張", count))
         } else {
-            videoLabel(count: count, enabled: false, compact: compact)
+            videoLabel(count: count, enabled: false, level: level)
                 .modifier(DisabledSmallButton())
-                .help(model.exportingVideo ? "正在存影片檔" : "這一張前後沒有連續收到的畫面：同一個呼號、空檔不到 \(Int(AppModel.sequenceGapSeconds)) 秒的才能串成影片")
-                .accessibilityLabel(model.exportingVideo ? "正在儲存影片" : "儲存影片：這一段只有一張，不能存")
+                .help(model.exportingVideo ? L("正在存影片檔") : L("這一張前後沒有連續收到的畫面：同一個呼號、空檔不到 %d 秒的才能串成影片", Int(AppModel.sequenceGapSeconds)))
+                .accessibilityLabel(model.exportingVideo ? L("正在儲存影片") : L("儲存影片：這一段只有一張，不能存"))
         }
     }
 
-    private func videoLabel(count: Int, enabled: Bool, compact: Bool) -> some View {
+    private func videoLabel(count: Int, enabled: Bool, level: InfoBarLevel) -> some View {
         HStack(spacing: 6) {
-            if !compact { Icon(kind: .videoFile, width: 14, height: 14, lineWidth: 1.4, color: enabled ? nil : Theme.tertiary) }
-            Text(model.exportingVideo ? "儲存中…" : "儲存影片")
-            if enabled, !compact { Text("\(count) 張").font(Theme.mono(12)).foregroundColor(Theme.secondary) }
+            if level != .compact { Icon(kind: .videoFile, width: 14, height: 14, lineWidth: 1.4, color: enabled ? nil : Theme.tertiary) }
+            if level != .iconsOnly { Text(model.exportingVideo ? L("儲存中…") : L("儲存影片")) }
+            if enabled, level == .full { Text(L("%d 張", count)).font(Theme.mono(12)).foregroundColor(Theme.secondary) }
         }
     }
 
@@ -180,19 +195,19 @@ struct PictureSection: View {
 
     private func meta(_ frame: AppModel.ReceivedFrame, compact: Bool) -> String {
         let mode = Modes.find(frame.modeID)
-        var parts = [(compact ? mode?.name : mode?.label) ?? "模式 \(frame.modeID)"]
-        if frame.sequence >= 0 { parts.append("第 \(frame.sequence + 1) 張") }
+        var parts = [(compact ? mode?.name : mode?.label) ?? L("模式 %d", frame.modeID)]
+        if frame.sequence >= 0 { parts.append(L("第 %d 張", frame.sequence + 1)) }
         parts.append(AppModel.timeText(frame.time))
         return parts.joined(separator: " · ")
     }
 
     private var onAirMeta: String {
         var parts = [model.txMode?.label ?? ""]
-        if model.txFrameNumber > 0 { parts.append("第 \(model.txFrameNumber) 張") }
+        if model.txFrameNumber > 0 { parts.append(L("第 %d 張", model.txFrameNumber)) }
         return parts.joined(separator: " · ")
     }
 
-    private var onAirNote: String { model.txPreview == nil ? "" : "對方收到的樣子（沒有雜訊時）" }
+    private var onAirNote: String { model.txPreview == nil ? "" : L("對方收到的樣子（沒有雜訊時）") }
 }
 
 /// 停用的小按鈕外觀（尚未收到畫面時的「儲存圖片」）。
@@ -223,19 +238,19 @@ struct StatusPanel: View {
     private var dash: some View { Text("—").foregroundColor(Theme.tertiary) }
 
     @ViewBuilder private var receiving: some View {
-        header("訊號") {
+        header(L("訊號")) {
             if model.synced {
                 Circle().fill(Theme.rx).frame(width: 6, height: 6)
-                Text("已同步").foregroundColor(Theme.rx)
+                Text(L("已同步")).foregroundColor(Theme.rx)
             } else {
                 Circle().strokeBorder(Theme.secondary, lineWidth: 1).frame(width: 6, height: 6)
-                Text("搜尋同步訊號中").foregroundColor(Theme.secondary)
+                Text(L("搜尋同步訊號中")).foregroundColor(Theme.secondary)
             }
         }
-        row("訊雜比") {
+        row(L("訊雜比")) {
             if let snr = model.snrDb { Text(AppModel.dbText(snr)).font(Theme.mono(15, .semibold)) } else { dash }
         }
-        row("頻率偏移") {
+        row(L("頻率偏移")) {
             if let offset = model.offsetHz {
                 let value = Int(offset.rounded())
                 Text((value < 0 ? "−\(-value)" : "+\(value)") + " Hz").font(Theme.mono(13))
@@ -243,14 +258,14 @@ struct StatusPanel: View {
                 dash
             }
         }
-        row("模式（自動偵測）") {
-            if let id = model.rxModeID { Text(Modes.find(id)?.label ?? "模式 \(id)") } else { dash }
+        row(L("模式（自動偵測）")) {
+            if let id = model.rxModeID { Text(Modes.find(id)?.label ?? L("模式 %d", id)) } else { dash }
         }
-        row("上一張") {
+        row(L("上一張")) {
             switch model.lastResult {
-            case .ok: Text("解碼成功")
-            case .failed: Text("解碼失敗").foregroundColor(Theme.tx)
-            case .modelMissing: Text("模型不符").foregroundColor(Theme.tx)
+            case .ok: Text(L("解碼成功"))
+            case .failed: Text(L("解碼失敗")).foregroundColor(Theme.tx)
+            case .modelMissing: Text(L("模型不符")).foregroundColor(Theme.tx)
             case .none: dash
             }
         }
@@ -258,20 +273,20 @@ struct StatusPanel: View {
     }
 
     @ViewBuilder private var transmitting: some View {
-        header("發射") {
+        header(L("發射")) {
             Circle().fill(Theme.tx).frame(width: 6, height: 6)
             Text(pttText).foregroundColor(Theme.tx)
         }
-        row("已發射") { Text(AppModel.clock(model.txElapsed)).font(Theme.mono(15, .semibold)) }
-        row("已送出") { Text("\(model.txFramesSent) 張") }
-        row("模式") { Text(model.txMode?.label ?? "") }
-        row("接收") { Text("暫停，停止發射後自動恢復") }
+        row(L("已發射")) { Text(AppModel.clock(model.txElapsed)).font(Theme.mono(15, .semibold)) }
+        row(L("已送出")) { Text(L("%d 張", model.txFramesSent)) }
+        row(L("模式")) { Text(model.txMode?.label ?? "") }
+        row(L("接收")) { Text(L("暫停，停止發射後自動恢復")) }
         Spacer(minLength: 0)
     }
 
     private var pttText: String {
-        if model.txPhase == .starting { return "準備中" }
-        return model.settings.pttMode == .none ? "發射中（VOX）" : "PTT 已按下"
+        if model.txPhase == .starting { return L("準備中") }
+        return model.settings.pttMode == .none ? L("發射中（VOX）") : L("PTT 已按下")
     }
 
     private func header<Indicator: View>(_ title: String, @ViewBuilder indicator: () -> Indicator) -> some View {
@@ -286,9 +301,10 @@ struct StatusPanel: View {
     /// 面板比四列需要的高時，各列平分多出來的高度（每列最高 rowMaximum），不會全部空在底下。
     private func row<Value: View>(_ label: String, @ViewBuilder value: () -> Value) -> some View {
         HStack(spacing: 12) {
-            Text(label).font(Theme.ui(12)).foregroundColor(Theme.secondary)
+            // 別的語言的名稱比較長：寧可字縮小一點，也不要折成兩行把這一列撐高
+            Text(label).font(Theme.ui(12)).foregroundColor(Theme.secondary).lineLimit(1).minimumScaleFactor(0.8)
             Spacer(minLength: 0)
-            value().lineLimit(1)
+            value().lineLimit(1).layoutPriority(1)
         }
         .frame(minHeight: StatusPanel.rowMinimum, maxHeight: StatusPanel.rowMaximum)
         .overlay(alignment: .top) { Rectangle().fill(Theme.separator).frame(height: 1) }
@@ -316,10 +332,10 @@ struct RecentPanel: View {
         let rows: CGFloat = model.history.count > 3 ? 2 : 1
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                SectionTitle("最近收到")
+                SectionTitle(L("最近收到"))
                 if model.history.count > RecentPanel.visibleCount {
                     // 捲軸會佔掉縮圖的寬度，所以不顯示；還有更多張這件事寫在標題旁邊
-                    Text("共 \(model.history.count) 張，往下捲看更早的")
+                    Text(L("共 %d 張，往下捲看更早的", model.history.count))
                         .font(Theme.ui(12))
                         .foregroundColor(Theme.tertiary)
                         .lineLimit(1)
@@ -327,7 +343,7 @@ struct RecentPanel: View {
                 }
             }
             if model.history.isEmpty {
-                Text("收到的畫面會依時間排在這裡")
+                Text(L("收到的畫面會依時間排在這裡"))
                     .font(Theme.ui(12))
                     .foregroundColor(Theme.tertiary)
                     .multilineTextAlignment(.center)
@@ -372,7 +388,8 @@ struct RecentPanel: View {
                 HStack(spacing: 0) {
                     Text(AppModel.timeText(frame.time)).font(Theme.mono(11)).layoutPriority(1)
                     Spacer(minLength: 2)
-                    Text(Modes.find(frame.modeID)?.name ?? "").font(Theme.ui(11))
+                    // 縮圖很窄的時候（視窗縮到最小）放不下「模式 13」，只寫編號
+                    Text(thumbnailWidth < 90 ? "\(frame.modeID)" : (Modes.find(frame.modeID)?.name ?? "")).font(Theme.ui(11))
                 }
                 .foregroundColor(Theme.secondary)
                 .lineLimit(1)
@@ -382,7 +399,13 @@ struct RecentPanel: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("\(AppModel.timeText(frame.time)) 收到的畫面，\(Modes.find(frame.modeID)?.name ?? "")，訊雜比 \(AppModel.snrText(frame.snrDb))\(shown ? "，目前顯示中" : "")")
+        .accessibilityLabel(thumbnailDescription(frame, shown: shown))
+    }
+
+    /// 給螢幕閱讀器的說明：什麼時候收到的、哪個模式、訊雜比，以及是不是主畫面顯示的那一張。
+    private func thumbnailDescription(_ frame: AppModel.ReceivedFrame, shown: Bool) -> String {
+        let time = AppModel.timeText(frame.time), mode = Modes.find(frame.modeID)?.name ?? "", snr = AppModel.snrText(frame.snrDb)
+        return shown ? L("%@ 收到的畫面，%@，訊雜比 %@，目前顯示中", time, mode, snr) : L("%@ 收到的畫面，%@，訊雜比 %@", time, mode, snr)
     }
 }
 
@@ -395,15 +418,15 @@ struct SpectrumSection: View {
         VStack(spacing: 8) {
             HStack(spacing: 16) {
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    SectionTitle("音訊頻譜 0–3 kHz")
-                    Text(onAir ? "發射中顯示送出的訊號" : "白線之間是訊號頻帶 352–2648 Hz")
+                    SectionTitle(L("音訊頻譜 0–3 kHz"))
+                    Text(onAir ? L("發射中顯示送出的訊號") : L("白線之間是訊號頻帶 352–2648 Hz"))
                         .font(Theme.ui(12))
                         .foregroundColor(Theme.tertiary)
                         .lineLimit(1)
                 }
                 Spacer(minLength: 0)
                 HStack(spacing: 8) {
-                    Text(onAir ? "輸出音量" : "輸入音量")
+                    Text(onAir ? L("輸出音量") : L("輸入音量"))
                     if onAir {
                         LevelBar(fraction: AppModel.levelFraction(model.settings.outputLevelDb, floor: -40), color: Theme.tx).frame(width: 120)
                         Text(AppModel.dbText(model.settings.outputLevelDb)).font(Theme.mono(12)).foregroundColor(Theme.text)
@@ -439,7 +462,7 @@ struct WaterfallView: View {
                         .resizable()
                         .interpolation(.low)
                         .frame(width: geo.size.width, height: CGFloat(image.height))
-                        .accessibilityLabel("音訊的頻譜瀑布圖，最新的在上方")
+                        .accessibilityLabel(L("音訊的頻譜瀑布圖，最新的在上方"))
                 }
                 // 訊號頻帶的兩條邊界
                 ForEach([NBTV.bandLowHz, NBTV.bandHighHz], id: \.self) { hz in

@@ -7,11 +7,11 @@ import SwiftUI
 /// 視窗上的名稱取自 bundle，才看得出眼前這個視窗是哪一個 app 的。
 enum AppIdentity {
     /// 顯示在主視窗頂列的名稱：「短波 NBTV」或「短波 NBTV 2」
-    static let name = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "短波 NBTV"
+    static let name = L10n.appName ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "短波 NBTV"
     /// 第二個 app 才有的編號（「2」）；一般的 app 沒有
     static let instance = Bundle.main.object(forInfoDictionaryKey: "NBTVInstance") as? String
     /// 設定視窗的標題：第二個 app 要標明是誰的設定
-    static let settingsTitle = instance == nil ? "設定" : "設定 — \(name)"
+    static let settingsTitle = instance == nil ? L("設定") : L("設定 — %@", name)
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -97,7 +97,7 @@ private struct OpenSettingsCommand: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        Button("設定…") { openWindow(id: "settings") }
+        Button(L("設定…")) { openWindow(id: "settings") }
             .keyboardShortcut(",", modifiers: .command)
     }
 }
@@ -241,7 +241,7 @@ enum DebugOptions {
             log("縮放方式改成 \(value)")
             model.settings.scaleMode = ScaleMode(rawValue: value) ?? .fill
         case "settings":
-            let item = NSApp.mainMenu?.items.first?.submenu?.items.first { $0.title.hasPrefix("設定") }
+            let item = NSApp.mainMenu?.items.first?.submenu?.items.first { $0.title.hasPrefix(L("設定")) }
             if let item, let action = item.action {
                 log("執行功能表「\(item.title)」：\(NSApp.sendAction(action, to: item.target, from: item) ? "成功" : "失敗")")
             } else {
@@ -390,6 +390,10 @@ enum DebugOptions {
         case .transmitting: phase = "發射中"
         case .stopping: phase = "結束發射中"
         }
+        // 介面的語言：這個 app 自己的文字用哪一種、系統替這個 bundle 挑的是哪一種，以及功能表列（系統畫的那幾項也在裡面）
+        log("語言：介面用 \(L10n.language)，系統替這個 app 挑的是 \(Bundle.main.preferredLocalizations.first ?? "?")，名稱「\(AppIdentity.name)」，"
+            + "功能表：\((NSApp.mainMenu?.items.map(\.title) ?? []).joined(separator: "、"))，"
+            + "第一個功能表裡：\((NSApp.mainMenu?.items.first?.submenu?.items.map(\.title).filter { !$0.isEmpty } ?? []).joined(separator: "、"))")
         log("設定：發射模式 \(model.settings.txModeID)，縮放 \(model.settings.scaleMode.rawValue)，來源 \(model.settings.sourceKind.rawValue)，"
             + "PTT \(model.settings.pttSummary)，輸出音量 \(Int(model.settings.outputLevelDb)) dB，循環播放 \(model.settings.loopVideo)，"
             + "畫布 \(model.settings.canvasStyle.map { "「\($0.text)」（\($0.position.rawValue)）" } ?? "關")，"

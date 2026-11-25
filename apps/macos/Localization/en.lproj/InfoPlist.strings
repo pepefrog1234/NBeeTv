@@ -1,0 +1,5 @@
+// 系統顯示的文字：app 的名稱，以及詢問相機、麥克風權限時說明用途的那一句。
+
+"CFBundleDisplayName" = "HF NBTV";
+"NSCameraUsageDescription" = "The camera picture is used as the transmit source: each frame sent is a snapshot taken at that moment, scaled to 96×72.";
+"NSMicrophoneUsageDescription" = "Receiving requires reading the audio input device (the sound coming from the radio) to decode pictures.";
