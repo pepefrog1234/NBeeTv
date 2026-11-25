@@ -1,0 +1,103 @@
+// 音訊裝置（SDL3）：列出裝置、從指定的裝置收音、把排好的取樣送到指定的裝置。對應 macOS 版的 AudioDevices.swift 與 AudioIO.swift。
+// 和核心之間一律是 48 kHz、單聲道、float；裝置自己的格式與取樣率由 SDL 轉換。
+#pragma once
+
+#include <SDL3/SDL.h>
+
+#include <atomic>
+#include <cstdint>
+#include <functional>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace nbtvgui {
+
+struct AudioDevice {
+    std::string name;
+    SDL_AudioDeviceID id = 0;   // 只在這一次列出來的結果裡有效；設定裡記的是名稱
+};
+
+/// 系統上的音訊裝置。要先 SDL_InitSubSystem(SDL_INIT_AUDIO)。
+std::vector<AudioDevice> audio_inputs();
+std::vector<AudioDevice> audio_outputs();
+
+/// 設定裡記的那個裝置。name 是空字串表示用系統預設的；指定的名稱現在不在（被拔掉了）時回傳空的，
+/// 不會改用別的裝置——發射的聲音送錯地方比送不出去糟。
+std::optional<AudioDevice> resolve_audio_device(const std::string& name, bool input);
+
+/// 從一個輸入裝置收音。多聲道的裝置只取第一個聲道。
+class AudioInput {
+public:
+    ~AudioInput();
+
+    /// 收到的取樣（48 kHz）。在 SDL 的音訊執行緒上呼叫，不要在裡面做花時間的事。開始之前設定好。
+    std::function<void(std::vector<float>)> on_samples;
+
+    bool start(SDL_AudioDeviceID device, std::string* error);
+    void stop();
+    bool running() const { return stream_ != nullptr; }
+
+private:
+    static void SDLCALL callback(void* userdata, SDL_AudioStream* stream, int additional_amount, int total_amount);
+    SDL_AudioStream* stream_ = nullptr;
+    int channels_ = 1;
+    std::vector<float> scratch_;
+};
+
+/// 發射用的輸出：外面把取樣排進佇列（enqueue），裝置來取多少就給多少；佇列空了給靜音。
+/// 「位置」都是從這一次 start 算起、排進佇列的第幾個取樣。
+class AudioOutput {
+public:
+    explicit AudioOutput(double queue_seconds);
+    ~AudioOutput();
+
+    /// 輸出音量（線性的倍數），隨時可以改，下一批取樣就生效。
+    std::atomic<float> gain{1.0f};
+
+    // 測試用：不開音訊裝置，改由一條執行緒照實際的時間把取樣取走。取走的取樣交給 simulated_sink（在那條執行緒上呼叫）。
+    // simulated_stall_after：取了這麼多秒之後就不再取，用來重現輸出裝置在發射中沒有回應。
+    bool simulated = false;
+    std::function<void(const std::vector<float>&)> simulated_sink;
+    std::optional<double> simulated_stall_after;
+
+    /// 開始輸出：佇列與計數都清掉。simulated 時 device 不用。
+    bool start(SDL_AudioDeviceID device, std::string* error);
+    void stop();
+    bool running() const { return stream_ != nullptr || simulating_.load(); }
+
+    /// 排進佇列。放不下時回傳 false（什麼都沒排）。
+    bool enqueue(const float* samples, std::size_t count);
+    bool enqueue(const std::vector<float>& samples) { return enqueue(samples.data(), samples.size()); }
+    /// 把位置 from 之後排著的都拿掉；已經播到 from 之後了就不動、回傳 false。
+    bool discard_queued(std::int64_t from);
+
+    std::int64_t played_samples() const;    // 佇列裡的取樣已經被裝置取走幾個
+    std::int64_t queued_samples() const;    // 還排著幾個
+    std::int64_t rendered_frames() const;   // 裝置總共來取了幾格（含靜音）；不再增加就表示裝置沒有回應了
+    std::int64_t silent_frames() const;     // 其中有幾格是佇列空了補的靜音
+    int underruns() const;                  // 佇列從有東西變成空的次數
+
+private:
+    static void SDLCALL callback(void* userdata, SDL_AudioStream* stream, int additional_amount, int total_amount);
+    /// 取 count 個取樣到 out（乘上音量）；不夠的補靜音。
+    void render(float* out, std::size_t count);
+    void reset();
+
+    const std::size_t capacity_;
+    mutable std::mutex mutex_;
+    std::vector<float> ring_;
+    std::int64_t enqueued_ = 0;
+    std::int64_t played_ = 0;
+    std::int64_t rendered_ = 0;
+    std::int64_t silent_ = 0;
+    int underruns_ = 0;
+    SDL_AudioStream* stream_ = nullptr;
+    std::vector<float> scratch_;
+    std::thread simulator_;
+    std::atomic<bool> simulating_{false};
+};
+
+}  // namespace nbtvgui

@@ -12,6 +12,11 @@ function(nbtv_add_tool name)
     # 命令列參數與檔名一律當成 UTF-8，路徑裡有中文也開得了（說明在那個檔案裡）
     target_sources(${name} PRIVATE ${PROJECT_SOURCE_DIR}/tools/windows/utf8.manifest)
   endif()
+  if(NBTV_STATIC_TOOLS AND NOT MSVC AND NOT APPLE)
+    # 整個靜態連結：不挑發行版與 glibc 的版本（GitHub 上 Linux 的下載包就是這樣做的）。
+    # 只有這幾個工具這樣連；桌面 app 要在執行時載入系統的視窗、音訊函式庫，不能靜態連結。
+    target_link_options(${name} PRIVATE -static)
+  endif()
 endfunction()
 
 nbtv_add_tool(nbtv-tx nbtv_tx.cpp)
