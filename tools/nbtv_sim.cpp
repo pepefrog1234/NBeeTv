@@ -43,6 +43,7 @@ double psnr(const std::vector<std::uint8_t>& a, const std::vector<std::uint8_t>&
 }
 
 bool g_noise_map = true;
+bool g_follow = true;
 std::shared_ptr<const LearnedCodec> g_model;  // 載入後不再改變，各執行緒共用
 std::shared_ptr<const LearnedMerge> g_merge;  // 不是空的：接收機把最近幾幀合起來解
 bool g_learned_median = true, g_learned_attenuate = true, g_learned_floor = true;
@@ -74,6 +75,7 @@ Totals run_round(const Mode& mode, sim::ChannelParams params, int burst, const s
 
     Receiver rx;
     rx.tuning().noise_map = g_noise_map;
+    rx.tuning().follow = g_follow;
     rx.tuning().learned_median_snr = g_learned_median;
     rx.tuning().learned_attenuate = g_learned_attenuate;
     rx.tuning().learned_floor = g_learned_floor;
@@ -103,8 +105,9 @@ Totals run_round(const Mode& mode, sim::ChannelParams params, int burst, const s
 }  // namespace
 
 int main(int argc, char** argv) {
-    const Args args(argc, argv, {"help", "flat-noise", "learned-mean", "learned-plain", "learned-nofloor", "merge"});
+    const Args args(argc, argv, {"help", "flat-noise", "no-follow", "learned-mean", "learned-plain", "learned-nofloor", "merge"});
     g_noise_map = !args.has("flat-noise");
+    g_follow = !args.has("no-follow");
     g_learned_median = !args.has("learned-mean");
     g_learned_attenuate = !args.has("learned-plain");
     g_learned_floor = !args.has("learned-nofloor");
@@ -128,6 +131,7 @@ int main(int argc, char** argv) {
             "                    --burst 給大一點才看得出來）；--merge-file 檔名 指定合併用的權重檔\n"
             "  --papr dB         包絡峰均比目標（0 用預設值，負值不削波）\n"
             "  --flat-noise      接收機不用逐符號、逐載波的雜訊估計（比較用）\n"
+            "  --no-follow       接收機不照幀的節拍接著收：每一幀都要靠自己的標頭或前導符號（比較用；訊號弱時差很多）\n"
             "  --threads N       執行緒數（預設用全部核心）\n"
             "  --seed N          亂數種子\n");
         return 0;

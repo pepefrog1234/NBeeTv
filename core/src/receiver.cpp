@@ -38,6 +38,27 @@ constexpr double kMaxS1Sparsity = 0.8;    // S1 的能量集中在少數載波�
 constexpr int kVerifySymbols = 12;    // 捕獲後用酬載開頭這麼多個符號的導頻做驗證
 constexpr int kPresenceSymbols = 36;  // 沒確認到前導符號的幀：收到這麼多個酬載符號後，檢查導頻是否還在
 constexpr double kPresenceThreshold = 0.2;
+// 照節拍接著收（RxTuning::follow）：前導符號沒確認到、標頭也沒解出來的幀，要整幀的導頻相干值超過這個門檻、
+// S1 也和目前的模式對得上，才當成一幀。導頻相干值在有訊號時接近導頻格的 S/(S+N)（3 kHz 訊雜比 −6 dB 約 0.36、
+// −4 dB 約 0.47），只有雜訊時約 0.08（最短的模式 14；幀愈長愈小），比「導頻在不在」的門檻嚴。
+// 這個門檻要過兩次：全部的導頻一次，不算能量最強的 3 個載波再一次（見 process_frame；後者擋的是強度中等的單頻載波）。
+constexpr double kFollowThreshold = 0.3;
+// 導頻的能量集中在少數幾個載波上（見 pilot_spread）：頻帶內有一個強的單頻載波。載波在相隔幾個符號之間本來就是相干的，
+// 漏到鄰近幾格的部分也是，光看導頻的相干值和導頻分不出來：發射結束後只剩雜訊與一個 1200 Hz 的載波時，相干值有 0.53，
+// 最強的 3 個載波佔了 83%。真正的訊號能量分散在整個頻帶，最強的 3 個載波在白雜訊下佔 13–24%、
+// 衰落通道（差通道、中等、慢衰落）最多 29%。超過這個比例時，標頭沒解出來的幀不能只憑導頻就算數：
+// 靠前導符號的要另外核對 S1（kCarrierS1），照節拍接著收的不接。
+constexpr double kPilotTopShare = 0.5;
+// S1 的核對（見 s1_agreement）：目前模式的相關值至少要這麼高，而且別的模式不能比它高出 kFollowS1Margin 以上。
+// 有 S1 而且是目前的模式時，白雜訊下 3 kHz 訊雜比 −6 dB 平均 0.42、−4 dB 0.52、0 dB 0.73（標準差 0.07–0.12；
+// 差通道 0.17–0.18），這時「其餘最高的」約是它的四成（序列在奇數載波上最多有四成相像）。
+// 那裡不是 S1（酬載、雜訊）時在 0 附近、標準差約 0.15（只用 21 個奇數載波）。
+// 模擬裡真正的幀通過的比例：白雜訊 −4 dB 以上 99–100%、−6 dB 是 94%；差通道 −6 到 0 dB 是 89–98%。
+constexpr double kFollowS1 = 0.2;
+constexpr double kFollowS1Margin = 0.1;
+// 導頻的能量集中（有強的載波）時，靠前導符號確認的幀要 S1 的相關值到這麼高才算數：真的幀就算疊著比它強的載波，
+// 0 dB 以上也有 0.6–0.7；只有載波與雜訊時在 0 附近（標準差約 0.15），超過的機會約 1%。
+constexpr double kCarrierS1 = 0.35;
 constexpr double kCfoRedoHz = 0.2;    // 殘餘頻偏超過這個值就重新解調
 
 constexpr std::int64_t kBufferSlack = 1 << 15;
@@ -121,7 +142,8 @@ float pilot_clip_level(const SymbolGrid& grid, int row, int j) {
 // 每一對符號（第 j 個與第 j+3 個）先各自算出正規化的相關值，再對所有的符號對取平均：每一對的份量相同，
 // 不會被少數幾個特別強的符號左右（例如檢查的範圍裡大半是雜訊、最後幾個符號卻是另一次發射的開頭），
 // 完全沒有訊號的符號（取樣全是 0 的靜音）也照樣算一對、相關值是 0。
-double pilot_coherence(const SymbolGrid& grid, int first, int last) {
+// skip 不是空指標時，那幾個載波不算（見 PilotSpread：排除能量最強的幾個載波之後仍然相干，才不是單頻載波造成的）。
+double pilot_coherence(const SymbolGrid& grid, int first, int last, const std::array<int, 3>* skip = nullptr) {
     cd total(0, 0);
     int pairs = 0;
     for (int j = first; j + 3 < last; ++j) {
@@ -131,6 +153,7 @@ double pilot_coherence(const SymbolGrid& grid, int first, int last) {
         double ea = 0.0, eb = 0.0;
         for (int c = 0; c < kCarriers; ++c) {
             if (!is_pilot(j, kFirstBin + c)) continue;  // 第 j 與第 j+3 個符號的導頻在同樣的格子上
+            if (skip != nullptr && (c == (*skip)[0] || c == (*skip)[1] || c == (*skip)[2])) continue;
             const cd a = limited(grid.at(ra, c), la);
             const cd b = limited(grid.at(rb, c), lb);
             acc += b * std::conj(a);
@@ -141,6 +164,89 @@ double pilot_coherence(const SymbolGrid& grid, int first, int last) {
         if (ea > 0.0 && eb > 0.0) total += acc / std::sqrt(ea * eb);
     }
     return pairs > 0 ? std::abs(total) / pairs : 0.0;
+}
+
+// 導頻的能量有多集中：25 個有導頻的載波（偶數格）各自把整幀的導頻能量加起來，找出最強的 3 個。
+struct PilotSpread {
+    double top_share = 1.0;                // 最強的 3 個載波佔全部導頻能量的比例
+    std::array<int, 3> top = {-1, -1, -1};  // 它們的載波編號（0..48）
+};
+
+PilotSpread pilot_spread(const SymbolGrid& grid, int payload_symbols) {
+    constexpr int kEvenCarriers = (kCarriers + 1) / 2;
+    std::array<double, kEvenCarriers> energy{};
+    double total = 0.0;
+    for (int j = 0; j < payload_symbols; ++j) {
+        for (int c = 0; c < kCarriers; c += 2) {
+            if (!is_pilot(j, kFirstBin + c)) continue;
+            const double e = std::norm(grid.at(j + kPreambleSymbols, c));
+            energy[static_cast<std::size_t>(c / 2)] += e;
+            total += e;
+        }
+    }
+    PilotSpread out;
+    if (total <= 0.0) return out;
+    double sum = 0.0;
+    for (int n = 0; n < 3; ++n) {
+        const int i = static_cast<int>(std::max_element(energy.begin(), energy.end()) - energy.begin());
+        sum += energy[static_cast<std::size_t>(i)];
+        energy[static_cast<std::size_t>(i)] = -1.0;
+        out.top[static_cast<std::size_t>(n)] = 2 * i;
+    }
+    out.top_share = sum / total;
+    return out;
+}
+
+// 這一幀的 S1 是不是目前這個模式的：用整幀估出的通道把 S1 那一列和 16 條 S1 序列逐一做相干相關。
+// own 是目前模式的正規化相關值（訊號乾淨時接近 1；那裡沒有 S1、或只有雜訊時在 0 附近），
+// other 是其餘 15 個編號裡最高的（對方換了模式，或接著來的是別種模式的幀時，它會比 own 高）。
+// 只看奇數載波：偶數載波上的 S1 被通道估測當成已知值用掉了（chanest.cpp），拿來比會偏向目前的模式。
+// 通道用的是緊接在 S1 後面的第一個酬載符號的估計（通道估測只算酬載的列；相隔一個符號，通道幾乎沒有變）。
+// 它是整幀的導頻一起估出來的，所以這比前導符號的判定（check_preamble，只靠 S0、S1 自己）靈敏得多，
+// 前導符號淹在雜訊裡時仍然分得出來。能量最強的 3 個奇數載波不算：單頻載波如果剛好落在奇數格上，導頻幾乎看不到它，
+// 這裡卻整個相關值都由它決定；真正的 S1 各個載波一樣強，少算 3 個幾乎沒有差別。其餘過大的格點同樣先壓到上限（見 kLimitFactor）。
+struct S1Match {
+    double own = 0.0;
+    double other = 0.0;
+    int other_id = -1;
+};
+
+S1Match s1_agreement(const Mode& mode, const SymbolGrid& grid, const ChannelEstimate& est) {
+    constexpr int kOdd = kCarriers / 2;  // 24 個
+    const float level = clip_level(&grid.at(1, 1), kOdd, 2);
+    std::array<float, kOdd> power;
+    for (int i = 0; i < kOdd; ++i) power[static_cast<std::size_t>(i)] = std::norm(grid.at(1, 2 * i + 1));
+    std::array<float, kOdd> sorted = power;
+    std::nth_element(sorted.begin(), sorted.begin() + 2, sorted.end(), std::greater<float>());
+    const float third = sorted[2];  // 第三強的能量：比它強或一樣強的不算（最多 3 個）
+    int skipped = 0;
+    std::array<double, kModeIdCount> sum{};
+    double er = 0.0, eh = 0.0;
+    for (int c = 1; c < kCarriers; c += 2) {
+        if (skipped < 3 && power[static_cast<std::size_t>(c / 2)] >= third) {
+            ++skipped;
+            continue;
+        }
+        const cf r = limited(grid.at(1, c), level);
+        const cf h = est.at(kPreambleSymbols, c);
+        const double a = static_cast<double>(r.real()) * h.real() + static_cast<double>(r.imag()) * h.imag();  // Re(r·h*)
+        er += std::norm(r);
+        eh += std::norm(h);
+        for (int id = 0; id < kModeIdCount; ++id) sum[static_cast<std::size_t>(id)] += s1_value(id, kFirstBin + c) > 0.0f ? a : -a;
+    }
+    S1Match match;
+    if (er <= 0.0 || eh <= 0.0) return match;
+    const double norm = std::sqrt(er * eh);
+    match.own = sum[static_cast<std::size_t>(mode.id)] / norm;
+    for (int id = 0; id < kModeIdCount; ++id) {
+        if (id == mode.id) continue;
+        const double v = sum[static_cast<std::size_t>(id)] / norm;
+        if (match.other_id < 0 || v > match.other) {
+            match.other = v;
+            match.other_id = id;
+        }
+    }
+    return match;
 }
 
 }  // namespace
@@ -161,6 +267,8 @@ void Receiver::reset() {
     snr_valid_ = false;
     sync_quality_ = 0.0;
     last_ok_ = false;
+    last_clear_ = false;
+    follow_misses_ = 0;
     last_complete_ = false;
     unconfirmed_run_ = 0;
     rescan_from_ = 0;
@@ -609,6 +717,8 @@ void Receiver::begin_frame(const Acquisition& found) {
     rescan_from_ = found.t0 + kSymbolSamples;  // 這一幀若沒解出來、也沒有下一幀，就從這個前導符號之後重新搜尋
     unconfirmed_run_ = 0;
     last_ok_ = false;
+    last_clear_ = false;
+    follow_misses_ = 0;
     last_complete_ = false;
     sync_quality_ = found.score;
     frame_evidence_ = found.score;
@@ -777,6 +887,7 @@ void Receiver::process_frame() {
     const Mode& mode = *mode_;
     const int rows = mode.frame_symbols();
     const bool previous_ok = last_ok_;
+    const bool previous_clear = last_clear_;
     const std::int64_t t0_before = t0_;
     const double cfo_before = cfo_;
     // 前導符號確認過的幀處理一次就夠了（見 done_start_）。沒確認到前導符號、只是假設對方還在送的幀不算：
@@ -819,9 +930,18 @@ void Receiver::process_frame() {
     // 幀尾附近如果有很像 S0 的東西還來不及判定（要等後面十幾個符號到齊），這一幀可能在那裡就被別的發射蓋掉了
     const bool late_candidate = (cand_ready_ && cand_metric_ >= kSolidScThreshold) || (peak_active_ && peak_metric_ >= kSolidScThreshold);
     const bool intact = present_throughout && pending_start_ < 0 && !late_candidate;
+    // 導頻的能量是不是分散在整個頻帶：集中在少數幾個載波上的是單頻載波，不是導頻（見 kPilotTopShare）
+    const PilotSpread pilots = (intact || trace_) ? pilot_spread(grid, mode.payload_symbols) : PilotSpread{};
+    const bool spread = pilots.top_share < kPilotTopShare;
+    // 導頻從頭到尾都很清楚：這裡確實有一整幀。門檻比「導頻在不在」高，只有雜訊時幾乎不可能超過。
+    // 相干值不算能量最強的那 3 個載波：強度中等的單頻載波佔不到一半的能量，卻足以把整體的相干值拉過門檻。
+    const bool follow_candidate = tuning_.follow && intact && spread && coherence > kFollowThreshold;
+    const double coherence_rest = (follow_candidate || trace_) ? pilot_coherence(grid, 0, mode.payload_symbols, &pilots.top) : 0.0;
+    const bool clear = follow_candidate && coherence_rest > kFollowThreshold;
     if (trace_) {
-        std::fprintf(stderr, "[rx] 幀 @%lld 模式 %d：頻偏 %+.2f Hz、定時修正 %+.1f、訊雜比 %.1f dB、導頻相干 %.2f\n",
-                     static_cast<long long>(t0_), mode.id, cfo_ * kSampleRate, tau, est.snr_db, coherence);
+        std::fprintf(stderr, "[rx] 幀 @%lld 模式 %d：頻偏 %+.2f Hz、定時修正 %+.1f、訊雜比 %.1f dB、導頻相干 %.2f"
+                             "（最強的 3 個載波佔 %.0f%%，不算它們是 %.2f）\n",
+                     static_cast<long long>(t0_), mode.id, cfo_ * kSampleRate, tau, est.snr_db, coherence, 100.0 * pilots.top_share, coherence_rest);
     }
 
     // 等化資料格
@@ -844,7 +964,8 @@ void Receiver::process_frame() {
     frame.start_sample = t0_;
 
     // 標頭帶著呼號與幀序號；畫面本身不靠標頭，標頭壞了也還原得出來。但只有確定這是一整幀才當成畫面：
-    // 標頭正確，或是前導符號很明確（或緊接在一張好的後面）、從頭到尾都有導頻、中途也沒有出現別的前導符號。
+    // 標頭正確，或是前導符號很明確（或緊接在一張好的後面）、從頭到尾都有導頻（而且不是單頻載波冒充的）、
+    // 中途也沒有出現別的前導符號；或是照幀的節拍接在一幀導頻很清楚的幀後面（見下面）。
     // 否則多半只是雜訊、送到一半就停的幀，或是對到別的訊號上；這時頂多回報「有一幀沒解出來」。
     const LearnedUnpacked l = learned_unpack(mode, cells, noise);
     const bool ok = l.header_ok;
@@ -853,7 +974,27 @@ void Receiver::process_frame() {
         frame.callsign = l.header.callsign_valid ? l.header.callsign : std::string();
         frame.sequence = l.header.sequence;
     }
-    const bool whole = l.header_ok || (confirmed_ && (previous_ok || !tentative()) && intact);
+    // 靠前導符號算數的幀：前導符號確認過、而且很明確或緊接在一張好的後面，從頭到尾都有導頻。
+    const bool by_preamble = !l.header_ok && confirmed_ && (previous_ok || !tentative()) && intact;
+    // 照節拍接著收的候選（RxTuning::follow）：訊號弱時最先撐不住的是標頭與前導符號（3 kHz 訊雜比 −4 dB 時標頭只剩 4% 解得出來），
+    // 畫面其實還解得出來。上一幀的導頻從頭到尾都很清楚、這一幀照幀長接在它後面而且導頻同樣清楚，那麼對方就是還在送。
+    const bool chained = !l.header_ok && !(by_preamble && spread) && previous_clear && clear;
+    // 這兩種情形要再用整幀估出的通道核對 S1 確實是目前這個模式的：
+    //   - 導頻的能量集中在少數幾個載波上（有強的單頻載波）而靠前導符號的幀。只有載波與雜訊的地方，前導符號的分數與導頻的
+    //     相干值都可能被載波騙過（發射結束後多交出一張不存在的畫面）；真的幀就算疊著載波，S1 仍然對得上。門檻取得比較高。
+    //   - 照節拍接著收的幀。對方換了模式、後面緊接著別種模式的幀、或這裡根本不是一幀的開頭時對不上。
+    //     S1 沒對上的那一幀不交出去，但只有一次的話先不放棄，下一幀再看（見下面 last_clear_ 的更新）。
+    const bool suspect = by_preamble && !spread;
+    const S1Match s1 = (chained || suspect || trace_) ? s1_agreement(mode, grid, est) : S1Match{};
+    const bool s1_margin = s1.other - s1.own <= kFollowS1Margin;
+    const bool followed = chained && s1.own >= kFollowS1 && s1_margin;
+    const bool usual = l.header_ok || (by_preamble && (spread || (s1.own >= kCarrierS1 && s1_margin)));
+    if (trace_) {
+        std::fprintf(stderr, "[rx]   S1 的核對：目前的模式 %.2f，其餘最高的是模式 %d 的 %.2f%s\n", s1.own, s1.other_id, s1.other,
+                     chained ? (followed ? "；照節拍接著收，算一幀" : "；照節拍接著收，但 S1 對不上，不算")
+                             : suspect ? (usual ? "；有強的載波，S1 對得上，算一幀" : "；有強的載波，S1 對不上，不算") : "");
+    }
+    const bool whole = usual || followed;
     // 沒有這個模式用的模型，或標頭說對方用的是另一份權重：解出來只會是雜訊，不交出畫面，只回報收到了一幀
     const LearnedCodec* model = models_.find(mode);
     const bool usable = model != nullptr && learned_model_matches(l, *model);
@@ -877,7 +1018,7 @@ void Receiver::process_frame() {
     }
     // 沒有畫面的幀：前導符號確認過、從頭到尾都有導頻、中途也沒有出現別的前導符號，才回報「有一幀沒解出來」。
     // 只有開頭一段有導頻的，是對方送到一半就停了，或是誤認的前導符號剛好落在別人的酬載裡。
-    const bool emit = whole || (confirmed_ && intact);
+    const bool emit = whole || (confirmed_ && intact && spread);  // 有強的載波、S1 又對不上的，多半不是一幀，不回報
 
     if (trace_) std::fprintf(stderr, "[rx]   → 標頭%s、%s\n", ok ? "正確" : "沒解出來", frame.decoded ? "有畫面" : "沒有畫面");
     if (emit) {
@@ -885,8 +1026,25 @@ void Receiver::process_frame() {
         else ++frames_failed_;
         frames_.push_back(std::move(frame));
     }
-    last_ok_ = ok;
+    // 交出去而且導頻很清楚的幀，就算標頭沒解出來，對追蹤來說也和解出來的一樣：對方確實送完了一整幀。
+    const bool solid = whole && clear;
+    last_ok_ = ok || solid;
     last_complete_ = false;
+    // 下一幀能不能照節拍接著收：這一幀的導頻很清楚，而且有來歷——交出去了，或至少前導符號確認過
+    // （剛捕獲、證據還不夠強所以沒交出去的第一幀也算，接下來的幀就可以由它帶出來）。
+    // 接著收的幀如果只是 S1 沒對上，容許一次：可能只是 S1 那個符號剛好衰落；連續兩次就不再接。
+    if (clear && (whole || confirmed_)) {
+        last_clear_ = true;
+        follow_misses_ = 0;
+    } else if (chained && follow_misses_ == 0) {
+        last_clear_ = true;
+        follow_misses_ = 1;
+    } else {
+        last_clear_ = false;
+        follow_misses_ = 0;
+    }
+    // 接著收而交出去的幀沒有確認過前導符號，也算處理過了：之後回頭搜尋時不要再捕獲一次
+    if (solid && !confirmed_) done_start_ = std::max(done_start_, t0_before);
     if (!ok && !present) {
         // 整幀都沒有導頻：這一幀估出來的頻偏與定時只是雜訊，不採用
         t0_ = t0_before;
@@ -896,7 +1054,7 @@ void Receiver::process_frame() {
     // 下一幀緊接在後
     const std::int64_t frame_start = t0_;
     t0_ += mode_->frame_samples();
-    if (ok) {
+    if (ok || solid) {
         // 解出來的這一幀不必再搜尋。不過標頭解得出來不代表對方把整幀送完了：它有重複與迴旋碼保護，
         // 禁得起少掉後面一截。從尾端一段一段往回看，導頻在哪裡消失，就從那裡開始算「還沒看過」，
         // 另一次發射可能就在那之後開始。
@@ -950,6 +1108,9 @@ void Receiver::confirm_next() {
     // 換模式：別的模式的分數明顯比目前的模式高。上一幀沒解出來（或沒送完）的話，要非常確定才算數。
     const double switch_score = last_complete_ ? tuning_.switch_score : 2.0 * tuning_.acquire_score;
     const Mode* const previous_mode = mode_;
+    // 前導符號的位置上像是別的模式（包括模式表裡沒有的編號）：就算沒有確定到可以換過去，
+    // 也不能再假設接下來的是目前這個模式的幀，下面不照節拍接著收。
+    const bool other_mode = chk.mode_id != mode_->id && chk.score >= tuning_.acquire_score && chk.score > 1.3 * chk.score_mode;
     if (chk.mode_id != mode_->id && chk.score >= switch_score && chk.score > 1.3 * chk.score_mode) {
         if (const Mode* other = find_mode(chk.mode_id)) {
             // 對方換了模式
@@ -985,8 +1146,11 @@ void Receiver::confirm_next() {
         start_scan(rescan_from_, t0_ + mode_->frame_samples() - kSymbolSamples);
         return;
     }
-    // 沒看到前導符號：上一幀是好的就再撐一幀（可能只是剛好衰落），否則回去搜尋
-    if (last_ok_ && unconfirmed_run_ == 0) {
+    // 沒看到前導符號。上一幀的導頻從頭到尾都很清楚（last_clear_）的話，對方多半還在送、只是前導符號淹在雜訊裡：
+    // 照幀長繼續收，收到的那一幀要導頻同樣清楚、S1 也對得上才算數（process_frame），所以訊號一停就會停下來，
+    // 不限連續幾幀。上一幀只是標頭解出來了，就只再撐一幀（可能只是剛好衰落）。否則回去搜尋。
+    if (other_mode) last_clear_ = false;
+    if (last_clear_ || (last_ok_ && unconfirmed_run_ == 0)) {
         ++unconfirmed_run_;
         confirmed_ = false;
         presence_checked_ = false;

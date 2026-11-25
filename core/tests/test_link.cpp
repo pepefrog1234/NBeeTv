@@ -2,6 +2,7 @@
 // 這裡看的是接收機本身：捕獲、頻偏與定時、追蹤、兩次發射之間的銜接。各個模式的畫質在 test_learned.cpp。
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <future>
@@ -371,24 +372,26 @@ void test_overlapping_transmissions() {
     std::printf("  兩次發射疊在一起：%d 種情形，%d 種有問題\n", runs, bad);
 }
 
+// 一次「別的模式」的發射：S1 用的是模式表裡沒有的編號，S0 與導頻和我們的一模一樣。
+// 幀長照 payload_symbols，資料格一半的幀放 QPSK（像數位模式）、一半放高斯值（像類比模式）。
+std::vector<float> foreign_burst(int id, int payload_symbols, int frames, Rng& rng) {
+    const Mode fake{id, payload_symbols, 1, 2, 1};  // 只借用幀的算術與 S1 的編號；後三個欄位調變時用不到
+    std::vector<float> signal;
+    for (int i = 0; i < frames; ++i) {
+        std::vector<cf> cells(static_cast<std::size_t>(fake.data_cells()));
+        for (cf& c : cells) {
+            c = i % 2 == 0 ? cf(rng.bit() ? -0.70710678f : 0.70710678f, rng.bit() ? -0.70710678f : 0.70710678f) : cf(rng.cgauss());
+        }
+        const auto frame = ofdm_modulate(fake, cells, kDefaultPaprDb);
+        signal.insert(signal.end(), frame.begin(), frame.end());
+    }
+    return signal;
+}
+
 // 別的模式的幀：S1 用的是模式表裡沒有的編號（0–5、8–10 是已經移除的數位與類比模式用過的，6、7、15 沒有用過）。
 // S0 與導頻和我們的一模一樣，只有 S1 不同。接收機要認得出那不是自己的模式：不同步、不回報任何幀，
 // 也不能因此漏掉緊接著來的、自己認得的發射。
 void test_foreign_modes() {
-    // 一次「別的模式」的發射：幀長照 payload_symbols，資料格一半的幀放 QPSK（像數位模式）、一半放高斯值（像類比模式）
-    auto foreign_burst = [](int id, int payload_symbols, int frames, Rng& rng) {
-        const Mode fake{id, payload_symbols, 1, 2, 1};  // 只借用幀的算術與 S1 的編號；後三個欄位調變時用不到
-        std::vector<float> signal;
-        for (int i = 0; i < frames; ++i) {
-            std::vector<cf> cells(static_cast<std::size_t>(fake.data_cells()));
-            for (cf& c : cells) {
-                c = i % 2 == 0 ? cf(rng.bit() ? -0.70710678f : 0.70710678f, rng.bit() ? -0.70710678f : 0.70710678f) : cf(rng.cgauss());
-            }
-            const auto frame = ofdm_modulate(fake, cells, kDefaultPaprDb);
-            signal.insert(signal.end(), frame.begin(), frame.end());
-        }
-        return signal;
-    };
     const Mode& ours = *find_mode(12);
     const std::vector<float>& own = burst(ours, 2, "N0CALL");
     int runs = 0, bad = 0;
@@ -443,6 +446,166 @@ void test_foreign_modes() {
     std::printf("  別的模式的幀：%d 種情形，%d 種有問題\n", runs, bad);
 }
 
+// 弱訊號下照幀的節拍接著收（RxTuning::follow）。3 kHz 訊雜比 −4 dB 時標頭幾乎都解不出來，前導符號也常常
+// 通不過和捕獲時一樣嚴的檢查，但導頻還很清楚、畫面也解得出來：鎖定之後要一幀一幀接著收下去。
+// 同時不能因此交出不存在的畫面：發射結束之後的雜訊、緊接著來的別種模式的幀、對方換成另一個模式、
+// 頻帶內的單頻載波，都不能變成亂碼。
+//
+// 這裡的「畫面是真的」用位置來認：依幀開頭的取樣編號找出那裡原來送的是哪一張，模式要對、PSNR 要夠高
+// （解錯模式或把雜訊當成一幀，解出來的和原圖無關，只有十來 dB）。
+struct Sent {
+    const Mode* mode;
+    int frames;  // 畫面輪流用三張測試圖（link_util::burst）
+};
+
+struct FollowTally {
+    int genuine = 0;  // 位置、模式、畫面都對得上的畫面
+    int bogus = 0;    // 對不上的畫面（包括落在別種訊號或雜訊上的）
+};
+
+FollowTally run_follow(const std::vector<Sent>& sent, const std::vector<float>& after, int tail, double snr_db, std::uint64_t seed, bool follow,
+                       std::vector<int>* per_part = nullptr, double tone_hz = 0.0, double tone_db = 0.0) {
+    constexpr int kLead = 3000;
+    constexpr double kPsnrFloor = 13.5;
+    std::vector<float> audio(kLead, 0.0f);
+    double power = 0.0;
+    for (const Sent& part : sent) {
+        const std::vector<float>& signal = burst(*part.mode, part.frames, "N0CALL");
+        if (power <= 0.0) power = mean_power(signal);
+        audio.insert(audio.end(), signal.begin(), signal.end());
+    }
+    audio.insert(audio.end(), after.begin(), after.end());
+    audio.insert(audio.end(), static_cast<std::size_t>(tail), 0.0f);
+
+    sim::ChannelParams params;
+    params.snr_db = snr_db;
+    params.add_noise = snr_db < 90.0;
+    params.seed = seed;
+    params.tone_hz = tone_hz;  // 單頻載波從頭到尾都在，功率相對於訊號
+    params.tone_db = tone_db;
+    sim::Channel channel(params, power);
+    std::vector<float> received;
+    channel.process(audio, received);
+
+    Receiver rx;
+    rx.tuning().follow = follow;
+    attach_models(rx);
+    FollowTally tally;
+    if (per_part != nullptr) per_part->assign(sent.size(), 0);
+    for (const RxFrame& f : run_receiver(rx, received)) {
+        if (!f.decoded) continue;
+        bool genuine = false;
+        std::int64_t begin = kLead;
+        for (std::size_t n = 0; n < sent.size() && !genuine; ++n) {
+            const std::int64_t length = sent[n].mode->frame_samples();
+            const double at = static_cast<double>(f.start_sample - begin) / static_cast<double>(length);
+            const long index = std::lround(at);
+            if (index >= 0 && index < sent[n].frames && std::fabs(at - static_cast<double>(index)) < 0.2 && f.mode_id == sent[n].mode->id) {
+                genuine = test_images::psnr(f.rgb, test_images::load(test_images::kNames[index % 3])) > kPsnrFloor;
+                if (genuine && per_part != nullptr) ++(*per_part)[n];
+            }
+            begin += length * sent[n].frames;
+        }
+        ++(genuine ? tally.genuine : tally.bogus);
+    }
+    return tally;
+}
+
+void test_follow() {
+    const Mode& m12 = *find_mode(12);
+    const Mode& m14 = *find_mode(14);
+
+    // 一、連續 16 幀、白雜訊 −4 dB，後面接 8 秒的雜訊。接著收的話幾乎每一幀都交得出來（每次發射的第一幀除外：
+    // 它的前導符號證據還不夠強）；關掉的話每一幀都要重新靠前導符號，只剩兩三成。兩邊都不能多出不存在的畫面。
+    int with = 0, without = 0, bogus = 0;
+    for (std::uint64_t seed : {11u, 12u, 13u}) {
+        const FollowTally on = run_follow({{&m12, 16}}, {}, 12000 * 8, -4.0, seed, true);
+        const FollowTally off = run_follow({{&m12, 16}}, {}, 12000 * 8, -4.0, seed, false);
+        with += on.genuine;
+        without += off.genuine;
+        bogus += on.bogus + off.bogus;
+    }
+    CHECK(with >= 39);            // 48 幀裡至少八成
+    CHECK(without <= with - 15);  // 差距就是這個功能的用處
+    CHECK_EQ(bogus, 0);
+    std::printf("  模式 12、AWGN −4 dB、連續 16 幀 × 3 次：照節拍接著收 %d/48 張，不接著收 %d/48 張，多出的畫面 %d 張\n", with, without, bogus);
+
+    // 最短的幀（模式 14，導頻最少）在 −5 dB 也要接得下去
+    {
+        const FollowTally on = run_follow({{&m14, 16}}, {}, 12000 * 5, -5.0, 21, true);
+        CHECK(on.genuine >= 11);
+        CHECK_EQ(on.bogus, 0);
+        std::printf("  模式 14、AWGN −5 dB、連續 16 幀：%d/16 張，多出的畫面 %d 張\n", on.genuine, on.bogus);
+    }
+
+    // 二、我們的發射後面沒有空檔、緊接著別種模式的發射（S0 與導頻一模一樣，照同樣的節拍來，只有 S1 不同）。
+    // 編號 5 的 S1 在奇數載波上和模式 12 的最像（24 個裡 16 個相同），是最容易混淆的；幀長取和模式 12 相同與不同的各一種。
+    // 我們的每一幀都要收到，別人的幀一張都不能變成畫面。
+    int runs = 0, bad = 0;
+    for (int id : {5, 9}) {
+        CHECK(find_mode(id) == nullptr);
+        for (int payload_symbols : {37, 100}) {
+            for (double snr : {99.0, 6.0, 0.0}) {  // 99：不加雜訊
+                Rng rng(static_cast<std::uint64_t>(2000 + id * 10 + payload_symbols));
+                const std::vector<float> other = foreign_burst(id, payload_symbols, 3, rng);
+                const FollowTally r = run_follow({{&m12, 3}}, other, 12000, snr, static_cast<std::uint64_t>(60 + id), true);
+                const bool ok = r.bogus == 0 && r.genuine >= (snr > 3.0 ? 3 : 2);
+                CHECK(ok);
+                ++runs;
+                if (!ok) {
+                    ++bad;
+                    std::printf("  模式 12 × 3 後面緊接別的模式（編號 %d、%d 個酬載符號、%s）：自己的收到 %d 張、多出 %d 張\n", id, payload_symbols,
+                                snr < 90.0 ? (snr > 3.0 ? "6 dB" : "0 dB") : "無雜訊", r.genuine, r.bogus);
+                }
+            }
+        }
+    }
+    std::printf("  我們的發射後面緊接別的模式：%d 種情形，%d 種有問題\n", runs, bad);
+
+    // 三、對方沒有停、直接換成另一個模式（幀長不同，或幀長相同只差在 S1）。換過去之後的幀也要收到，不能有亂碼。
+    struct Switch {
+        int from, frames_from, to, frames_to;
+        double snr_db;
+        int least;  // 換過去之後至少要收到幾張
+    };
+    for (const Switch& c : {Switch{12, 3, 14, 6, 0.0, 4}, Switch{14, 4, 12, 4, -3.0, 2}, Switch{11, 2, 13, 2, 0.0, 1}}) {
+        std::vector<int> parts;
+        const FollowTally r = run_follow({{find_mode(c.from), c.frames_from}, {find_mode(c.to), c.frames_to}}, {}, 12000, c.snr_db, 70, true, &parts);
+        CHECK_EQ(r.bogus, 0);
+        CHECK(parts[1] >= c.least);
+        std::printf("  模式 %d × %d 直接換成模式 %d × %d（%.0f dB）：收到 %d + %d 張，多出的畫面 %d 張\n", c.from, c.frames_from, c.to, c.frames_to,
+                    c.snr_db, parts[0], parts[1], r.bogus);
+    }
+
+    // 四、頻帶內一直有一個單頻載波（別台的載波、調諧的訊號）。載波在相隔幾個符號之間是相干的，漏到鄰近幾格的部分也是，
+    // 光看導頻的相干值和導頻分不出來；發射結束後只剩載波與雜訊，那裡不能冒出畫面。接收機另外看導頻的能量是不是
+    // 分散在整個頻帶（kPilotTopShare）：集中在少數幾個載波上的，照節拍接著收的不接，靠前導符號的要 S1 對得上才算數。
+    // 少了這一關，下面 1736.25 與 1642.5 Hz 的兩組會多交出一張不存在的畫面（其餘的頻率在別的亂數下也出現過）；
+    // 接著收開或關都要過。
+    struct Carrier {
+        int mode, frames;
+        double snr_db, tone_hz, tone_db;
+    };
+    runs = bad = 0;
+    for (const Carrier& c : {Carrier{12, 3, 10.0, 780.0, -10.0}, Carrier{12, 3, 25.0, 1736.25, -3.0}, Carrier{12, 3, 25.0, 1642.5, -3.0},
+                             Carrier{14, 4, 8.0, 1200.0, -3.0}}) {
+        for (bool follow : {true, false}) {
+            for (std::uint64_t seed : {81u, 82u, 83u}) {
+                const FollowTally r = run_follow({{find_mode(c.mode), c.frames}}, {}, 12000 * 3, c.snr_db, seed, follow, nullptr, c.tone_hz, c.tone_db);
+                const bool ok = r.bogus == 0 && r.genuine == c.frames;
+                CHECK(ok);
+                ++runs;
+                if (!ok) {
+                    ++bad;
+                    std::printf("  模式 %d × %d、%.0f dB，加 %.2f Hz 的載波（%+.0f dB）、%s：收到 %d 張、多出 %d 張\n", c.mode, c.frames, c.snr_db,
+                                c.tone_hz, c.tone_db, follow ? "接著收" : "不接著收", r.genuine, r.bogus);
+                }
+            }
+        }
+    }
+    std::printf("  頻帶內有單頻載波、發射結束後只剩載波與雜訊：%d 種情形，%d 種有問題\n", runs, bad);
+}
+
 }  // namespace
 
 int main() {
@@ -453,6 +616,7 @@ int main() {
     }
     test_overlapping_transmissions();
     test_foreign_modes();
+    test_follow();
     test_back_to_back();
     test_interrupted_transmission();
     test_weak_signal();
