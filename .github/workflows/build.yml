@@ -103,30 +103,47 @@ jobs:
       - name: 測試
         run: ctest --test-dir build -C Release --output-on-failure --parallel 4 --timeout 2400
 
+      # 做出下載包：先裝到一個目錄，再壓縮。接下來的檢查都對著「壓縮檔解開之後」的那一份做，
+      # 也就是使用者真正會拿到的東西。
       - name: 打包
-        run: cmake --install build --config Release --prefix "dist/$PACKAGE"
-
-      # 下載包的名稱說是哪一種處理器，裡面的執行檔就要真的是那一種。
-      - name: 確認執行檔是給這個平台的
         run: |
-          exe="dist/$PACKAGE/nbtv-rx"
-          [ "$RUNNER_OS" = Windows ] && exe="$exe.exe"
-          file "$exe"
-          file "$exe" | grep -i -E -q "${{ matrix.file_says }}"
+          cmake --install build --config Release --prefix "dist/$PACKAGE"
+          cd dist
+          if [ "$RUNNER_OS" = Windows ]; then
+            cmake -E tar cf "$PACKAGE.zip" --format=zip "$PACKAGE"
+          else
+            tar -czf "$PACKAGE.tar.gz" "$PACKAGE"
+          fi
+          rm -rf "$PACKAGE"
+          if [ "$RUNNER_OS" = macOS ]; then
+            ditto -c -k --keepParent ../build-app/apps/macos/NBTV.app "$PACKAGE-app.zip"
+          fi
+          ls -l
 
-      # 把下載包搬到別的目錄，並且把專案自己的 models/ 藏起來：這時包裡的工具只找得到自己旁邊的權重檔。
+      # 把壓縮檔解開到別的目錄，並且把專案自己的 models/ 藏起來：這時工具只找得到自己旁邊的權重檔。
+      # 下載包的名稱說是哪一種處理器，裡面的執行檔就要真的是那一種（Linux 另外要是靜態連結的）。
       # 檔名刻意用中文，Windows 上也要開得了。
-      - name: 只靠下載包收發一次
+      - name: 解開下載包，只靠它收發一次
         run: |
           work="$RUNNER_TEMP/試用 trial"
           mkdir -p "$work"
-          cp -R "dist/$PACKAGE" "$work/"
           cp core/tests/data/cat.ppm "$work/貓.ppm"
           cp core/tests/data/coffee.ppm core/tests/data/rocket.ppm "$work/"
+          archive="$PWD/dist/$PACKAGE"
           mv models models.hidden
           trap 'mv "$GITHUB_WORKSPACE/models.hidden" "$GITHUB_WORKSPACE/models"' EXIT
           cd "$work"
+          if [ "$RUNNER_OS" = Windows ]; then
+            cmake -E tar xf "$archive.zip"
+            exe=.exe
+          else
+            tar -xzf "$archive.tar.gz"
+            exe=
+          fi
           tools="./$PACKAGE"
+          ls -l "$tools" "$tools/models"
+          file "$tools/nbtv-rx$exe"
+          file "$tools/nbtv-rx$exe" | grep -i -E -q "${{ matrix.file_says }}"
           "$tools/nbtv-tx" --mode 14 --call N0CALL --out 發射.wav 貓.ppm coffee.ppm rocket.ppm
           "$tools/nbtv-chan" --channel awgn --snr 12 --offset 37 --ppm 40 發射.wav 收到.wav
           "$tools/nbtv-rx" --json --merge --out-dir . 收到.wav | tee rx.json
@@ -136,24 +153,16 @@ jobs:
           "$tools/nbtv-sim" --mode 12 --channel poor --snr 10 --frames 8 --image 貓.ppm
           "$tools/nbtv-learned" --mode 13 --snr 10 貓.ppm coffee.ppm
 
-      - name: 壓縮
+      # NBTV.app 也一樣：把壓縮檔解開到別的目錄，確認簽章還在，再跑 app 自己的檢查——模型、核心收發、存檔、
+      # 影片來源、定時發射、翻譯……都不碰音訊裝置與鏡頭。
+      - name: 解開 NBTV.app，跑它的自我測試
+        if: runner.os == 'macOS'
         run: |
-          cd dist
-          if [ "$RUNNER_OS" = Windows ]; then
-            cmake -E tar cf "$PACKAGE.zip" --format=zip "$PACKAGE"
-          else
-            tar -czf "$PACKAGE.tar.gz" "$PACKAGE"
-          fi
-          rm -rf "$PACKAGE"
-
-      # app 自己的檢查：模型、核心收發、存檔、影片來源、定時發射、翻譯……都不碰音訊裝置與鏡頭。
-      - name: NBTV.app 的自我測試
-        if: runner.os == 'macOS'
-        run: build-app/apps/macos/NBTV.app/Contents/MacOS/NBTV --selftest --no-devices
-
-      - name: 壓縮 NBTV.app
-        if: runner.os == 'macOS'
-        run: ditto -c -k --keepParent build-app/apps/macos/NBTV.app "dist/$PACKAGE-app.zip"
+          work="$RUNNER_TEMP/app trial"
+          mkdir -p "$work"
+          ditto -x -k "dist/$PACKAGE-app.zip" "$work"
+          codesign --verify --deep --strict --verbose=2 "$work/NBTV.app"
+          "$work/NBTV.app/Contents/MacOS/NBTV" --selftest --no-devices
 
       - uses: actions/upload-artifact@v7
         with:
