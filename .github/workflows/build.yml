@@ -1,8 +1,10 @@
 # 在六種平台上建置、測試、打包：Linux、macOS、Windows，各有 x86_64 與 arm64。
 #
 # 每個平台都在那個平台、那種處理器的機器上編譯並跑完測試，不是交叉編譯。產物是可以直接解開來用的下載包：
-#   NBeeTv-<版本>-<平台>.tar.gz（Windows 是 .zip）  命令列工具與 models/，放在同一層
+#   NBeeTv-<版本>-<平台>.tar.gz（Windows 是 .zip）  命令列工具與 models/，放在同一層；
+#                                                 Windows 與 Linux 的包裡另外有桌面 app（nbtv-gui）
 #   NBeeTv-<版本>-macos-<處理器>-app.zip             macOS 的 NBTV.app
+# 另外每次執行都留一份 screens-<平台>：桌面 app 在那個平台上不開視窗算出來的畫面（五種語言），用來看字型與版面對不對。
 #
 # 什麼時候跑：推到 main、開 PR、手動執行時，下載包留在那一次執行的 Artifacts 裡（7 天）；
 # 推版本標籤（v 開頭，例如 v0.1.0）時，另外把全部的下載包放上 GitHub Releases。
@@ -32,12 +34,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Linux 用 22.04 的機器建置：桌面 app 要動態連結 glibc，在比較舊的系統上建置，
+          # 做出來的執行檔才能在 Ubuntu 22.04、Debian 12、Raspberry Pi OS（bookworm）以後的系統上執行。
           - target: linux-x86_64
-            runner: ubuntu-24.04
+            runner: ubuntu-22.04
             file_says: "x86-64.*static"
+            gui_says: "x86-64.*dynamically"
           - target: linux-arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-22.04-arm
             file_says: "aarch64.*static"
+            gui_says: "aarch64.*dynamically"
           - target: macos-x86_64
             runner: macos-26-intel
             file_says: "x86_64"
@@ -48,10 +54,12 @@ jobs:
             runner: windows-2025
             vs_arch: x64
             file_says: "x86-64"
+            gui_says: "GUI.*x86-64"
           - target: windows-arm64
             runner: windows-11-arm
             vs_arch: ARM64
             file_says: "aarch64|arm64"
+            gui_says: "GUI.*(aarch64|arm64)"
     defaults:
       run:
         shell: bash
@@ -67,21 +75,45 @@ jobs:
           fi
           echo "PACKAGE=NBeeTv-$version-${{ matrix.target }}" >> "$GITHUB_ENV"
 
-      # Linux：整個靜態連結，不挑發行版與 glibc 的版本。
+      # Linux 上建置桌面 app（nbtv-gui）要的東西：SDL 要各種視窗、音訊系統的標頭檔才會把對應的功能編進去
+      # （X11、Wayland、ALSA、PulseAudio、PipeWire、輸入法…；執行時系統上有哪一個就用哪一個，都不是必要的）。
+      # 另外是檢查時要用的：假的螢幕（xvfb）、字型、ffmpeg、Hamlib。
+      - name: Linux：安裝建置與檢查要用的套件
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build g++-12 pkg-config binutils \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxtst-dev libxkbcommon-dev \
+            libwayland-dev wayland-protocols libdecor-0-dev libegl1-mesa-dev libgles2-mesa-dev libgl1-mesa-dev libdrm-dev libgbm-dev \
+            libdbus-1-dev libudev-dev libibus-1.0-dev \
+            xvfb xauth fontconfig fonts-dejavu-core fonts-noto-cjk ffmpeg libhamlib-utils
+
+      # Windows 上檢查影片檔來源與存影片要用 ffmpeg。裝不起來不算錯（那幾項檢查會略過）。
+      - name: Windows：安裝 ffmpeg（檢查用）
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        run: |
+          command -v ffmpeg || choco install ffmpeg --no-progress -y
+          command -v ffmpeg && ffmpeg -version | head -1
+
+      # Linux：命令列工具整個靜態連結，不挑發行版與 glibc 的版本；桌面 app 只把 C++ 的執行階段連進去（見 apps/desktop/CMakeLists.txt）。
       # macOS：命令列工具最低支援 macOS 11（NBTV.app 另外設定，見下面）。
       # Windows：C 執行階段靜態連結，使用者不必另外裝 Visual C++ 的可轉散發套件。
+      # 桌面 app 用到的 SDL、Dear ImGui、stb 在這一步下載（版本固定，核對 SHA-256）。
       - name: 設定
         run: |
           case "$RUNNER_OS" in
             Linux)
               cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DNBTV_INSTALL_FLAT=ON \
-                -DCMAKE_EXE_LINKER_FLAGS=-static ;;
+                -DCMAKE_C_COMPILER=gcc-12 -DCMAKE_CXX_COMPILER=g++-12 \
+                -DNBTV_STATIC_TOOLS=ON -DNBTV_BUILD_DESKTOP_APP=ON ;;
             macOS)
               cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DNBTV_INSTALL_FLAT=ON \
                 -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 ;;
             Windows)
               cmake -S . -B build -A "${{ matrix.vs_arch }}" -DNBTV_INSTALL_FLAT=ON \
-                -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded ;;
+                -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DNBTV_BUILD_DESKTOP_APP=ON ;;
           esac
 
       - name: 建置
@@ -153,6 +185,73 @@ jobs:
           "$tools/nbtv-sim" --mode 12 --channel poor --snr 10 --frames 8 --image 貓.ppm
           "$tools/nbtv-learned" --mode 13 --snr 10 貓.ppm coffee.ppm
 
+      # 桌面 app（Windows、Linux）也一樣對著解開的那一份做，都不碰真的音訊裝置與鏡頭：
+      #   1. 自我測試：收發的流程、PTT、檔案來源、定時發射、介面的每個按鈕……音訊走 SDL 的「假」驅動（走的是和真的裝置一樣的程式）；
+      #   2. 不開視窗把六張畫面各算成一張圖，五種語言都算（留在 Artifacts 裡，看得到這個平台上的字型與版面）；
+      #   3. 真的開視窗幾秒鐘：一次是示範資料，一次照平常的方式啟動（Linux 的機器沒有螢幕，用 xvfb 給一個假的）。
+      # 視窗程式在 Windows 上沒有主控台可以印字，所以結果一律另外寫進檔案（--report）再印出來。
+      - name: 解開下載包，跑桌面 app 的檢查
+        if: runner.os != 'macOS'
+        run: |
+          work="$RUNNER_TEMP/桌面 gui"
+          mkdir -p "$work" "$GITHUB_WORKSPACE/screens"
+          archive="$PWD/dist/$PACKAGE"
+          mv models models.hidden
+          trap 'mv "$GITHUB_WORKSPACE/models.hidden" "$GITHUB_WORKSPACE/models"' EXIT
+          cd "$work"
+          if [ "$RUNNER_OS" = Windows ]; then
+            cmake -E tar xf "$archive.zip"
+            exe=.exe
+            window=
+            require=cjk,fonts,audio
+            if command -v ffmpeg > /dev/null; then require=$require,ffmpeg; fi
+          else
+            tar -xzf "$archive.tar.gz"
+            exe=
+            window="xvfb-run -a"
+            require=cjk,fonts,audio,ffmpeg,hamlib
+          fi
+          gui="./$PACKAGE/nbtv-gui$exe"
+          test -s "./$PACKAGE/THIRD-PARTY-LICENSES.txt"
+          file "$gui"
+          file "$gui" | grep -i -E -q "${{ matrix.gui_says }}"
+          if [ "$RUNNER_OS" = Linux ]; then
+            # 只能直接相依 glibc：視窗、音訊的函式庫都是執行時才載入的，系統上沒有也要開得起來
+            objdump -p "$gui" | grep NEEDED
+            if objdump -p "$gui" | grep NEEDED | grep -v -E 'lib(c|m|dl|pthread|rt)\.so\.|ld-linux'; then
+              echo "::error::nbtv-gui 直接相依了 glibc 以外的函式庫"
+              exit 1
+            fi
+            echo "需要的 glibc 版本：$(objdump -T "$gui" | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -1)"
+          fi
+          # 執行一次，把它寫進 --report 的內容印出來（沒有寫的話印標準輸出），結束碼照它的
+          run() {
+            local name="$1" status=0
+            shift
+            "$@" --report "$name.log" > "$name.out" 2>&1 || status=$?
+            if [ -s "$name.log" ]; then cat "$name.log"; else cat "$name.out"; fi
+            return $status
+          }
+          export SDL_AUDIODRIVER=dummy SDL_AUDIO_DRIVER=dummy
+          run version "$gui" --version
+          grep -q "nbtv-gui" version.log
+          NBTV_SELFTEST_REQUIRE=$require run selftest "$gui" --selftest --work "$work/selftest"
+          run snapshot "$gui" --snapshot "$GITHUB_WORKSPACE/screens" --lang all
+          test -s "$GITHUB_WORKSPACE/screens/en/1-receiving.png"
+          run demo $window "$gui" --demo --quit-after 3
+          grep -q "畫了" demo.log
+          run live $window "$gui" --settings "$work/settings.txt" --quit-after 5
+          grep -q "畫了" live.log
+          test -s "$work/settings.txt"
+
+      - uses: actions/upload-artifact@v7
+        if: runner.os != 'macOS' && !cancelled()
+        with:
+          name: screens-${{ matrix.target }}
+          path: screens
+          if-no-files-found: warn
+          retention-days: 7
+
       # NBTV.app 也一樣：把壓縮檔解開到別的目錄，確認簽章還在，再跑 app 自己的檢查——模型、核心收發、存檔、
       # 影片來源、定時發射、翻譯……都不碰音訊裝置與鏡頭。
       - name: 解開 NBTV.app，跑它的自我測試
@@ -184,6 +283,7 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: dist
+          pattern: NBeeTv-*
           merge-multiple: true
 
       - name: SHA-256 清單
