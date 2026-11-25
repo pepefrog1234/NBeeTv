@@ -13,6 +13,7 @@
 #include "modes.hpp"
 #include "ppm.hpp"
 #include "receiver.hpp"
+#include "startup.hpp"
 #include "wav.hpp"
 
 using namespace nbtv;
@@ -48,19 +49,21 @@ std::string json_string(const std::string& s) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    tool_startup();
     const Args args(argc, argv, {"trace", "help", "merge", "json"});
     if (args.positional.empty() || args.has("help")) {
         std::printf(
             "用法：nbtv-rx [選項] 錄音.wav\n"
             "  --out-dir 目錄   收到的畫面存到這裡（預設不存檔，只列出結果）\n"
-            "  --model 檔名     權重檔，取代專案 models/ 裡給同一個模式的那一份\n"
+            "  --model 檔名     權重檔，取代 models/ 裡給同一個模式的那一份\n"
             "                   （沒有給的話每個模式都用 models/ 裡的，找不到就不解那個模式的畫面）\n"
             "  --merge          解每一幀之前把前面幾幀收到的值合進來：畫面沒變的地方比較清楚，訊號弱時差別最大。\n"
             "                   用的是 models/ 裡各個模型配的權重；沒有配的模式照原來的方式解\n"
             "  --trace          印出同步與解碼的過程\n"
             "  --json           給程式讀的輸出：每一幀印一行 JSON、印完立刻送出，最後一行是總數\n"
             "                   （frame 是第幾幀，存檔時檔名是 frame_<frame>.ppm；標頭沒解出來時 callsign 是 null）\n"
-            "WAV 的取樣率必須是 12000 或 48000。\n");
+            "WAV 的取樣率必須是 12000 或 48000。\n"
+            "權重檔預設從執行檔旁邊的 models/ 找，沒有的話用建置時專案的 models/；環境變數 NBTV_MODEL_DIR 可以另外指定目錄。\n");
         return args.has("help") ? 0 : 2;
     }
     std::vector<float> audio;
@@ -80,7 +83,7 @@ int main(int argc, char** argv) {
     const std::string dir = args.str("out-dir", "");
     Receiver rx;
     rx.set_trace(args.has("trace"));
-    // 每個模式各一份模型：先載入專案 models/ 裡的，--model 指定的那一份再取代實數個數與寬度都相同的
+    // 每個模式各一份模型：先載入 models/ 裡的，--model 指定的那一份再取代實數個數與寬度都相同的
     auto load_model = [&](const std::string& path, bool required) {
         std::vector<std::uint8_t> bytes;
         std::string error = "讀不到檔案";
@@ -110,7 +113,7 @@ int main(int argc, char** argv) {
             ++merges;
         }
         if (merges == 0) {
-            std::fprintf(stderr, "找不到合併最近幾幀用的權重檔（專案的 models/ 底下）\n");
+            std::fprintf(stderr, "找不到合併最近幾幀用的權重檔（models/ 底下）\n");
             return 1;
         }
         rx.tuning().learned_merge = true;

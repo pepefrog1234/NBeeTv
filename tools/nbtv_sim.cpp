@@ -19,6 +19,7 @@
 #include "ppm.hpp"
 #include "receiver.hpp"
 #include "rng.hpp"
+#include "startup.hpp"
 #include "transmitter.hpp"
 
 using namespace nbtv;
@@ -105,6 +106,7 @@ Totals run_round(const Mode& mode, sim::ChannelParams params, int burst, const s
 }  // namespace
 
 int main(int argc, char** argv) {
+    tool_startup();
     const Args args(argc, argv, {"help", "flat-noise", "no-follow", "learned-mean", "learned-plain", "learned-nofloor", "merge"});
     g_noise_map = !args.has("flat-noise");
     g_follow = !args.has("no-follow");
@@ -123,7 +125,7 @@ int main(int argc, char** argv) {
             "  --tone Hz         單頻載波干擾的頻率；--tone-db dB 它相對於訊號的功率（預設 0）\n"
             "  --impulse N       每秒 N 次脈衝雜訊；--impulse-db dB 脈衝期間的雜訊功率（預設 20）；--impulse-ms 持續時間（預設 20）\n"
             "  --image 檔.ppm    要送的畫面（96×72）\n"
-            "  --model 檔名      權重檔（預設用專案 models/ 裡給那個模式的）\n"
+            "  --model 檔名      權重檔（預設用 models/ 裡給那個模式的）\n"
             "  --learned-mean    告訴解碼器的訊雜比用各格點雜訊的平均值，不用中位數（比較用）\n"
             "  --learned-plain   雜訊特別大的格點不壓小（比較用）\n"
             "  --learned-nofloor 訊雜比低於解碼器認得的下限時不另外處理（比較用）\n"
@@ -133,7 +135,8 @@ int main(int argc, char** argv) {
             "  --flat-noise      接收機不用逐符號、逐載波的雜訊估計（比較用）\n"
             "  --no-follow       接收機不照幀的節拍接著收：每一幀都要靠自己的標頭或前導符號（比較用；訊號弱時差很多）\n"
             "  --threads N       執行緒數（預設用全部核心）\n"
-            "  --seed N          亂數種子\n");
+            "  --seed N          亂數種子\n"
+            "權重檔預設從執行檔旁邊的 models/ 找，沒有的話用建置時專案的 models/；環境變數 NBTV_MODEL_DIR 可以另外指定目錄。\n");
         return 0;
     }
     const Mode* mode = find_mode(args.integer("mode", 11));

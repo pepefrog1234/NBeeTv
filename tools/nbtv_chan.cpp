@@ -6,12 +6,14 @@
 #include "args.hpp"
 #include "channel.hpp"
 #include "dsp.hpp"
+#include "startup.hpp"
 #include "wav.hpp"
 
 using namespace nbtv;
 using namespace nbtv::tools;
 
 int main(int argc, char** argv) {
+    tool_startup();
     const Args args(argc, argv, {"help"});
     if (args.positional.size() < 2 || args.has("help")) {
         std::printf(

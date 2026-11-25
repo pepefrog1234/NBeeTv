@@ -6,25 +6,28 @@
 #include "model_file.hpp"
 #include "nbtv/nbtv.h"
 #include "ppm.hpp"
+#include "startup.hpp"
 #include "wav.hpp"
 
 using namespace nbtv::tools;
 
 int main(int argc, char** argv) {
+    tool_startup();
     const Args args(argc, argv);
     if (args.positional.empty() || args.has("help")) {
         std::printf(
             "用法：nbtv-tx [選項] 影像.ppm [影像2.ppm …]\n"
             "  --out 檔名      輸出的 WAV（預設 nbtv.wav）\n"
             "  --mode N        模式編號 11–14（預設 11）\n"
-            "  --model 檔名    權重檔（預設用專案 models/ 裡給那個模式的）\n"
+            "  --model 檔名    權重檔（預設用 models/ 裡給那個模式的）\n"
             "  --call 呼號     最多 9 個字元\n"
             "  --frames N      總共送幾幀，影像輪流使用（預設：每張影像一幀）\n"
             "  --rate N        取樣率 12000 或 48000（預設 48000）\n"
             "  --lead 秒       開頭的靜音（預設 0.5）\n"
             "  --tail 秒       結尾的靜音（預設 0.5）\n"
             "  --papr dB       包絡峰均比目標；0 用預設值，負值不削波\n"
-            "影像必須是 96×72 的二進位 PPM，例如：ffmpeg -i 照片.jpg -vf scale=96:72 -pix_fmt rgb24 影像.ppm\n");
+            "影像必須是 96×72 的二進位 PPM，例如：ffmpeg -i 照片.jpg -vf scale=96:72 -pix_fmt rgb24 影像.ppm\n"
+            "權重檔預設從執行檔旁邊的 models/ 找，沒有的話用建置時專案的 models/；環境變數 NBTV_MODEL_DIR 可以另外指定目錄。\n");
         return args.has("help") ? 0 : 2;
     }
     const int rate = args.integer("rate", 48000);

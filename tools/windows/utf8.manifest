@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Windows 的命令列工具用：把這個行程的字碼頁設成 UTF-8（Windows 10 1903 以上），
+  命令列參數、fopen 的檔名就都是 UTF-8，路徑裡有中文、日文或別的文字也開得了，不受系統地區設定影響。
+  比較舊的 Windows 不認得這個設定，會照系統的字碼頁（和沒有這個檔案時一樣）。
+-->
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
+    </windowsSettings>
+  </application>
+</assembly>

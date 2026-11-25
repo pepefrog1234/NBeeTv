@@ -14,12 +14,36 @@ option(NBTV_BUILD_TESTS "Build the unit tests" ON)
 option(NBTV_BUILD_TOOLS "Build the command line tools" ON)
 option(NBTV_BUILD_MACOS_APP "Build the macOS app (SwiftUI shell)" OFF)
 option(NBTV_MACOS_SECOND_APP "Also build NBTV 2.app, a second copy with its own settings, to run two at once" OFF)
+option(NBTV_INSTALL_FLAT "Install the tools, models/ and documents side by side in one directory (portable package) instead of bin/ and share/" OFF)
+
+if(MSVC)
+  # 原始碼是 UTF-8，裡面的字串（說明與訊息是中文）也照 UTF-8 編進執行檔；
+  # fopen、getenv 這些標準函式不必提醒改用微軟自己的版本。
+  add_compile_options(/utf-8)
+  add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+endif()
+
+# 安裝的位置（cmake --install <建置目錄> --prefix <目錄>）。預設是一般的配置：bin/ 與 share/nbtv/models/。
+# -DNBTV_INSTALL_FLAT=ON 改成全部放在同一層（執行檔旁邊就是 models/），整個目錄可以直接打包給別人，
+# GitHub 上的下載包就是這樣做的。兩種配置工具都找得到權重檔（tools/model_file.hpp）。
+include(GNUInstallDirs)
+if(NBTV_INSTALL_FLAT)
+  set(NBTV_INSTALL_BINDIR ".")
+  set(NBTV_INSTALL_MODELDIR "models")
+  set(NBTV_INSTALL_DOCDIR ".")
+else()
+  set(NBTV_INSTALL_BINDIR "${CMAKE_INSTALL_BINDIR}")
+  set(NBTV_INSTALL_MODELDIR "${CMAKE_INSTALL_DATADIR}/nbtv/models")
+  set(NBTV_INSTALL_DOCDIR "${CMAKE_INSTALL_DATADIR}/doc/nbtv")
+endif()
 
 add_subdirectory(core)
 add_subdirectory(sim)
 
 if(NBTV_BUILD_TOOLS)
   add_subdirectory(tools)
+  install(DIRECTORY models/ DESTINATION "${NBTV_INSTALL_MODELDIR}" FILES_MATCHING PATTERN "*.bin")
+  install(FILES LICENSE README.md README.zh-CN.md README.ja.md README.es.md README.en.md DESTINATION "${NBTV_INSTALL_DOCDIR}")
 endif()
 
 if(NBTV_BUILD_TESTS)

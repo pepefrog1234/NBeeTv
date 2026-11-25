@@ -13,6 +13,7 @@
 #include "modes.hpp"
 #include "ppm.hpp"
 #include "rng.hpp"
+#include "startup.hpp"
 #include "types.hpp"
 
 using namespace nbtv;
@@ -37,18 +38,20 @@ double ms_since(std::chrono::steady_clock::time_point t0) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    tool_startup();
     const Args args(argc, argv);
     if (args.positional.empty() || args.has("help")) {
         std::printf(
             "用法：nbtv-learned [選項] 影像.ppm [影像2.ppm …]\n"
             "  --mode N        用哪個模式的模型：11（2.72 秒）、12（1.04 秒）、13（2.72 秒，加寬的模型）\n"
             "                  或 14（0.67 秒，加寬的模型），預設 11\n"
-            "  --model 檔名    直接指定權重檔（預設是專案 models/ 裡給那個模式的）\n"
+            "  --model 檔名    直接指定權重檔（預設是 models/ 裡給那個模式的）\n"
             "  --snr dB        加白雜訊的格點訊雜比；不給就不加雜訊\n"
             "  --seed N        雜訊的亂數種子（預設 1）\n"
             "  --out 檔名      解出來的畫面（PPM；只給一張影像時可用）\n"
             "  --values 檔名   編出來的通道值，float32、小端序（只給一張影像時可用）\n"
-            "影像必須是 96×72 的二進位 PPM，例如：ffmpeg -i 照片.jpg -vf scale=96:72 -pix_fmt rgb24 影像.ppm\n");
+            "影像必須是 96×72 的二進位 PPM，例如：ffmpeg -i 照片.jpg -vf scale=96:72 -pix_fmt rgb24 影像.ppm\n"
+            "權重檔預設從執行檔旁邊的 models/ 找，沒有的話用建置時專案的 models/；環境變數 NBTV_MODEL_DIR 可以另外指定目錄。\n");
         return args.has("help") ? 0 : 2;
     }
     const Mode* mode = find_mode(args.integer("mode", 11));
