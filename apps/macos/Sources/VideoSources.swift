@@ -1,4 +1,5 @@
-// 發射來源：鏡頭與影片檔，以及把來源畫面縮成 96×72 的工具。（第三種來源「圖片序列」在 ImageSequence.swift。）
+// 發射來源：鏡頭與影片檔，以及把來源畫面縮成送出的大小（96×72；模式 5–7 與 15 是 192×144）的工具。
+// （第三種來源「圖片序列」在 ImageSequence.swift。）
 import Accelerate
 import AVFoundation
 import CoreGraphics
@@ -16,16 +17,16 @@ enum ScaleMode: String {
     case fit    // 完整：整張都留著，空出來的地方補黑
 }
 
-/// 縮成 96×72 的一格畫面。
+/// 縮成送出的大小的一格畫面。
 struct ScaledFrame {
-    let rgb: Data            // 96×72×3
+    let rgb: Data            // 寬×高×3（96×72，或模式 5–7 與 15 的 192×144）
     let sourceSize: CGSize   // 來源的像素大小
 }
 
 enum FrameScaler {
-    /// 把任意大小的影像縮成 96×72 的 RGB。quarterTurns：顯示前要先順時針轉幾個 90 度（手機直拍的影片）。
-    static func scale(_ image: CGImage, mode: ScaleMode, quarterTurns: Int = 0) -> Data? {
-        let width = NBTV.imageWidth, height = NBTV.imageHeight
+    /// 把任意大小的影像縮成 size 這麼大的 RGB（預設是 96×72）。quarterTurns：顯示前要先順時針轉幾個 90 度（手機直拍的影片）。
+    static func scale(_ image: CGImage, mode: ScaleMode, quarterTurns: Int = 0, size: PictureSize = .standard) -> Data? {
+        let width = size.width, height = size.height
         guard let space = CGColorSpace(name: CGColorSpace.sRGB),
               let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4, space: space,
                                       bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
@@ -44,7 +45,7 @@ enum FrameScaler {
         context.draw(image, in: CGRect(x: -iw / 2, y: -ih / 2, width: iw, height: ih))
         guard let pixels = context.data else { return nil }
         let src = pixels.assumingMemoryBound(to: UInt8.self)
-        var rgb = Data(count: NBTV.rgbBytes)
+        var rgb = Data(count: size.rgbBytes)
         rgb.withUnsafeMutableBytes { raw in
             let dst = raw.bindMemory(to: UInt8.self)
             for i in 0..<(width * height) {
@@ -56,12 +57,20 @@ enum FrameScaler {
         return rgb
     }
 
-    static func scale(_ pixelBuffer: CVPixelBuffer, mode: ScaleMode, quarterTurns: Int = 0) -> ScaledFrame? {
+    static func scale(_ pixelBuffer: CVPixelBuffer, mode: ScaleMode, quarterTurns: Int = 0, size: PictureSize = .standard) -> ScaledFrame? {
         let width = CVPixelBufferGetWidth(pixelBuffer), height = CVPixelBufferGetHeight(pixelBuffer)
-        guard let image = reducedImage(pixelBuffer) ?? fullImage(pixelBuffer),
-              let rgb = scale(image, mode: mode, quarterTurns: quarterTurns) else { return nil }
+        guard let image = reducedImage(pixelBuffer, for: size) ?? fullImage(pixelBuffer),
+              let rgb = scale(image, mode: mode, quarterTurns: quarterTurns, size: size) else { return nil }
         let sideways = quarterTurns % 2 != 0
         return ScaledFrame(rgb: rgb, sourceSize: CGSize(width: sideways ? height : width, height: sideways ? width : height))
+    }
+
+    /// 一張已經縮好的畫面換成另一種大小（模式換成畫面大小不同的那一種時，手上只有上一格縮好的畫面）。
+    /// 已經是那個大小就原樣回傳；長度不是任何一種畫面時回傳 nil。
+    static func resize(_ rgb: Data, to size: PictureSize) -> Data? {
+        if rgb.count == size.rgbBytes { return rgb }
+        guard let image = NBTV.image(fromRGB: rgb) else { return nil }
+        return scale(image, mode: .fill, size: size)
     }
 
     /// 整格畫面原樣包成 CGImage。
@@ -71,14 +80,14 @@ enum FrameScaler {
         return image
     }
 
-    /// 來源比 96×72 大很多時，先用 vImage 粗縮一次，再交給 CoreGraphics 做色彩轉換與最後的縮放。
+    /// 來源比輸出的畫面大很多時，先用 vImage 粗縮一次，再交給 CoreGraphics 做色彩轉換與最後的縮放。
     /// 讓 CoreGraphics 直接處理整格 1080p 的畫面要將近 10 毫秒（大半花在對每個來源像素做色彩轉換），預覽一秒要做好幾次。
-    /// 粗縮後短邊還有 384 像素，是輸出的 4 倍以上，最後一次縮放的品質不受影響。不適用時回傳 nil。
-    static func reducedImage(_ pixelBuffer: CVPixelBuffer) -> CGImage? {
+    /// 粗縮後短邊還有輸出長邊的 4 倍（96×72 是 384 像素），最後一次縮放的品質不受影響。不適用時回傳 nil。
+    static func reducedImage(_ pixelBuffer: CVPixelBuffer, for size: PictureSize = .standard) -> CGImage? {
         guard CVPixelBufferGetPixelFormatType(pixelBuffer) == kCVPixelFormatType_32BGRA else { return nil }
         let width = CVPixelBufferGetWidth(pixelBuffer), height = CVPixelBufferGetHeight(pixelBuffer)
         guard width > 0, height > 0 else { return nil }
-        let factor = 4 * Double(max(NBTV.imageWidth, NBTV.imageHeight)) / Double(min(width, height))
+        let factor = 4 * Double(max(size.width, size.height)) / Double(min(width, height))
         guard factor <= 0.8 else { return nil }
         let reducedWidth = max(1, Int((Double(width) * factor).rounded())), reducedHeight = max(1, Int((Double(height) * factor).rounded()))
 

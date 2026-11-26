@@ -1161,7 +1161,9 @@ void UI::draw_side_panel(const Rect& rect) {
         text(dl, mono_, 11.5f, rect.right() - S(16) - place_w, y + S(6), kSecondary, place);
         y += S(34);
     }
-    const std::string size_note = app_.source_size ? LF("來源 %d×%d → 送出 96×72", {app_.source_size->first, app_.source_size->second}) : L("來源 — → 送出 96×72");
+    // 送出的大小：桌面版只有 96×72 的模式（句子和 macOS 版共用，那邊的大小跟著模式）
+    const std::string size_note = app_.source_size ? LF("來源 %d×%d → 送出 %@", {app_.source_size->first, app_.source_size->second, "96×72"})
+                                                   : LF("來源 — → 送出 %@", {"96×72"});
     text(dl, regular_, 11.5f, left, y, kTertiary, fitted(regular_, 11.5f, size_note, width));
     y += S(26);
 

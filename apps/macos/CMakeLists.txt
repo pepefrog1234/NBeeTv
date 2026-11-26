@@ -35,8 +35,9 @@ set(NBTV_APP_SOURCES
 )
 
 # 內附的測試圖（96×72 的 PPM）：--snapshot 與 --selftest 用它們當畫面來源。
-# 四個模式（11 到 14）的模型權重檔也放進去，每個模式一份；app 啟動後第一次用到時載入。少了哪一份，那個模式就不能用。
-# 檔名是模型的名稱（訓練完成的年月日-當天第幾個）：依序是模式 11、12、13、14 用的。
+# 八個模式（11 到 15、5 到 7）的模型權重檔也放進去（模式 5 和 15 共用一份，所以是七份）；app 啟動後第一次用到時載入。少了哪一份，那個模式就不能用。
+# 檔名是模型的名稱（訓練完成的年月日-當天第幾個）：依序是模式 11、12、13、14、15 用的（第五份起是給 FM 用的 192×144 大畫面；
+# 模式 5 和 15 共用第五份，接著的兩份是模式 6、7 用的）。
 # 最後是接收端「合併最近幾幀」用的權重（每個畫面模型各配一份，小檔案；同樣依序是模式 11、12、13、14 的）；少了的話那個模式照原來的方式解。
 set(NBTV_APP_RESOURCES
   ${PROJECT_SOURCE_DIR}/core/tests/data/coffee.ppm
@@ -46,6 +47,9 @@ set(NBTV_APP_RESOURCES
   ${PROJECT_SOURCE_DIR}/models/261122-3.bin
   ${PROJECT_SOURCE_DIR}/models/261122-4.bin
   ${PROJECT_SOURCE_DIR}/models/261123-4.bin
+  ${PROJECT_SOURCE_DIR}/models/261125-3.bin
+  ${PROJECT_SOURCE_DIR}/models/261126-2.bin
+  ${PROJECT_SOURCE_DIR}/models/261126-1.bin
   ${PROJECT_SOURCE_DIR}/models/261124-10.bin
   ${PROJECT_SOURCE_DIR}/models/261124-8.bin
   ${PROJECT_SOURCE_DIR}/models/261124-9.bin

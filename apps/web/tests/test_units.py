@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from nbtvweb import card as cardlib
 from nbtvweb.cardfile import pixels_sha256
-from nbtvweb.decoder import Frame
+from nbtvweb.decoder import DecodeError, Frame, _read_ppm, picture_size
 from nbtvweb.models import JobIn
 from nbtvweb.ratelimit import RateLimiter, client_key
 from nbtvweb.rules import evaluate
@@ -153,6 +153,52 @@ class ListenerFieldTests(unittest.TestCase):
     def test_good_values(self):
         listener = self.parse(name="BV2XX", date="2026-11-23", time="12:30", freq_khz=7165.5, location="Taipei")
         self.assertEqual((listener.date, listener.time, listener.freq_khz), ("2026-11-23", "12:30", 7165.5))
+
+
+class PictureSizeTests(unittest.TestCase):
+    """畫面的大小跟著模式：96×72，模式 5–7 與 15（給 FM 用的大畫面）是 192×144。"""
+
+    def test_size_from_length(self):
+        self.assertEqual(picture_size(bytes(96 * 72 * 3)), (96, 72))
+        self.assertEqual(picture_size(bytes(192 * 144 * 3)), (192, 144))
+        with self.assertRaises(ValueError):
+            picture_size(bytes(100))
+
+    def test_ppm_of_both_sizes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for width, height in ((96, 72), (192, 144)):
+                pixels = bytes(range(256)) * (width * height * 3 // 256)
+                path = Path(tmp) / f"frame_{width}.ppm"
+                path.write_bytes(b"P6\n%d %d\n255\n" % (width, height) + pixels)
+                self.assertEqual(_read_ppm(path), pixels)
+            for name, content in (("other.ppm", b"P6\n64 48\n255\n" + bytes(64 * 48 * 3)),
+                                  ("short.ppm", b"P6\n192 144\n255\n" + bytes(96 * 72 * 3)),
+                                  ("junk.ppm", b"not a picture")):
+                path = Path(tmp) / name
+                path.write_bytes(content)
+                with self.assertRaises(DecodeError):
+                    _read_ppm(path)
+
+    def test_large_picture_fits_the_same_layout(self):
+        # 卡片上的大圖是 96×72 的 5 倍，縮圖是 1 倍：192×144 的畫面也畫成同樣的大小
+        small = bytes([200, 30, 30]) * (96 * 72)
+        large = bytes([200, 30, 30]) * (192 * 144)
+        for scale in (1, 2, cardlib.PICTURE_SCALE):
+            a, b = cardlib._picture(small, scale), cardlib._picture(large, scale)
+            self.assertEqual(a.size, (96 * scale, 72 * scale))
+            self.assertEqual(b.size, a.size)
+            self.assertEqual(a.tobytes(), b.tobytes())   # 整張同一個顏色，怎麼縮放都一樣
+        # 整數倍放大不內插：左上角的像素原樣放大成 2×2
+        pixels = bytearray(192 * 144 * 3)
+        pixels[0:3] = b"\xff\xff\xff"
+        image = cardlib._picture(bytes(pixels), 4)   # 192×144 → 384×288，剛好兩倍
+        self.assertEqual(image.getpixel((1, 1)), (255, 255, 255))
+        self.assertEqual(image.getpixel((2, 2)), (0, 0, 0))
+        # 縮圖表：兩種大小混在一起，每一格都是 96×72
+        mixed, same = cardlib.contact_sheet([small, large, small]), cardlib.contact_sheet([small, small, small])
+        self.assertEqual(mixed.size, same.size)
+        self.assertEqual(mixed.size[1], 72)
+        self.assertEqual(mixed.tobytes(), same.tobytes())
 
 
 class CardRenderTests(unittest.TestCase):

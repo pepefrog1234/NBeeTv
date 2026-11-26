@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "modes.hpp"
 #include "ofdm_params.hpp"
 #include "types.hpp"
 
@@ -20,6 +21,13 @@ inline constexpr float kPilotAmplitude = 1.41421356f;  // 導頻比資料格高 
 inline constexpr double kMeanSymbolPower = 172.0 / 3.0;
 inline constexpr float kS1Amplitude = 1.08169683f;     // sqrt(172/147)：49 個載波
 inline constexpr float kS0Amplitude = 1.51437556f;     // sqrt(172/75)：25 個載波
+// 沒有散佈導頻的幀（Mode::scattered_pilots 為 false）：酬載的 49 個載波都是資料格。為了讓每個符號的功率和其他符號一樣，
+// 資料格的振幅取和 S1 相同（比有導頻的幀高 0.68 dB：導頻省下來的功率分給了資料格）。
+inline constexpr float kFreeDataAmplitude = kS1Amplitude;
+// 這種幀結尾的參考符號用的序列：S1 的第 0 條。它不是任何模式的編號（模式表裡沒有 0），所以接收機不會把它當成
+// 某一幀的開頭——用和開頭相同的那一條的話，前導符號被衰落蓋掉時，結尾的這一個會被認成下一幀的 S1。
+// 沒有散佈導頻的模式都用同一條；16 條序列的峰均比都不超過 6.7 dB，任兩條的內積是 ±1。
+inline constexpr int kTailReferenceId = 0;
 
 inline constexpr int kS0Carriers = (kCarriers + 1) / 2;  // 25：第 8、10、…、56 格
 inline constexpr int kModeIdCount = 16;                  // S1 能表示的模式編號 0..15
@@ -38,7 +46,9 @@ cf s0_value(int bin);
 // S1 在第 bin 格的值（已含振幅），mode_id 是 0..15；頻帶外是 0。
 float s1_value(int mode_id, int bin);
 
-// 酬載裡所有資料格的位置，依傳送順序（時間先後、頻率由低到高）排列。
+// 酬載裡所有資料格的位置，依傳送順序（時間先後、頻率由低到高）排列。這是有散佈導頻的幀：導頻的位置跳過。
 std::vector<CellPos> data_cell_positions(int payload_symbols);
+// 同上，照模式的幀種類：沒有散佈導頻的幀每個載波都是資料格。
+std::vector<CellPos> data_cell_positions(const Mode& mode);
 
 }  // namespace nbtv

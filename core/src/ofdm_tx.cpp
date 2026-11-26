@@ -32,11 +32,18 @@ void for_each_symbol(const Mode& mode, std::span<const cf> data_cells, Fn&& fn) 
     std::size_t next = 0;
     for (int j = 0; j < mode.payload_symbols; ++j) {
         for (int k = kFirstBin; k <= kLastBin; ++k) {
-            cells[static_cast<std::size_t>(k - kFirstBin)] = is_pilot(j, k) ? cf(pilot_value(k), 0) : data_cells[next++];
+            cf& cell = cells[static_cast<std::size_t>(k - kFirstBin)];
+            if (!mode.scattered_pilots) cell = data_cells[next++] * kFreeDataAmplitude;  // 每個載波都是資料
+            else cell = is_pilot(j, k) ? cf(pilot_value(k), 0) : data_cells[next++];
         }
         fn(cells, false);
     }
     assert(next == data_cells.size());
+    // 沒有散佈導頻的幀：結尾再送一個已知的符號（結尾的參考符號），接收端拿它和開頭的 S1 比，估出這一幀之內的時脈漂移
+    for (int t = 0; t < mode.tail_symbols(); ++t) {
+        for (int k = kFirstBin; k <= kLastBin; ++k) cells[static_cast<std::size_t>(k - kFirstBin)] = cf(s1_value(kTailReferenceId, k), 0);
+        fn(cells, false);
+    }
 }
 
 // 頻域格點 → 解析訊號的一個有效符號（256 點）。平均包絡功率正規化成 1。

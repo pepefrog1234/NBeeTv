@@ -226,7 +226,9 @@ void test_i18n(Check& c) {
         i18n::use(language);
         c.expect(!L("設定").empty() && !L("開始發射").empty(), language + "：句子是空的");
         c.expect(contains(LF("已同步 %@", {"BX4ACP"}), "BX4ACP"), language + "：%@ 沒有填進去");
-        c.expect(contains(LF("來源 %d×%d → 送出 96×72", {1920, 1080}), "1920") && contains(LF("來源 %d×%d → 送出 96×72", {1920, 1080}), "1080"), language + "：%d 沒有填進去");
+        c.expect(contains(LF("來源 %d×%d → 送出 %@", {1920, 1080, "96×72"}), "1920") && contains(LF("來源 %d×%d → 送出 %@", {1920, 1080, "96×72"}), "1080") &&
+                     contains(LF("來源 %d×%d → 送出 %@", {1920, 1080, "96×72"}), "96×72"),
+                 language + "：%d 沒有填進去");
         c.expect(contains(LF("%d 張", {3}), "3"), language + "：數量沒有填進去");
         if (language != "zh-Hant") c.expect(L("設定") != "設定" || language == "ja", language + "：「設定」沒有翻譯");
     }

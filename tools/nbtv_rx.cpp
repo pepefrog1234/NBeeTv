@@ -1,4 +1,4 @@
-// nbtv-rx：解 WAV 檔裡的訊號，把收到的畫面存成 PPM。
+// nbtv-rx：解 WAV 檔裡的訊號，把收到的畫面存成 PPM（大小跟著模式：模式 11–14 是 96×72，模式 5–7 與 15 是 192×144）。
 #include <cmath>
 #include <cstdio>
 #include <memory>
@@ -61,7 +61,8 @@ int main(int argc, char** argv) {
             "                   用的是 models/ 裡各個模型配的權重；沒有配的模式照原來的方式解\n"
             "  --trace          印出同步與解碼的過程\n"
             "  --json           給程式讀的輸出：每一幀印一行 JSON、印完立刻送出，最後一行是總數\n"
-            "                   （frame 是第幾幀，存檔時檔名是 frame_<frame>.ppm；標頭沒解出來時 callsign 是 null）\n"
+            "                   （frame 是第幾幀，存檔時檔名是 frame_<frame>.ppm；標頭沒解出來時 callsign 是 null；\n"
+            "                   width、height 是那個模式的畫面大小）\n"
             "WAV 的取樣率必須是 12000 或 48000。\n"
             "權重檔預設從執行檔旁邊的 models/ 找，沒有的話用建置時專案的 models/；環境變數 NBTV_MODEL_DIR 可以另外指定目錄。\n");
         return args.has("help") ? 0 : 2;
@@ -83,7 +84,7 @@ int main(int argc, char** argv) {
     const std::string dir = args.str("out-dir", "");
     Receiver rx;
     rx.set_trace(args.has("trace"));
-    // 每個模式各一份模型：先載入 models/ 裡的，--model 指定的那一份再取代實數個數與寬度都相同的
+    // 每個模式各一份模型：先載入 models/ 裡的，--model 指定的那一份再取代實數個數、寬度與畫面大小都相同的
     auto load_model = [&](const std::string& path, bool required) {
         std::vector<std::uint8_t> bytes;
         std::string error = "讀不到檔案";
@@ -124,15 +125,15 @@ int main(int argc, char** argv) {
         RxFrame f;
         while (rx.poll(f)) {
             const double at = static_cast<double>(f.start_sample) / kSampleRate;
-            if (!dir.empty() && f.decoded) write_ppm(dir + "/frame_" + std::to_string(index) + ".ppm", f.rgb, kImageWidth, kImageHeight);
+            if (!dir.empty() && f.decoded) write_ppm(dir + "/frame_" + std::to_string(index) + ".ppm", f.rgb, f.image_width, f.image_height);
             if (json) {
                 // 畫面先存好才印這一行，另一頭讀到這一行時檔案已經在了
                 std::printf("{\"frame\":%d,\"time\":%s,\"mode\":%d,\"picture\":%s,\"header\":%s,\"callsign\":%s,\"sequence\":%d,"
-                            "\"snr_db\":%s,\"offset_hz\":%s,\"model_missing\":%s}\n",
+                            "\"snr_db\":%s,\"offset_hz\":%s,\"model_missing\":%s,\"width\":%d,\"height\":%d}\n",
                             index, json_number(at, "%.3f").c_str(), f.mode_id, f.decoded ? "true" : "false",
                             f.header_ok ? "true" : "false", f.header_ok ? json_string(f.callsign).c_str() : "null", f.sequence,
                             json_number(f.snr_db, "%.2f").c_str(), json_number(f.freq_offset_hz, "%.2f").c_str(),
-                            f.model_missing ? "true" : "false");
+                            f.model_missing ? "true" : "false", f.image_width, f.image_height);
                 std::fflush(stdout);
             } else {
                 std::printf("%7.2f 秒  模式 %2d  %s  呼號 %-9s 序號 %3d  訊雜比 %5.1f dB  頻偏 %+6.1f Hz", at, f.mode_id,

@@ -144,7 +144,8 @@ enum SnapshotRunner {
             settings.canvasEnabled = true
             settings.canvasPosition = CanvasPosition(rawValue: ProcessInfo.processInfo.environment["NBTV_SNAPSHOT_CANVAS_POSITION"] ?? "") ?? .top
         }
-        settings.txModeID = Modes.defaultID
+        // 開發用：NBTV_SNAPSHOT_MODE=<編號> 把發射模式換成那一個（例如 15：右側欄的預覽與說明是 192×144 的大畫面）
+        settings.txModeID = ProcessInfo.processInfo.environment["NBTV_SNAPSHOT_MODE"].flatMap(Int.init).flatMap { Modes.find($0)?.id } ?? Modes.defaultID
         settings.sourceKind = source
         // 開發用：NBTV_SNAPSHOT_SNR=1 打開「在收到的畫面上標示訊雜比」，NBTV_SNAPSHOT_NO_LOOP=1 取消「循環播放」
         settings.showFrameSNR = ProcessInfo.processInfo.environment["NBTV_SNAPSHOT_SNR"] != nil
@@ -311,7 +312,8 @@ enum SnapshotRunner {
     }
 
     /// 畫布的字經過編碼之後還看不看得清楚：每一列是一張測試圖，最左邊是印好字的原圖，往右是各個模式（由快到慢）
-    /// 編碼之後、沒有雜訊時對方看到的樣子。每一格放大四倍。
+    /// 編碼之後、沒有雜訊時對方看到的樣子。每一格放大四倍（畫面是 192×144 的模式放大兩倍，格子一樣大；
+    /// 它的測試圖是同一張每個像素重複兩次，字則是照 192×144 重新印的）。
     private static func renderCanvasSheet(_ style: CanvasStyle, pictures: [Data], to directory: URL) {
         guard let layer = CanvasLayer(style: style) else { return }
         let zoom = 4, gap = 8
@@ -331,7 +333,11 @@ enum SnapshotRunner {
                 let tx = CoreTransmitter()
                 tx.setMode(mode.id)
                 tx.setCallsign("N0CALL")
-                cells.append(tx.encode(rgb: stamped)?.preview ?? Data(count: NBTV.rgbBytes))
+                var input = stamped
+                if mode.largePicture, let big = Demo.enlarge(picture, to: mode.pictureSize) {
+                    input = CanvasLayer(style: style, size: mode.pictureSize)?.apply(to: big) ?? big
+                }
+                cells.append(tx.encode(rgb: input)?.preview ?? Data(count: NBTV.rgbBytes))
             }
             for (column, cell) in cells.enumerated() {
                 guard let image = NBTV.image(fromRGB: cell) else { continue }

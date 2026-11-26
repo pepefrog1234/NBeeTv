@@ -17,7 +17,7 @@ std::vector<float> Transmitter::learned_frame(const Mode& mode, std::span<const 
     if (cells.empty()) return {};
     sequence_ = (sequence_ + 1) & 0xFF;
     if (preview != nullptr) {
-        preview->resize(static_cast<std::size_t>(kImageRgbBytes));
+        preview->resize(static_cast<std::size_t>(model->rgb_bytes()));
         model->decode(values, kLearnedMaxSnrDb, *preview);
     }
     const float papr_db = papr_db_ == 0.0f ? kDefaultPaprDb : papr_db_ < 0.0f ? 0.0f : papr_db_;

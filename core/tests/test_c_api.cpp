@@ -59,16 +59,21 @@ nbtv_model* load_model(const char* name) {
 
 // 一個取樣率、一個模式的完整迴路：兩幀，前後各留一段靜音。min_psnr 是那張圖編了再解回來的下限。
 void loopback(int rate, int mode_id, const char* weights, const char* image_name, double min_psnr) {
-    const std::vector<std::uint8_t> rgb = test_images::load(image_name);
     nbtv_mode_info mode{};
     CHECK_EQ(nbtv_mode_by_id(mode_id, &mode), 0);
+    // 畫面的大小跟著模式：測試圖是 96×72，模式 15 用的是每個像素重複兩次放大成 192×144 的
+    const std::vector<std::uint8_t> rgb = test_images::load(image_name, mode.image_width, mode.image_height);
+    const std::size_t rgb_bytes = static_cast<std::size_t>(mode.image_width) * static_cast<std::size_t>(mode.image_height) * 3;
+    CHECK(rgb.size() == rgb_bytes && rgb_bytes <= NBTV_IMAGE_MAX_RGB_BYTES);
     nbtv_model* model = load_model(weights);
     if (model == nullptr) return;
+    CHECK_EQ(nbtv_model_image_width(model), mode.image_width);
+    CHECK_EQ(nbtv_model_image_height(model), mode.image_height);
 
     nbtv_tx* tx = nbtv_tx_create(rate);
     CHECK(tx != nullptr);
     CHECK_EQ(nbtv_tx_mode(tx), 11);  // 預設是模式表的第一個
-    for (int gone : {0, 1, 5, 7, 8, 9, 10, 15}) CHECK_EQ(nbtv_tx_set_mode(tx, gone), -1);  // 沒有定義，或已經移除的編號
+    for (int gone : {0, 1, 2, 4, 8, 9, 10, 16}) CHECK_EQ(nbtv_tx_set_mode(tx, gone), -1);  // 沒有定義，或已經移除的編號
     CHECK_EQ(nbtv_tx_mode(tx), 11);
     CHECK_EQ(nbtv_tx_set_mode(tx, mode_id), 0);
     CHECK_EQ(nbtv_tx_mode(tx), mode_id);
@@ -78,7 +83,7 @@ void loopback(int rate, int mode_id, const char* weights, const char* image_name
     CHECK_EQ(frame_samples, mode.frame_samples * (rate / 12000));
 
     std::vector<float> audio(static_cast<std::size_t>(rate / 4), 0.0f);  // 0.25 秒靜音
-    std::vector<std::uint8_t> preview(NBTV_IMAGE_RGB_BYTES);
+    std::vector<std::uint8_t> preview(rgb_bytes);
     std::vector<float> frame(static_cast<std::size_t>(frame_samples));
     nbtv_tx_frame_info info{};
     CHECK_EQ(nbtv_tx_encode_image(tx, rgb.data(), frame.data(), frame_samples - 1, nullptr, nullptr), -1);  // 容量不足
@@ -154,12 +159,14 @@ void loopback(int rate, int mode_id, const char* weights, const char* image_name
         CHECK_EQ(f.sequence, static_cast<int>(i));
         CHECK_NEAR(f.freq_offset_hz, 0.0, 0.5);
         CHECK(f.snr_db > 15.0);
-        const std::vector<std::uint8_t> got(f.rgb, f.rgb + NBTV_IMAGE_RGB_BYTES);
+        CHECK(f.image_width == mode.image_width && f.image_height == mode.image_height);
+        const std::vector<std::uint8_t> got(f.rgb, f.rgb + rgb_bytes);
+        CHECK(std::all_of(f.rgb + rgb_bytes, f.rgb + sizeof f.rgb, [](std::uint8_t v) { return v == 0; }));  // 畫面之後的部分是 0
         CHECK(test_images::psnr(got, preview) > min_psnr + 2.0);  // 和預覽只差發射端的削波失真
         CHECK(test_images::psnr(got, rgb) > min_psnr - 0.6);
     }
     std::printf("  C API 迴路：%d Hz、模式 %d，%zu 幀，收到的畫面對原圖 PSNR %.1f dB\n", rate, mode_id, frames.size(),
-                frames.empty() ? 0.0 : test_images::psnr(std::vector<std::uint8_t>(frames[0].rgb, frames[0].rgb + NBTV_IMAGE_RGB_BYTES), rgb));
+                frames.empty() ? 0.0 : test_images::psnr(std::vector<std::uint8_t>(frames[0].rgb, frames[0].rgb + rgb_bytes), rgb));
 
     // 重設後可以再收一次（模型還在）
     nbtv_rx_reset(rx);
@@ -267,6 +274,8 @@ void test_model_handling(int mode_id, const char* weights, double min_psnr) {
     CHECK_EQ(nbtv_model_id(nullptr), 0);
     CHECK_EQ(nbtv_model_values(nullptr), 0);
     CHECK_EQ(nbtv_model_width(nullptr), 0);
+    CHECK_EQ(nbtv_model_image_width(nullptr), 0);
+    CHECK_EQ(nbtv_model_image_height(nullptr), 0);
     nbtv_tx_set_model(nullptr, nullptr);
     nbtv_rx_set_model(nullptr, nullptr);
 
@@ -278,9 +287,12 @@ void test_model_handling(int mode_id, const char* weights, double min_psnr) {
     if (model == nullptr) return;
     CHECK_EQ(nbtv_model_values(model), mode.learned_values);
     CHECK_EQ(nbtv_model_width(model), mode.learned_width);
+    CHECK_EQ(nbtv_model_image_width(model), mode.image_width);
+    CHECK_EQ(nbtv_model_image_height(model), mode.image_height);
     CHECK(nbtv_model_id(model) != 0);
 
-    const std::vector<std::uint8_t> rgb = test_images::load("cat");
+    const std::vector<std::uint8_t> rgb = test_images::load("cat", mode.image_width, mode.image_height);
+    const std::size_t rgb_bytes = rgb.size();
     const int rate = 48000;
     nbtv_tx* tx = nbtv_tx_create(rate);
     nbtv_tx_set_callsign(tx, "n0call");
@@ -288,7 +300,7 @@ void test_model_handling(int mode_id, const char* weights, double min_psnr) {
     const int frame_samples = nbtv_tx_frame_samples(tx);
     CHECK_EQ(frame_samples, mode.frame_samples * 4);
     std::vector<float> frame(static_cast<std::size_t>(frame_samples));
-    std::vector<std::uint8_t> preview(NBTV_IMAGE_RGB_BYTES);
+    std::vector<std::uint8_t> preview(rgb_bytes);
     nbtv_tx_frame_info info{};
 
     // 還沒設定模型：編不出幀，也沒有可以取消的幀
@@ -335,7 +347,8 @@ void test_model_handling(int mode_id, const char* weights, double min_psnr) {
         CHECK_EQ(f.header_ok, 1);
         CHECK(std::strcmp(f.callsign, "N0CALL") == 0);
         CHECK_EQ(f.sequence, n);
-        quality = test_images::psnr(std::vector<std::uint8_t>(f.rgb, f.rgb + NBTV_IMAGE_RGB_BYTES), rgb);
+        CHECK(f.image_width == mode.image_width && f.image_height == mode.image_height);
+        quality = test_images::psnr(std::vector<std::uint8_t>(f.rgb, f.rgb + rgb_bytes), rgb);
         CHECK(quality > min_psnr);
         ++n;
     }
@@ -346,7 +359,8 @@ void test_model_handling(int mode_id, const char* weights, double min_psnr) {
     while (nbtv_rx_poll_frame(bare, &f)) {
         CHECK_EQ(f.decoded, 0);
         CHECK_EQ(f.model_missing, 1);
-        CHECK(std::all_of(f.rgb, f.rgb + NBTV_IMAGE_RGB_BYTES, [](std::uint8_t v) { return v == 0; }));  // 沒有畫面時 rgb 是 0
+        CHECK(std::all_of(f.rgb, f.rgb + sizeof f.rgb, [](std::uint8_t v) { return v == 0; }));  // 沒有畫面時 rgb 是 0
+        CHECK(f.image_width == mode.image_width && f.image_height == mode.image_height);          // 畫面多大還是知道的
         CHECK_EQ(f.header_ok, 1);
         CHECK(std::strcmp(f.callsign, "N0CALL") == 0);
         ++n;
@@ -748,10 +762,12 @@ int main() {
     loopback(48000, 12, "261122-3", "rocket", 24.8);
     loopback(48000, 13, "261122-4", "coffee", 29.2);
     loopback(12000, 14, "261123-4", "rocket", 23.7);
+    loopback(48000, 15, "261125-3", "rocket", 29.0);  // FM 用的大畫面：192×144
     test_model_handling(11, "261123-1", 28.3);
     test_model_handling(12, "261122-3", 23.5);
     test_model_handling(13, "261122-4", 29.4);
     test_model_handling(14, "261123-4", 22.0);
+    test_model_handling(15, "261125-3", 27.0);
     test_merging(14, "261123-4", "261124-7");
     test_merging(12, "261122-3", "261124-8");
     test_two_models();

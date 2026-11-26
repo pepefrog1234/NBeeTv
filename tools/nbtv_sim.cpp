@@ -116,7 +116,8 @@ int main(int argc, char** argv) {
     if (args.has("help")) {
         std::printf(
             "用法：nbtv-sim [選項]\n"
-            "  --mode N          模式編號 11–14（預設 11）\n"
+            "  --mode N          模式編號 11–15 或 5–7（預設 11）。5–7 的幀沒有導頻，是給 FM 用的：\n"
+            "                    這裡的衰落通道與頻偏都不適用，只有 awgn 有意義\n"
             "  --channel 名稱    awgn、poor、moderate、slow（預設 awgn）\n"
             "  --snr 清單        訊雜比，可用逗號列出多個，例如 3,4,5（3 kHz 雜訊頻寬）\n"
             "  --frames N        每個訊雜比送幾幀（預設 200）\n"
@@ -124,7 +125,7 @@ int main(int argc, char** argv) {
             "  --offset Hz       頻率偏移；--ppm N 取樣時脈誤差\n"
             "  --tone Hz         單頻載波干擾的頻率；--tone-db dB 它相對於訊號的功率（預設 0）\n"
             "  --impulse N       每秒 N 次脈衝雜訊；--impulse-db dB 脈衝期間的雜訊功率（預設 20）；--impulse-ms 持續時間（預設 20）\n"
-            "  --image 檔.ppm    要送的畫面（96×72）\n"
+            "  --image 檔.ppm    要送的畫面（大小和模式的畫面相同：96×72，模式 5–7 與 15 是 192×144）\n"
             "  --model 檔名      權重檔（預設用 models/ 裡給那個模式的）\n"
             "  --learned-mean    告訴解碼器的訊雜比用各格點雜訊的平均值，不用中位數（比較用）\n"
             "  --learned-plain   雜訊特別大的格點不壓小（比較用）\n"
@@ -168,11 +169,11 @@ int main(int argc, char** argv) {
     const std::uint64_t seed = static_cast<std::uint64_t>(args.integer("seed", 1));
     const float papr = static_cast<float>(args.num("papr", 0.0));
 
-    std::vector<std::uint8_t> image(kImageRgbBytes, 128);
+    std::vector<std::uint8_t> image;
     {
         int w = 0, h = 0;
-        if (!args.has("image") || !read_ppm(args.str("image", ""), image, &w, &h) || w != kImageWidth || h != kImageHeight) {
-            std::fprintf(stderr, "需要 --image 指定 96×72 的 PPM\n");
+        if (!args.has("image") || !read_ppm(args.str("image", ""), image, &w, &h) || w != mode->image_width || h != mode->image_height) {
+            std::fprintf(stderr, "需要 --image 指定 %d×%d 的 PPM（模式 %d 的畫面大小）\n", mode->image_width, mode->image_height, mode->id);
             return 2;
         }
         const std::string model_path = args.str("model", default_model_path(mode->id));

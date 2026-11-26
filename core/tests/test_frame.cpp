@@ -160,11 +160,12 @@ void test_header() {
 void test_frame_map() {
     // 資料格的順序與數量
     for (const Mode& m : kModes) {
-        const auto cells = data_cell_positions(m.payload_symbols);
+        const auto cells = data_cell_positions(m);
         CHECK_EQ(static_cast<int>(cells.size()), m.data_cells());
         bool ordered = true, no_pilot = true;
         for (std::size_t i = 0; i < cells.size(); ++i) {
-            no_pilot = no_pilot && !is_pilot(cells[i].symbol, cells[i].bin);
+            // 有散佈導頻的幀：資料格不落在導頻的位置上。沒有的幀每個載波都是資料格（下面另外檢查個數）。
+            no_pilot = no_pilot && (!m.scattered_pilots || !is_pilot(cells[i].symbol, cells[i].bin));
             if (i > 0) {
                 ordered = ordered && (cells[i].symbol > cells[i - 1].symbol ||
                                       (cells[i].symbol == cells[i - 1].symbol && cells[i].bin > cells[i - 1].bin));
@@ -172,12 +173,13 @@ void test_frame_map() {
         }
         CHECK(ordered);
         CHECK(no_pilot);
+        if (!m.scattered_pilots) CHECK_EQ(static_cast<int>(cells.size()), m.payload_symbols * kCarriers);
         // 格點交錯是排列
         std::vector<int> seen(static_cast<std::size_t>(m.data_cells()), 0);
         for (int i = 0; i < m.data_cells(); ++i) ++seen[static_cast<std::size_t>(m.interleaved_position(i))];
         CHECK(std::all_of(seen.begin(), seen.end(), [](int c) { return c == 1; }));
         // 相鄰的兩個格點（交錯之前）在幀裡隔了三成：衰落或突波抹掉的一片格點，不會落在連續的值上
-        CHECK_NEAR(m.interleaved_position(1) / 40.67 / m.payload_symbols, 0.31, 0.005);
+        CHECK_NEAR(m.interleaved_position(1) / static_cast<double>(m.data_cells()), 0.31, 0.005);
         // 標頭的 176 格散在整幀：每個「五分之一幀」裡都有三十格上下
         int fifth[5] = {0, 0, 0, 0, 0};
         for (int i = 0; i < kHeaderCells; ++i) ++fifth[cells[static_cast<std::size_t>(m.interleaved_position(i))].symbol * 5 / m.payload_symbols];
@@ -213,30 +215,47 @@ void test_frame_map() {
 }
 
 // 位置已知的理想解調：直接在每個符號的有效部分做 FFT，回傳各資料格（已除以發射端的刻度）。
-std::vector<cf> ideal_demod(const Mode& m, const std::vector<float>& samples, double* scale_out) {
+// spectra_out 不是空指標時，填入整幀每個符號的頻譜（同樣除過刻度）。
+std::vector<cf> ideal_demod(const Mode& m, const std::vector<float>& samples, double* scale_out,
+                            std::vector<std::vector<cf>>* spectra_out = nullptr) {
     const Fft fft(kFftSize);
-    const auto positions = data_cell_positions(m.payload_symbols);
+    const auto positions = data_cell_positions(m);
     std::vector<cf> cells;
     cells.reserve(positions.size());
-    // 先由導頻估出整體刻度（實數增益）
-    double num = 0, den = 0;
     std::vector<std::vector<cf>> spectra;
-    for (int j = 0; j < m.payload_symbols; ++j) {
+    for (int row = 0; row < m.frame_symbols(); ++row) {
         std::vector<cf> x(kFftSize);
-        const std::size_t start = static_cast<std::size_t>((j + kPreambleSymbols) * kSymbolSamples + kCyclicPrefix);
+        const std::size_t start = static_cast<std::size_t>(row * kSymbolSamples + kCyclicPrefix);
         for (int n = 0; n < kFftSize; ++n) x[static_cast<std::size_t>(n)] = cf(samples[start + static_cast<std::size_t>(n)], 0);
         fft.forward(x.data());
-        for (int k = kFirstBin; k <= kLastBin; ++k) {
-            if (is_pilot(j, k)) {
-                num += (x[static_cast<std::size_t>(k)] * pilot_value(k)).real();
+        spectra.push_back(std::move(x));
+    }
+    // 先估出整體刻度（實數增益）：有散佈導頻的幀用導頻，沒有的用開頭的 S1
+    double num = 0, den = 0;
+    if (m.scattered_pilots) {
+        for (int j = 0; j < m.payload_symbols; ++j) {
+            for (int k = kFirstBin; k <= kLastBin; ++k) {
+                if (!is_pilot(j, k)) continue;
+                num += (spectra[static_cast<std::size_t>(j + kPreambleSymbols)][static_cast<std::size_t>(k)] * pilot_value(k)).real();
                 den += pilot_value(k) * pilot_value(k);
             }
         }
-        spectra.push_back(std::move(x));
+    } else {
+        for (int k = kFirstBin; k <= kLastBin; ++k) {
+            num += (spectra[1][static_cast<std::size_t>(k)] * s1_value(m.id, k)).real();
+            den += s1_value(m.id, k) * s1_value(m.id, k);
+        }
     }
     const double scale = num / den;
     *scale_out = scale;
-    for (const CellPos& p : positions) cells.push_back(spectra[p.symbol][p.bin] / static_cast<float>(scale));
+    // 沒有散佈導頻的幀，資料格的振幅是 kFreeDataAmplitude
+    const float cell_scale = static_cast<float>(scale) * (m.scattered_pilots ? 1.0f : kFreeDataAmplitude);
+    for (const CellPos& p : positions) cells.push_back(spectra[static_cast<std::size_t>(p.symbol + kPreambleSymbols)][p.bin] / cell_scale);
+    if (spectra_out != nullptr) {
+        for (auto& row : spectra)
+            for (cf& v : row) v /= static_cast<float>(scale);
+        *spectra_out = std::move(spectra);
+    }
     return cells;
 }
 
@@ -264,10 +283,32 @@ void test_ofdm_modulator() {
         const auto clean = ofdm_modulate(m, cells, 0.0f);
         CHECK_EQ(static_cast<int>(clean.size()), m.frame_samples());
         double scale = 0;
-        const auto rx_clean = ideal_demod(m, clean, &scale);
+        std::vector<std::vector<cf>> spectra;
+        const auto rx_clean = ideal_demod(m, clean, &scale, &spectra);
         double err = 0;
         for (std::size_t i = 0; i < cells.size(); ++i) err += std::norm(rx_clean[i] - cells[i]);
         CHECK(10 * std::log10(err / static_cast<double>(cells.size())) < -60.0);
+        // 已知的符號：S1 是這個模式的序列；沒有散佈導頻的幀結尾多一個參考符號，用的是 S1 的第 0 條序列（不是任何模式的）
+        CHECK_EQ(static_cast<int>(spectra.size()), kPreambleSymbols + m.payload_symbols + (m.scattered_pilots ? 0 : 1));
+        double known_err = 0;
+        for (int k = kFirstBin; k <= kLastBin; ++k) {
+            known_err = std::max<double>(known_err, std::abs(spectra[1][static_cast<std::size_t>(k)] - cf(s1_value(m.id, k), 0)));
+            if (!m.scattered_pilots) {
+                known_err = std::max<double>(known_err, std::abs(spectra.back()[static_cast<std::size_t>(k)] - cf(s1_value(kTailReferenceId, k), 0)));
+            }
+        }
+        CHECK_NEAR(known_err, 0.0, 1e-3);
+        if (!m.scattered_pilots) {
+            // 每個酬載符號的 49 個載波都帶著資料，總功率和 S1 相同（資料格平均功率 1 × kFreeDataAmplitude²）
+            double payload_power = 0;
+            for (int j = 0; j < m.payload_symbols; ++j) {
+                for (int k = kFirstBin; k <= kLastBin; ++k) payload_power += std::norm(spectra[static_cast<std::size_t>(j + kPreambleSymbols)][static_cast<std::size_t>(k)]);
+            }
+            double used = 0;  // 用到的格點（標頭與畫面的值）平均功率是 1，沒用到的是 0
+            for (const cf& v : cells) used += std::norm(v);
+            CHECK_NEAR(payload_power / used, kFreeDataAmplitude * kFreeDataAmplitude, 1e-3);
+            CHECK_NEAR(kCarriers * kFreeDataAmplitude * kFreeDataAmplitude, kMeanSymbolPower, 1e-3);
+        }
         // 循環字首：每個符號開頭 64 點等於結尾 64 點
         double cp_err = 0;
         for (int s = 0; s < m.frame_symbols(); ++s) {

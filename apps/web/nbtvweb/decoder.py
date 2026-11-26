@@ -16,6 +16,18 @@ from typing import Callable
 IMAGE_WIDTH = 96
 IMAGE_HEIGHT = 72
 IMAGE_BYTES = IMAGE_WIDTH * IMAGE_HEIGHT * 3
+# 畫面的大小跟著模式：模式 11–14 是上面的 96×72，模式 5–7 與 15（給 FM 用的大畫面）是 192×144。
+# 位元組數各不相同，所以一張 RGB 的畫面由長度就看得出大小（picture_size）。
+# 卡片與縮圖的版面是照 96×72 排的，比較大的畫面縮進同樣的位置（card.py 的 _picture）。
+PICTURE_SIZES = ((IMAGE_WIDTH, IMAGE_HEIGHT), (192, 144))
+
+
+def picture_size(rgb: bytes) -> tuple[int, int]:
+    """這段 RGB 是多大的畫面（寬, 高）。長度不是認得的畫面大小時丟出 ValueError。"""
+    for width, height in PICTURE_SIZES:
+        if len(rgb) == width * height * 3:
+            return width, height
+    raise ValueError("不是認得的畫面大小")
 
 # 五分鐘的錄音最多約 450 幀（模式 14 每幀 0.667 秒）；超過這個數就是哪裡不對了
 MAX_FRAMES = 1000
@@ -41,19 +53,17 @@ class Frame:
     snr_db: float | None
     offset_hz: float | None
     model_missing: bool
-    rgb: bytes | None = None  # 96×72 的 RGB
-
-
-# nbtv-rx 寫的檔頭是固定的（tools/ppm.hpp 的 write_ppm）
-_PPM_HEADER = b"P6\n%d %d\n255\n" % (IMAGE_WIDTH, IMAGE_HEIGHT)
+    rgb: bytes | None = None  # RGB：96×72，模式 5–7 與 15 是 192×144（見 picture_size）
 
 
 def _read_ppm(path: Path) -> bytes:
-    """讀 nbtv-rx 存的 96×72 二進位 PPM，回傳 RGB。"""
+    """讀 nbtv-rx 存的二進位 PPM（96×72，或模式 5–7 與 15 的 192×144），回傳 RGB。"""
     data = path.read_bytes()
-    if not data.startswith(_PPM_HEADER) or len(data) != len(_PPM_HEADER) + IMAGE_BYTES:
-        raise DecodeError("decoder_failed", f"{path.name} 不是 96×72 的 PPM")
-    return data[len(_PPM_HEADER):]
+    for width, height in PICTURE_SIZES:
+        header = b"P6\n%d %d\n255\n" % (width, height)   # nbtv-rx 寫的檔頭是固定的（tools/ppm.hpp 的 write_ppm）
+        if data.startswith(header) and len(data) == len(header) + width * height * 3:
+            return data[len(header):]
+    raise DecodeError("decoder_failed", f"{path.name} 不是 96×72 或 192×144 的 PPM")
 
 
 def _parse_frame(obj: dict) -> Frame:

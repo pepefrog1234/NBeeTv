@@ -46,11 +46,13 @@ enum SelfTest {
         }
         let modeID = option("--mode", in: arguments).flatMap(Int.init) ?? Modes.defaultID
         let count = option("--frames", in: arguments).flatMap(Int.init) ?? 3
-        var images = ["coffee", "rocket", "cat"].compactMap(Demo.testImage)
+        guard let mode = Modes.find(modeID) else { return 1 }
+        // 畫面的大小跟著模式：測試圖是 96×72，畫面比較大的模式（15）每個像素重複放大
+        var images = ["coffee", "rocket", "cat"].compactMap(Demo.testImage).compactMap { Demo.enlarge($0, to: mode.pictureSize) }
         if let level = option("--flat", in: arguments).flatMap({ UInt8($0) }) {
-            images = [Data(repeating: level, count: NBTV.rgbBytes)]
+            images = [Data(repeating: level, count: mode.pictureSize.rgbBytes)]
         }
-        guard let mode = Modes.find(modeID), !images.isEmpty else { return 1 }
+        guard !images.isEmpty else { return 1 }
         let tx = CoreTransmitter()
         tx.setMode(modeID)
         tx.setCallsign(option("--callsign", in: arguments) ?? "N0CALL")
@@ -149,12 +151,14 @@ enum SelfTest {
         let useAudio = devices && !arguments.contains("--no-audio")
         // 每個模式各有一份權重檔；少了哪一份，那個模式就不會列在 Modes 裡
         let models = Modes.all.map {
-            "\($0.name)：模型 \($0.modelName)、識別碼 \(LearnedModel.idText(values: $0.learnedValues, width: $0.learnedWidth) ?? "?")、"
-                + "\($0.learnedValues) 個實數\($0.largeModel ? "、大型網路" : "")"
+            "\($0.name)：模型 \($0.modelName)、識別碼 \(LearnedModel.idText(values: $0.learnedValues, width: $0.learnedWidth, picture: $0.pictureSize) ?? "?")、"
+                + "\($0.learnedValues) 個實數\($0.largeModel ? "、大型網路" : "")\($0.largePicture ? "、畫面 \($0.pictureSize.text)" : "")"
         }
-        report("各模式的模型", models.count == LearnedModel.resourceNames.count,
+        // 每一份權重檔都有模式在用（模式 5 和 15 共用同一份，所以比的是用到的模型有幾種，不是模式有幾個）
+        let used = Set(Modes.all.map(\.modelName)).count
+        report("各模式的模型", used == LearnedModel.resourceNames.count,
                models.isEmpty ? "app 裡沒有權重檔，沒有模式可以用"
-                   : models.joined(separator: "；") + (models.count < LearnedModel.resourceNames.count ? "；其餘的權重檔不在 app 裡" : ""))
+                   : models.joined(separator: "；") + (used < LearnedModel.resourceNames.count ? "；其餘的權重檔不在 app 裡" : ""))
         guard !Modes.all.isEmpty else {
             print("[selftest] 1 項失敗")
             return 1
@@ -170,6 +174,8 @@ enum SelfTest {
             if only == nil || key.contains(only ?? "") { test() }
         }
         run("core") { testCoreLoopback(coffee) }
+        run("fm") { testLargePicture(coffee, rocket) }
+        run("fm-pilotfree") { testPilotFree(coffee) }
         run("merge") { testMergeFrames(coffee) }
         run("flat") { testFlatPictures() }
         run("export") { testExport(coffee) }
@@ -182,6 +188,7 @@ enum SelfTest {
         run("videotransmit") { testVideoTransmit(rocket) }
         run("images") { testImageFiles(coffee) }
         run("images-transmit") { testImageTransmit([coffee, rocket, Demo.testImage("cat") ?? coffee, colorBars()]) }
+        run("images-fm") { testLargeImageSequence([coffee, rocket]) }
         run("canvas") { testCanvas(coffee) }
         run("canvas-onair") { testCanvasOnAir(rocket) }
         run("schedule") { testScheduleTimes() }
@@ -225,8 +232,10 @@ enum SelfTest {
             tx.setCallsign("n0call")
             var audio = Demo.silence(seconds: 0.3)
             var previews: [Data] = []
+            // 畫面的大小跟著模式：測試圖是 96×72，畫面比較大的模式（15）每個像素重複放大
+            let picture = Demo.enlarge(image, to: mode.pictureSize) ?? image
             for _ in 0..<2 {
-                guard let frame = tx.encode(rgb: image) else {
+                guard let frame = tx.encode(rgb: picture) else {
                     report("核心收發（\(mode.name)）", false, "編碼失敗")
                     return
                 }
@@ -235,7 +244,9 @@ enum SelfTest {
             }
             audio += tx.finish() + Demo.silence(seconds: 0.5)
             let frames = Demo.receive(audio).flatMap(\.frames)
-            let good = frames.filter { $0.decoded && $0.headerOK && $0.callsign == "N0CALL" && $0.modeID == mode.id && $0.rgb != nil }
+            let good = frames.filter {
+                $0.decoded && $0.headerOK && $0.callsign == "N0CALL" && $0.modeID == mode.id && $0.rgb?.count == mode.pictureSize.rgbBytes
+            }
             // 收到的畫面和發射端的預覽只差削波失真；用錯模型的話解出來的只是雜訊，差得很遠
             let worst = zip(good, previews).map { difference($0.rgb ?? Data(), $1) }.max() ?? 255
             report("核心收發（\(mode.label)）", good.count == 2 && worst < 3,
@@ -243,12 +254,238 @@ enum SelfTest {
         }
     }
 
+    /// 模式 5、6、7：給 FM 用的大畫面，幀裡沒有導頻（同樣的時間多送 2 成的資料）。
+    ///   * 模式表：三個都是 192×144、沒有導頻，每張 2.29、2.88、4.43 秒；模式 5 和 15 用的是同一個模型
+    ///   * 選單：排在模式 15 後面自成一組，由快到慢；各處的說明寫得出它是哪一種
+    ///   * 一幀接一幀地送，中間換模式（15 → 5 → 7）：每一幀都要收到，模式與畫面都對
+    ///     （核心的收發在「核心收發」那一項每個模式各跑過一次；這裡看的是連續發射中換成另一種幀）
+    private static func testPilotFree(_ image: Data) {
+        let name = "FM 無導頻（模式 5、6、7）"
+        let expected: [(id: Int, seconds: Double, tier: String)] = [(5, 2.293, "標準"), (6, 2.880, "較細"), (7, 4.427, "細緻")]
+        var problems: [String] = []
+        var details: [String] = []
+        let large = PictureSize(width: 192, height: 144)
+        for item in expected {
+            guard let mode = Modes.find(item.id) else {
+                problems.append("app 裡沒有模式 \(item.id)（少了它的權重檔）")
+                continue
+            }
+            if !mode.pilotFree || !mode.largePicture || mode.pictureSize != large { problems.append("模式 \(item.id) 不是沒有導頻的大畫面") }
+            if abs(mode.frameSeconds - item.seconds) > 0.001 { problems.append(String(format: "模式 %d 每張 %.3f 秒", item.id, mode.frameSeconds)) }
+            if mode.label != "模式 \(item.id) · FM 無導頻" || mode.menuDetail != item.tier || mode.contentText != "192×144"
+                || !mode.summary.contains("沒有導頻") || !mode.summary.contains(mode.modelName) {
+                problems.append("模式 \(item.id) 的說明是「\(mode.label)」「\(mode.menuDetail)」「\(mode.contentText)」「\(mode.summary)」")
+            }
+            details.append("\(mode.label)：\(mode.secondsText)、\(mode.menuDetail)、模型 \(mode.modelName)")
+        }
+        // 有導頻的模式都不能被當成這一類
+        for mode in Modes.all where !expected.contains(where: { $0.id == mode.id }) && mode.pilotFree { problems.append("\(mode.name) 被當成沒有導頻的") }
+        if let five = Modes.find(5), let fifteen = Modes.find(15) {
+            if five.modelName != fifteen.modelName || five.learnedValues != fifteen.learnedValues { problems.append("模式 5 和 15 用的不是同一個模型") }
+            if five.frameSeconds >= fifteen.frameSeconds { problems.append("模式 5 沒有比模式 15 快") }
+        }
+        let tailIDs = Array(Modes.menuOrder.map(\.id).suffix(4))
+        if tailIDs != [15, 5, 6, 7] { problems.append("選單最後四個是模式 \(tailIDs)，應該是 15、5、6、7") }
+
+        // 連續發射中換模式：15（有導頻）→ 5 → 7，各兩幀，中間沒有空檔
+        if problems.isEmpty, let picture = Demo.enlarge(image, to: large) {
+            let tx = CoreTransmitter()
+            tx.setCallsign("n0call")
+            var audio = Demo.silence(seconds: 0.3)
+            var sent: [Int] = []
+            for id in [15, 5, 7] {
+                tx.setMode(id)
+                for _ in 0..<2 {
+                    guard let frame = tx.encode(rgb: picture) else {
+                        problems.append("模式 \(id) 編碼失敗")
+                        break
+                    }
+                    audio += frame.samples
+                    sent.append(id)
+                }
+            }
+            audio += tx.finish() + Demo.silence(seconds: 0.5)
+            let got = Demo.receive(audio).flatMap(\.frames).filter { $0.decoded && $0.headerOK && $0.callsign == "N0CALL" && $0.rgb?.count == large.rgbBytes }
+            if got.map(\.modeID) != sent { problems.append("送的是模式 \(sent)，收到的是 \(got.map(\.modeID))") }
+            details.append("連續送模式 15、5、7 各兩幀：收到 \(got.count)/\(sent.count) 張")
+        }
+        report(name, problems.isEmpty, problems.isEmpty ? details.joined(separator: "；") : problems.joined(separator: "；"))
+    }
+
+    /// 模式 15：給 VHF／UHF 的 FM 語音通道用的大畫面（192×144）。畫面的大小跟著模式走的每一段都要對：
+    ///   * 模式表：模式 15 的畫面是 192×144，模式 11–14 是 96×72；選單裡有導頻的模式它排在最後，說明寫著大小
+    ///   * 一張 RGB 的畫面由長度看出大小，兩種都做得出影像；編碼器只收目前這個模式的大小
+    ///   * 來源畫面縮成 192×144；字印在 192×144 的畫面上，字帶佔的比例和 96×72 的相同
+    ///   * 收到的 192×144 畫面進了「最近收到」，存成圖檔也是 192×144
+    ///   * 整個發射流程（app 的狀態物件、模擬的音訊輸出、記錄用的 PTT）：選了模式 15，預覽就是 192×144；
+    ///     送出去的幀解回來是模式 15、192×144，而且就是預覽的樣子；換回模式 11，預覽變回 96×72
+    private static func testLargePicture(_ image: Data, _ other: Data) {
+        let name = "FM 大畫面（模式 15）：畫面大小跟著模式"
+        guard let mode = Modes.find(15) else {
+            report(name, false, "app 裡沒有模式 15（少了它的權重檔）")
+            return
+        }
+        var problems: [String] = []
+        var details: [String] = []
+        let large = mode.pictureSize
+
+        // 模式表與說明
+        if large != PictureSize(width: 192, height: 144) || !mode.largePicture { problems.append("模式 15 的畫面是 \(large.text)") }
+        for standard in Modes.all where standard.id != 15 && !standard.pilotFree && standard.pictureSize != .standard {
+            problems.append("\(standard.name) 的畫面是 \(standard.pictureSize.text)")
+        }
+        // 選單裡有導頻的模式排到模式 15 為止，後面只剩幀裡沒有導頻的那一組（見 testPilotFree）
+        if Modes.menuOrder.filter({ !$0.pilotFree }).last?.id != 15 { problems.append("選單裡有導頻的模式最後一個不是模式 15") }
+        if mode.label != "模式 15 · FM 大畫面" || mode.contentText != "192×144" || !mode.summary.contains("192×144") || !mode.summary.contains(mode.modelName) {
+            problems.append("說明是「\(mode.label)」「\(mode.contentText)」「\(mode.summary)」")
+        }
+        if !NBTV.pictureSizes.contains(.standard) || !NBTV.pictureSizes.contains(large) || NBTV.pictureSizes.count != 2 {
+            problems.append("畫面的大小有 \(NBTV.pictureSizes.map(\.text))")
+        }
+
+        // 由長度看出大小
+        guard let big = Demo.enlarge(image, to: large), big.count == large.rgbBytes else {
+            report(name, false, "測試圖放大不成 \(large.text)")
+            return
+        }
+        if NBTV.pictureSize(ofRGB: image) != .standard || NBTV.pictureSize(ofRGB: big) != large || NBTV.pictureSize(ofRGB: Data(count: 100)) != nil {
+            problems.append("由長度認畫面的大小認錯了")
+        }
+        if let cg = NBTV.image(fromRGB: big) {
+            if cg.width != large.width || cg.height != large.height || bytes(of: cg) != big { problems.append("192×144 的影像是 \(cg.width)×\(cg.height)") }
+        } else {
+            problems.append("192×144 的畫面做不出影像")
+        }
+        if NBTV.image(fromRGB: Data(count: 100)) != nil { problems.append("長度不對的資料也做出了影像") }
+
+        // 編碼器只收目前這個模式的大小
+        let tx = CoreTransmitter()
+        tx.setCallsign("N0CALL")
+        if !tx.setMode(15) || tx.pictureSize != large || tx.encode(rgb: image) != nil { problems.append("模式 15 收下了 96×72 的畫面") }
+        if !tx.setMode(11) || tx.pictureSize != .standard || tx.encode(rgb: big) != nil { problems.append("模式 11 收下了 192×144 的畫面") }
+        if tx.setMode(99) || tx.pictureSize != .standard { problems.append("換到不存在的模式之後，畫面的大小變了") }
+
+        // 縮放：任意大小 → 192×144；兩種大小之間互換
+        if let cg = NBTV.image(fromRGB: big), let same = FrameScaler.scale(cg, mode: .fill, size: large) {
+            if same.count != large.rgbBytes || difference(same, big) > 1 { problems.append(String(format: "192×144 縮成 192×144 差了 %.2f", difference(same, big))) }
+        } else {
+            problems.append("縮不出 192×144 的畫面")
+        }
+        if let up = FrameScaler.resize(image, to: large), let down = FrameScaler.resize(big, to: .standard) {
+            // 縮回來不會逐位元相同（重新取樣）；換成別張圖的話會差到 30 以上
+            if up.count != large.rgbBytes || down.count != NBTV.rgbBytes || difference(down, image) > 8 {
+                problems.append(String(format: "兩種大小互換：%d、%d 位元組，縮回來和原圖差 %.2f", up.count, down.count, difference(down, image)))
+            }
+        } else {
+            problems.append("兩種大小之間換不過去")
+        }
+        if FrameScaler.resize(image, to: .standard) != image || FrameScaler.resize(Data(count: 100), to: large) != nil { problems.append("resize 該原樣回傳或回傳 nil 的沒有照做") }
+
+        // 畫布：192×144 的字帶是 96×72 的兩倍高（佔畫面的比例相同），字帶以外一個位元組都不動
+        let style = CanvasStyle(text: "CQ N0CALL", position: .bottom)
+        if let small = CanvasLayer(style: style), let layer = CanvasLayer(style: style, size: large) {
+            if layer.size != large || small.size != .standard || layer.lines != small.lines || layer.fontSize != small.fontSize
+                || layer.rows.lowerBound != 2 * small.rows.lowerBound || layer.rows.upperBound != 2 * small.rows.upperBound {
+                problems.append("192×144 的字帶在第 \(layer.rows.lowerBound)–\(layer.rows.upperBound - 1) 列（96×72 的是 \(small.rows.lowerBound)–\(small.rows.upperBound - 1)）")
+            }
+            let gray = Data(repeating: 128, count: large.rgbBytes)
+            let stamped = layer.apply(to: gray)
+            var bright = 0
+            for index in (layer.rows.lowerBound * large.width)..<(layer.rows.upperBound * large.width)
+            where Int(stamped[3 * index]) + Int(stamped[3 * index + 1]) + Int(stamped[3 * index + 2]) > 3 * 225 { bright += 1 }
+            if difference(stamped, gray, rows: 0..<layer.rows.lowerBound) != 0 { problems.append("192×144：字帶以外的畫面被改了") }
+            if bright < 600 { problems.append("192×144：字帶裡亮的只有 \(bright) 點") }
+            // 大小不對的畫面原樣回傳，不會印歪
+            if layer.apply(to: image) != image || small.apply(to: big) != big { problems.append("圖層印到了大小不對的畫面上") }
+            details.append("字帶 \(layer.rows.count) 列（96×72 的是 \(small.rows.count) 列）、亮 \(bright) 點")
+        } else {
+            problems.append("做不出 192×144 的圖層")
+        }
+
+        // 收到的 192×144 畫面：進「最近收到」，存成圖檔也是 192×144
+        var audio = Demo.silence(seconds: 0.3)
+        tx.setMode(15)
+        if let frame = tx.encode(rgb: big) { audio += frame.samples }
+        audio += tx.finish() + Demo.silence(seconds: 0.5)
+        let history = AppModel(settings: AppSettings(store: nil), live: false)
+        for frame in Demo.receive(audio).flatMap(\.frames) { history.add(frame, time: Date()) }
+        if let shown = history.displayedFrame, shown.modeID == 15 {
+            if shown.image.width != large.width || shown.image.height != large.height { problems.append("收到的畫面是 \(shown.image.width)×\(shown.image.height)") }
+            let source = AppModel.exportFile(for: shown).flatMap { CGImageSourceCreateWithData($0.data as CFData, nil) }
+            if let saved = source.flatMap({ CGImageSourceCreateImageAtIndex($0, 0, nil) }) {
+                if saved.width != large.width || saved.height != large.height { problems.append("存出來的圖檔是 \(saved.width)×\(saved.height)") }
+            } else {
+                problems.append("收到的大畫面存不成圖檔")
+            }
+        } else {
+            problems.append("模式 15 的幀沒有進「最近收到」")
+        }
+
+        // 整個發射流程
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("nbtv-selftest-fm-\(getpid()).mp4")
+        defer { try? FileManager.default.removeItem(at: url) }
+        guard let cg = NBTV.image(fromRGB: Demo.enlarge(other, to: large) ?? other), Demo.makeVideo(at: url, from: cg, seconds: 3, fps: 10) else {
+            report(name, false, "示範影片做不出來")
+            return
+        }
+        setenv("NBTV_NO_DEVICES", "1", 1)   // 狀態物件啟動時不開輸入裝置與鏡頭
+        let settings = AppSettings(store: nil)
+        settings.callsign = "N0CALL"
+        settings.sourceKind = .video
+        settings.loopVideo = true
+        settings.txModeID = 15
+        let ptt = RecordingPTT()
+        settings.debugPTTDriver = { ptt }
+        let model = AppModel(settings: settings, live: true)
+        let sent = SampleCollector()
+        model.debugUseSimulatedOutput { sent.append($0) }
+        model.start()
+        defer { model.shutdown() }
+        var opened: Bool?
+        model.openVideo(url) { opened = $0 }
+        guard Demo.wait(timeout: 10, until: { opened != nil }), opened == true, Demo.wait(timeout: 10, until: { model.canTransmit }),
+              Demo.wait(timeout: 5, until: { bytes(of: model.sourcePreview)?.count == large.rgbBytes }), let preview = bytes(of: model.sourcePreview) else {
+            report(name, false, problems.isEmpty ? "選了模式 15，預覽卻一直不是 192×144（或影片開不起來）" : problems.joined(separator: "；"))
+            return
+        }
+        if model.txPictureSize != large { problems.append("送出的大小是 \(model.txPictureSize.text)") }
+        // 畫布開著：預覽上的字是照 192×144 印的
+        model.setCanvasEnabled(true)
+        if !Demo.wait(timeout: 5, until: { bytes(of: model.sourcePreview) != preview }) { problems.append("打開畫布之後預覽沒有變") }
+        let stampedPreview = bytes(of: model.sourcePreview) ?? preview
+        if stampedPreview.count != large.rgbBytes { problems.append("打開畫布之後預覽變成 \(stampedPreview.count) 位元組") }
+        _ = sent.take()
+        model.startTransmit()
+        if !Demo.wait(timeout: 20, until: { model.txFramesSent >= 2 || model.txPhase == .idle }) || model.txPhase == .idle {
+            problems.append("模式 15 沒有送出畫面" + (model.notice.map { "（\($0)）" } ?? ""))
+        }
+        if let onAir = bytes(of: model.txPreview), onAir.count != large.rgbBytes { problems.append("發射中的預覽是 \(onAir.count) 位元組") }
+        model.stopTransmit()
+        _ = Demo.wait(timeout: 15) { model.txPhase == .idle }
+        let frames = Demo.receive(sent.take() + Demo.silence(seconds: 0.5)).flatMap(\.frames).filter { $0.decoded }
+        if let first = frames.first, let rgb = first.rgb {
+            let off = difference(rgb, stampedPreview)
+            if first.modeID != 15 || rgb.count != large.rgbBytes || off > 12 {
+                problems.append(String(format: "送出去的第一張是模式 %d、%d 位元組，和預覽平均差 %.1f", first.modeID, rgb.count, off))
+            }
+            details.append(String(format: "發射：送出 %d 張都是 192×144，第一張解回來和預覽平均差 %.1f／255", frames.count, off))
+        } else {
+            problems.append("模式 15 送出去的畫面一張都解不回來")
+        }
+        if frames.contains(where: { $0.modeID != 15 || $0.rgb?.count != large.rgbBytes }) { problems.append("送出去的幀裡有不是模式 15 的") }
+        // 換回模式 11：預覽變回 96×72，字也照 96×72 重新印
+        settings.txModeID = 11
+        if !Demo.wait(timeout: 5, until: { bytes(of: model.sourcePreview)?.count == NBTV.rgbBytes }) { problems.append("換回模式 11 之後預覽沒有變回 96×72") }
+        if model.txPictureSize != .standard { problems.append("換回模式 11 之後送出的大小是 \(model.txPictureSize.text)") }
+        report(name, problems.isEmpty, problems.isEmpty ? details.joined(separator: "；") : problems.joined(separator: "；"))
+    }
+
     /// 合併最近幾幀：同一張畫面在很弱的訊號下連續送 6 張。打開合併之後，後面幾張要比不合併的接近原圖；
     /// 第一張前面沒有東西可以合，兩者一模一樣。雜訊是固定種子的亂數，每次的結果相同。
     private static func testMergeFrames(_ image: Data) {
         var checkedAppReceiver = false
         for mode in Modes.all {
-            guard let modelID = LearnedModel.id(values: mode.learnedValues, width: mode.learnedWidth),
+            guard let modelID = LearnedModel.id(values: mode.learnedValues, width: mode.learnedWidth, picture: mode.pictureSize),
                   MergeWeights.covers(modelID: modelID) else {
                 report("合併最近幾幀（\(mode.label)）", nil, "這個模式的模型沒有配合併用的權重")
                 continue
@@ -311,7 +548,7 @@ enum SelfTest {
         var ok = true
         for mode in Modes.all {
             for level: UInt8 in [0, 255] {
-                let picture = Data(repeating: level, count: NBTV.rgbBytes)
+                let picture = Data(repeating: level, count: mode.pictureSize.rgbBytes)
                 let tx = CoreTransmitter()
                 tx.setMode(mode.id)
                 tx.setCallsign("N0CALL")
@@ -1099,7 +1336,7 @@ enum SelfTest {
         return rgb
     }
 
-    /// 兩張 96×72 的畫面平均每個值差多少。
+    /// 兩張一樣大的畫面平均每個值差多少。
     private static func difference(_ a: Data, _ b: Data) -> Double {
         guard a.count == b.count, !a.isEmpty else { return 255 }
         var total = 0
@@ -1442,6 +1679,125 @@ enum SelfTest {
         report(name, problems.isEmpty, problems.isEmpty ? details.joined(separator: "；") : problems.joined(separator: "；"))
     }
 
+    /// 圖片序列與「存成影片時印上訊雜比」配上畫面是 192×144 的模式（用模式 5）：這兩樣是照 96×72 寫的，
+    /// 這裡確認它們跟著模式的畫面大小。
+    ///   * 預覽：模式 12 時是那張圖縮成 96×72 的樣子；換成模式 5，重算成 192×144
+    ///   * 發射：兩張依序各送一次、自動停止；解回來是模式 5、192×144，各自就是那一張圖縮成 192×144 的樣子
+    ///   * 存影片：192×144 的畫面一樣是 960×720 的一格（每個像素放大五倍），字印在同一個位置，那一塊以外不受影響
+    private static func testLargeImageSequence(_ pictures: [Data]) {
+        let name = "圖片序列與存影片印訊雜比：配上 192×144 的模式"
+        guard let mode = Modes.find(5), mode.largePicture else {
+            report(name, false, "app 裡沒有模式 5（少了它的權重檔）")
+            return
+        }
+        let large = mode.pictureSize
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("nbtv-selftest-sequence-fm-\(getpid())", isDirectory: true)
+        try? FileManager.default.removeItem(at: folder)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let fileNames = ["pic1.png", "pic2.png"]
+        var references: [Data] = []   // 各張圖縮成 192×144 的樣子
+        var small: [Data] = []        // 縮成 96×72 的樣子
+        for (index, rgb) in pictures.prefix(2).enumerated() {
+            let url = folder.appendingPathComponent(fileNames[index])
+            guard let image = NBTV.image(fromRGB: rgb), Demo.writeImage(image, to: url, scale: 4), let loaded = ImageSequenceSource.load(url),
+                  let big = FrameScaler.scale(loaded.image, mode: .fill, size: large), let little = FrameScaler.scale(loaded.image, mode: .fill) else { break }
+            references.append(big)
+            small.append(little)
+        }
+        guard references.count == 2, references[0].count == large.rgbBytes, small[0].count == NBTV.rgbBytes else {
+            report(name, false, "測試用的圖片檔做不出來")
+            return
+        }
+
+        setenv("NBTV_NO_DEVICES", "1", 1)   // 狀態物件啟動時不開輸入裝置與鏡頭
+        let settings = AppSettings(store: nil)
+        settings.callsign = "N0CALL"
+        settings.sourceKind = .images
+        settings.txModeID = 12   // 先用畫面是 96×72 的模式
+        let ptt = RecordingPTT()
+        settings.debugPTTDriver = { ptt }
+        let model = AppModel(settings: settings, live: true)
+        let sent = SampleCollector()
+        model.debugUseSimulatedOutput { sent.append($0) }
+        model.start()
+        defer { model.shutdown() }
+
+        var problems: [String] = []
+        var details: [String] = []
+        if model.openImages([folder]) != 2 { problems.append("選資料夾之後有 \(model.imageFiles.count) 張") }
+        if !Demo.wait(timeout: 10, until: { bytes(of: model.sourcePreview).map { $0.count == NBTV.rgbBytes && difference($0, small[0]) < 0.5 } == true }) {
+            problems.append("模式 12：預覽不是第一張縮成 96×72 的樣子")
+        }
+        // 換成畫面是 192×144 的模式：預覽重算成那個大小
+        settings.txModeID = mode.id
+        if !Demo.wait(timeout: 10, until: { bytes(of: model.sourcePreview).map { $0.count == large.rgbBytes && difference($0, references[0]) < 0.5 } == true }) {
+            problems.append("換成模式 \(mode.id) 之後，預覽沒有變成第一張縮成 \(large.text) 的樣子")
+        }
+        if model.txPictureSize != large { problems.append("送出的大小是 \(model.txPictureSize.text)") }
+
+        // 兩張依序各送一次，送完自己停
+        _ = sent.take()
+        _ = ptt.take()
+        model.startTransmit()
+        if !Demo.wait(timeout: 40, until: { model.txPhase == .idle && model.txFramesSent >= 1 }) {
+            problems.append("發射沒有結束" + (model.notice.map { "（\($0)）" } ?? ""))
+            model.abortTransmit()
+            _ = Demo.wait(timeout: 10) { model.txPhase == .idle }
+        }
+        Demo.spin(0.3)   // PTT 的放開在背景佇列上做
+        if ptt.take() != [true, false] { problems.append("PTT 不是「按下一次、放開一次」") }
+        if let notice = model.notice { problems.append(notice) }
+        let frames = Demo.receive(sent.take() + Demo.silence(seconds: 0.5)).flatMap(\.frames)
+        let good = frames.filter { $0.decoded && $0.headerOK && $0.callsign == "N0CALL" && $0.modeID == mode.id && $0.rgb?.count == large.rgbBytes }
+        if good.count != 2 || frames.count != 2 || model.txFramesSent != 2 {
+            problems.append("送出 \(model.txFramesSent) 張，收到 \(frames.count) 張，其中是模式 \(mode.id)、\(large.text) 而且解得出來的有 \(good.count) 張，預期都是 2")
+        } else {
+            var worst = 0.0
+            for (index, frame) in good.enumerated() {
+                guard let rgb = frame.rgb else { continue }
+                let own = difference(rgb, references[index]), other = difference(rgb, references[1 - index])
+                worst = max(worst, own)
+                // 編碼有損失，和原圖不會完全一樣；但要比另一張像得多
+                if own > 12 || other < 2 * own { problems.append(String(format: "第 %d 張解回來和自己那張圖平均差 %.1f、和另一張差 %.1f", index + 1, own, other)) }
+            }
+            details.append(String(format: "兩張依序送出、自動停止，解回來是模式 %d、%@，和原圖平均最多差 %.1f／255", mode.id, large.text, worst))
+        }
+        if model.imageIndex != 0 { problems.append("送完之後位置沒有回到第一張（在第 \(model.imageIndex + 1) 張）") }
+
+        // 存成影片時印上訊雜比：192×144 的畫面
+        let label = "SNR 12.3 dB"
+        let rect = SequenceVideo.stampRect(for: label)
+        let cornerWidth = 400, cornerHeight = 100
+        if let picture = NBTV.image(fromRGB: references[0]),
+           let stamped = SequenceVideo.frameImage(SequenceVideo.Picture(image: picture, start: 0, label: label)),
+           let bare = SequenceVideo.frameImage(SequenceVideo.Picture(image: picture, start: 0)),
+           let stampedCorner = cornerRGB(of: stamped, width: cornerWidth, height: cornerHeight),
+           let bareCorner = cornerRGB(of: bare, width: cornerWidth, height: cornerHeight) {
+            if stamped.width != SequenceVideo.width || stamped.height != SequenceVideo.height { problems.append("影片的一格是 \(stamped.width)×\(stamped.height)") }
+            // 沒印字的那一格：畫面的每個像素放大五倍
+            let times = SequenceVideo.width / large.width
+            var expected = Data(capacity: cornerWidth * cornerHeight * 3)
+            for y in 0..<cornerHeight {
+                for x in 0..<cornerWidth {
+                    let offset = 3 * ((y / times) * large.width + x / times)
+                    expected.append(contentsOf: references[0][offset..<(offset + 3)])
+                }
+            }
+            let enlarged = difference(bareCorner, expected)
+            let inside = difference(stampedCorner, bareCorner, width: cornerWidth, in: rect)
+            let below = difference(stampedCorner, bareCorner, width: cornerWidth,
+                                   in: CGRect(x: 0, y: rect.maxY + 2, width: CGFloat(cornerWidth), height: CGFloat(cornerHeight) - rect.maxY - 2))
+            if times != 5 || enlarged > 1 || inside < 20 || below != 0 {
+                problems.append(String(format: "存影片：放大 %d 倍，沒印字的那一格和放大的畫面平均差 %.2f，印字的那一塊差 %.1f，那一塊下面差 %.2f", times, enlarged, inside, below))
+            }
+            details.append(String(format: "存影片的一格 %d×%d，畫面放大 %d 倍，印字的那一塊和沒印的平均差 %.0f／255", stamped.width, stamped.height, times, inside))
+        } else {
+            problems.append("192×144 的畫面做不出影片的一格")
+        }
+        report(name, problems.isEmpty, problems.isEmpty ? details.joined(separator: "；") : problems.joined(separator: "；"))
+    }
+
     /// 用圖片序列當來源的整個發射流程。和影片來源的測試一樣用 app 真正的狀態物件，音訊輸出換成模擬的、PTT 換成記錄用的：
     ///   * 選了資料夾，預覽是第一張；按下發射，照檔名的順序一張一張送，每張送一次，送完自動停止、放開 PTT，位置回到第一張
     ///   * 送到一半按停止：這一張送完就停；已經取走、還沒送出去的那一張退回去，再按發射從它接著送到最後一張（沒有哪一張被跳過或重複）
@@ -1695,16 +2051,17 @@ enum SelfTest {
 
     // MARK: 畫布
 
-    /// 96×72 的 CGImage 原本的 RGB 位元組（用 NBTV.image(fromRGB:) 做出來的影像）。
+    /// CGImage 原本的 RGB 位元組（用 NBTV.image(fromRGB:) 做出來的影像：96×72 或 192×144）。
     private static func bytes(of image: CGImage?) -> Data? {
-        guard let data = image?.dataProvider?.data as Data?, data.count == NBTV.rgbBytes else { return nil }
+        guard let data = image?.dataProvider?.data as Data?, NBTV.pictureSize(ofRGB: data) != nil else { return nil }
         return data
     }
 
-    /// 兩張畫面在指定的那幾列平均每個值差多少。
+    /// 兩張畫面（一樣大：96×72 或 192×144）在指定的那幾列平均每個值差多少。
     private static func difference(_ a: Data, _ b: Data, rows: Range<Int>) -> Double {
-        let range = (rows.lowerBound * NBTV.imageWidth * 3)..<(rows.upperBound * NBTV.imageWidth * 3)
-        guard a.count == NBTV.rgbBytes, b.count == NBTV.rgbBytes, !range.isEmpty else { return 255 }
+        guard a.count == b.count, let size = NBTV.pictureSize(ofRGB: a) else { return 255 }
+        let range = (rows.lowerBound * size.width * 3)..<(rows.upperBound * size.width * 3)
+        guard !range.isEmpty, range.upperBound <= a.count else { return 255 }
         return difference(a.subdata(in: range), b.subdata(in: range))
     }
 
@@ -1787,7 +2144,20 @@ enum SelfTest {
                 let tx = CoreTransmitter()
                 tx.setMode(mode.id)
                 tx.setCallsign("N0CALL")
-                guard let frame = tx.encode(rgb: stamped) else { continue }
+                // 畫面比較大的模式（15）：同一張圖放大，字照那個大小重新印
+                var layer = layer, image = image, stamped = stamped
+                if mode.largePicture {
+                    guard let big = Demo.enlarge(image, to: mode.pictureSize),
+                          let bigLayer = CanvasLayer(style: layer.style, size: mode.pictureSize) else {
+                        problems.append("\(mode.name)：做不出 \(mode.pictureSize.text) 的圖層")
+                        continue
+                    }
+                    (layer, image, stamped) = (bigLayer, big, bigLayer.apply(to: big))
+                }
+                guard let frame = tx.encode(rgb: stamped) else {
+                    problems.append("\(mode.name)：印了字的畫面編不出來")
+                    continue
+                }
                 let audio = Demo.silence(seconds: 0.3) + frame.samples + tx.finish() + Demo.silence(seconds: 0.5)
                 guard let received = Demo.receive(audio).flatMap(\.frames).first(where: { $0.decoded })?.rgb else {
                     problems.append("\(mode.name)：印了字的畫面沒有收到")

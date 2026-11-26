@@ -19,7 +19,8 @@
 
 namespace nbtv::nn {
 
-// 潛在張量的格子：畫面縮小 8 倍
+// 標準大小（96×72）的畫面的潛在張量格子：畫面縮小 8 倍。別的畫面大小的格子由模型自己算（learned_codec.cpp）；
+// 合併最近幾幀用的小網路（learned_merge.cpp）只配標準大小的模型，用的是這一組。
 inline constexpr int kGridH = kImageHeight / 8;  // 9
 inline constexpr int kGridW = kImageWidth / 8;   // 12
 
@@ -104,7 +105,7 @@ struct FileHeader {
     std::uint32_t latent = 0;     // 潛在通道數
     std::uint32_t count = 0;      // 張量的個數
     std::uint32_t dtype = 0;      // 0：32 位元浮點數；1：16 位元
-    std::uint32_t extra = 0;      // 畫面的模型：保留（0）
+    std::uint32_t extra = 0;      // 畫面的模型：畫面大小（0 是 96×72，否則寬 << 16 | 高）
 };
 
 // 解析一個權重檔：魔術字、標頭、各個張量、結尾的 CRC-32（交給 id）。格式寫在 tools/learned/export.py 開頭。

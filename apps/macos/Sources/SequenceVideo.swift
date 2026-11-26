@@ -10,7 +10,8 @@ import Foundation
 
 enum SequenceVideo {
     static let frameRate: Int32 = 24
-    /// 96×72 的畫面放大幾倍存：10 倍是 960×720。用最近鄰放大，和主畫面上看到的一樣是一格一格的，壓縮之後邊緣也不會糊掉。
+    /// 96×72 的畫面放大幾倍存：10 倍是 960×720（192×144 的畫面同樣存成 960×720，放大 5 倍）。
+    /// 用最近鄰放大，和主畫面上看到的一樣是一格一格的，壓縮之後邊緣也不會糊掉。
     static let scale = 10
     static var width: Int { NBTV.imageWidth * scale }
     static var height: Int { NBTV.imageHeight * scale }
@@ -119,7 +120,7 @@ enum SequenceVideo {
         ExportError(message: writer.error.map { L("%@：%@", what, $0.localizedDescription) } ?? what)
     }
 
-    /// 把一張畫面畫成影片的一格，畫進影片用的緩衝。
+    /// 把一張畫面（96×72 或 192×144）畫成影片的一格，畫進影片用的緩衝。
     private static func pixelBuffer(for picture: Picture, pool: CVPixelBufferPool?) -> CVPixelBuffer? {
         guard let pool, let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
         var created: CVPixelBuffer?
@@ -136,7 +137,7 @@ enum SequenceVideo {
         return buffer
     }
 
-    /// 影片的一格：96×72 的畫面放大十倍（最近鄰，不內插），有 label 的話印在左上角。
+    /// 影片的一格：96×72 的畫面放大十倍、192×144 的放大五倍（最近鄰，不內插），有 label 的話印在左上角。
     /// context 的大小是 width×height，y 軸朝上。
     private static func draw(_ picture: Picture, in context: CGContext) {
         context.interpolationQuality = .none

@@ -1,6 +1,8 @@
-# 訓練影像的聯合編碼模型（結構在 model.py）。資料是 prep.py 切好的 uint8 陣列 [N,72,96,3]（.npy）。
+# 訓練影像的聯合編碼模型（結構在 model.py）。資料是 prep.py 切好的 uint8 陣列 [N,72,96,3]（.npy）；
+# 畫面的大小由資料決定（寬與高要是 8 的倍數）：模式 15 的模型用的是 prep_hi.py 切的 [N,144,192,3]。
 # 用法：python3 train.py --train data/train.npy --val data/val.npy --latent 72 --out run [--init 舊的權重檔.bin]
-#       --latent 是潛在通道數，決定一張畫面變成幾個實數：72 → 7776（模式 11、13），24 → 2592（模式 12），14 → 1512（模式 14）。
+#       --latent 是潛在通道數，決定一張畫面變成幾個實數：72 → 7776（模式 11、13），24 → 2592（模式 12），14 → 1512（模式 14）；
+#       192×144 的畫面格子是 18×24，18 個通道就是 7776（模式 15）。
 # 在 Apple 晶片的 GPU（MPS）上跑；3 萬步約 50 分鐘（M4 Max）。
 #
 # 通道（結構 2）：每張畫面抽一個平均訊雜比；四分之一的畫面是白雜訊，其餘是衰落——每個值各自乘上一個隨機的功率增益
@@ -8,6 +10,10 @@
 # 所以一片衰落落在潛在張量上是散開的，這裡直接讓每個值各自獨立。另外有兩成的畫面再隨機抹掉一部分的值
 # （干擾、音訊斷續），接收端估的雜訊也加一點誤差。接收端的處理（model.receive）和 C++ 的一樣。
 # 結構 1 只有白雜訊，重現第一版的權重用。
+#
+# 給 VHF／UHF 的 FM 語音通道用的模型（模式 15）訓練的條件不一樣：FM 的音訊訊雜比高（音量設對時 34–36 dB）、不像短波那樣衰落，
+# 所以訊雜比的範圍改成 --snr-lo 10 --snr-hi 40、有衰落的畫面降到三成（--fade-share 0.3）、解碼器認得的訊雜比上限
+# 訓練時用 40 dB（--max-snr-db 40；核心推論時一律夾在 30 dB，量過兩者差不到 0.01 dB）。完整的指令在 README.md。
 #
 # 抹掉的值（缺值）預設是：兩成的畫面（--lost-share）、每張抹掉 0 到四成（--lost-max）、訊號比其餘的弱 20 dB（--lost-db）。
 # 模式 11 的第二、三版都是這樣訓練的，結果是「一半以上的值沒收到」超出訓練的範圍：這時雜訊的中位數落在沒收到的值上，
@@ -57,12 +63,12 @@ import time
 import numpy as np
 import torch
 
-from model import DEFAULT_WIDTHS, JSCC, psnr_uint8, receive, reference_noise, widths_of
+from model import DEFAULT_WIDTHS, JSCC, MAX_SNR_DB, psnr_uint8, receive, reference_noise, widths_of
 
 p = argparse.ArgumentParser()
 p.add_argument("--train", required=True)
 p.add_argument("--val", required=True)
-p.add_argument("--latent", type=int, required=True)       # 潛在張量的通道數；實數個數 = latent × 9 × 12
+p.add_argument("--latent", type=int, required=True)       # 潛在張量的通道數；實數個數 = latent × 9 × 12（192×144 的畫面是 × 18 × 24）
 p.add_argument("--arch", type=int, default=2)             # 模型的結構編號，見 model.py
 p.add_argument("--widths", default="")                    # 各層的寬度：四個數用逗號隔開；不給就是 model.DEFAULT_WIDTHS
 p.add_argument("--init", default="")                      # 從這份權重檔（export.py 的 .bin）接著訓練；結構 1 的、潛在通道數不同的、比較窄的都可以
@@ -72,6 +78,9 @@ p.add_argument("--batch", type=int, default=64)
 p.add_argument("--lr", type=float, default=2e-4)
 p.add_argument("--snr-lo", type=float, default=None)      # 預設：結構認得的下限
 p.add_argument("--snr-hi", type=float, default=28.0)
+p.add_argument("--fade-share", type=float, default=0.75)  # 幾成的畫面有衰落（各個值的雜訊不一樣大）；短波用 0.75，FM 用的模型是 0.3
+p.add_argument("--max-snr-db", type=float, default=MAX_SNR_DB)   # 訓練時解碼器認得的訊雜比上限；FM 用的模型是 40
+p.add_argument("--checks", default="awgn0,awgn10,awgn20,awgn99,fade5,fade15")   # 驗證的情形（決定退回與最好的一份）
 p.add_argument("--lost-share", type=float, default=0.2)   # 幾成的畫面另外有一部分的值幾乎沒收到（干擾、音訊斷續）
 p.add_argument("--lost-max", type=float, default=0.4)     # 那些畫面裡沒收到的值最多佔幾成（每張在 0 到這個數之間抽）
 p.add_argument("--lost-db", default="20")                 # 沒收到的值訊號比其餘的弱幾 dB：一個數，或「下限,上限」（每張抽一個）
@@ -107,7 +116,12 @@ config = {"latent": args.latent, "arch": args.arch, "widths": list(widths), "ste
           "lr": args.lr, "warmup": args.warmup, "ema": args.ema,
           "lost_share": args.lost_share, "lost_max": args.lost_max, "lost_db": list(lost_db)}
 # 有缺值的選項之前存下來的狀態沒有這幾項，當時用的就是這組預設值
-OLDER_CONFIG = {"lost_share": 0.2, "lost_max": 0.4, "lost_db": [20.0, 20.0]}
+# 這三項是後來才有的選項，之前存下來的狀態沒有，當時用的是預設值
+config["fade_share"] = args.fade_share
+config["max_snr_db"] = args.max_snr_db
+config["checks"] = args.checks
+OLDER_CONFIG = {"lost_share": 0.2, "lost_max": 0.4, "lost_db": [20.0, 20.0], "fade_share": 0.75, "max_snr_db": MAX_SNR_DB,
+                "checks": "awgn0,awgn10,awgn20,awgn99,fade5,fade15"}
 if not 0.0 <= args.ema < 1.0:
     raise SystemExit("--ema 要在 0 和 1 之間，例如 0.999")
 
@@ -151,8 +165,11 @@ start_step = resumed["step"] if resumed is not None else 0
 torch.manual_seed(args.seed + start_step)                  # 接續時換一組亂數，不重複開頭那一段
 gen = torch.Generator().manual_seed(args.seed + start_step)  # CPU 上的亂數：取哪一塊資料
 
-CHUNK = 40000
-train_cpu = torch.from_numpy(np.load(args.train))          # uint8 [N,72,96,3]
+train_cpu = torch.from_numpy(np.load(args.train))          # uint8 [N,高,寬,3]：畫面的大小由資料決定
+PIC_H, PIC_W = int(train_cpu.shape[1]), int(train_cpu.shape[2])
+if PIC_H % 8 or PIC_W % 8:
+    raise SystemExit("畫面的寬與高要是 8 的倍數")
+CHUNK = min(40000, (2 ** 31 - 1) // (PIC_H * PIC_W * 3) // 1000 * 1000)   # 每一塊小於 2^31 個元素（96×72 是 4 萬張）
 n = len(train_cpu)
 chunks = [train_cpu[i:i + CHUNK].to(dev) for i in range(0, n, CHUNK)]
 chunk_sizes = [len(c) for c in chunks]
@@ -160,10 +177,10 @@ chunk_probs = torch.tensor(chunk_sizes, dtype=torch.float)
 del train_cpu
 val = torch.from_numpy(np.load(args.val)).permute(0, 3, 1, 2).float().div(255.0).to(dev)
 
-model = JSCC(args.latent, args.arch, widths)
+model = JSCC(args.latent, args.arch, widths, (PIC_W, PIC_H))
 snr_lo = model.min_snr_db if args.snr_lo is None else args.snr_lo
-shape = (args.latent, 9, 12)
-say(f"訓練 {n} 張、驗證 {len(val)} 張；潛在通道 {args.latent}（{args.latent * 108} 個實數）；結構 {args.arch}；"
+shape = (args.latent, PIC_H // 8, PIC_W // 8)
+say(f"訓練 {n} 張、驗證 {len(val)} 張；畫面 {PIC_W}×{PIC_H}；潛在通道 {args.latent}（{model.real_dims} 個實數）；結構 {args.arch}；"
       f"各層寬度 {'／'.join(str(w) for w in widths)}；訊雜比 {snr_lo:g}–{args.snr_hi:g} dB；"
       f"缺值：{args.lost_share:g} 的畫面、每張 0–{args.lost_max:g}、弱 "
       + (f"{lost_db[0]:g}" if lost_db[0] == lost_db[1] else f"{lost_db[0]:g}–{lost_db[1]:g}")
@@ -261,7 +278,7 @@ ema_params = list(ema.parameters()) if ema is not None else []
 ema_weight = 1.0 - args.ema ** EMA_EVERY
 enc_net = torch.compile(model.enc) if args.compile else model.enc
 dec_net = torch.compile(model.dec) if args.compile else model.dec
-REF_LO, REF_HI = 10.0 ** (-30.0 / 10.0), 10.0 ** (-model.min_snr_db / 10.0)   # 參考雜訊變異數的範圍
+REF_LO, REF_HI = 10.0 ** (-args.max_snr_db / 10.0), 10.0 ** (-model.min_snr_db / 10.0)   # 參考雜訊變異數的範圍
 
 
 def lr_at(step):
@@ -273,15 +290,15 @@ def lr_at(step):
 
 def channel_state(count):
     """count 張畫面各自的通道狀態（都在 GPU 上算，不必等 CPU）：真正的雜訊變異數、接收端以為的雜訊變異數，
-    形狀都是 [count,C,9,12]。"""
+    形狀都是 [count,C,格子的列數,行數]（96×72 的畫面是 9×12）。"""
     full = (count,) + shape
     snr_db = torch.empty(count, device=dev).uniform_(snr_lo, args.snr_hi)
     sigma2 = torch.pow(10.0, -snr_db / 10.0)[:, None, None, None]
     if model.architecture < 2:
         true_var = sigma2.expand(full)
         return true_var, true_var
-    # 四分之三的畫面有衰落：每個值的功率增益是 (1−d) + d·指數分布，d 在 0.3 到 1 之間（1 是瑞利衰落）
-    fading = (torch.rand(count, device=dev) < 0.75)[:, None, None, None]
+    # 四分之三的畫面有衰落（--fade-share）：每個值的功率增益是 (1−d) + d·指數分布，d 在 0.3 到 1 之間（1 是瑞利衰落）
+    fading = (torch.rand(count, device=dev) < args.fade_share)[:, None, None, None]
     depth = torch.empty(count, device=dev).uniform_(0.3, 1.0)[:, None, None, None]
     exponential = -torch.log(torch.rand(full, device=dev).clamp_min(1e-6))
     gain = torch.where(fading, (1.0 - depth) + depth * exponential, torch.ones(full, device=dev))
@@ -315,7 +332,7 @@ def run(x, true_var, believed, noise=None, ref=None, enc=None, dec=None):
 
 
 # 驗證用的情形：白雜訊 0／10／20 dB 與沒有雜訊，瑞利衰落（平均）5／15 dB。通道狀態與雜訊先算好，每次都用同一組。
-CHECKS = (("awgn", 0.0), ("awgn", 10.0), ("awgn", 20.0), ("awgn", 99.0), ("fade", 5.0), ("fade", 15.0))
+CHECKS = tuple((c[:4], float(c[4:])) for c in args.checks.split(","))   # 例如 awgn30、fade20；awgn99 是沒有雜訊
 check_data = {}
 with torch.no_grad():
     g = torch.Generator().manual_seed(7)
@@ -326,13 +343,13 @@ with torch.no_grad():
             true_var = torch.full(full, sigma2)
         else:
             true_var = sigma2 / torch.empty(full).exponential_(1.0, generator=g).clamp_min(1e-4)
-        check_data[f"{kind}{snr:g}"] = (true_var.to(dev), reference_noise(true_var, model.min_snr_db).to(dev),
+        check_data[f"{kind}{snr:g}"] = (true_var.to(dev), reference_noise(true_var, model.min_snr_db, args.max_snr_db).to(dev),
                                          torch.randn(full, generator=g).to(dev))
     # 另外一種：「少掉六成」。其餘的值 10 dB，六成的值雜訊是訊號的 100 倍（見檔案開頭）
     g = torch.Generator().manual_seed(8)
     full = (len(val),) + shape
     true_var = torch.where(torch.rand(full, generator=g) < 0.6, torch.tensor(100.0), torch.tensor(0.1))
-    lost_check = (true_var.to(dev), reference_noise(true_var, model.min_snr_db).to(dev), torch.randn(full, generator=g).to(dev))
+    lost_check = (true_var.to(dev), reference_noise(true_var, model.min_snr_db, args.max_snr_db).to(dev), torch.randn(full, generator=g).to(dev))
 
 
 def validation_psnr(case, enc, dec):
@@ -377,7 +394,8 @@ if args.compare:
     compare = evaluate(reference.enc, reference.dec)
     compare_lost = evaluate_lost(reference.enc, reference.dec)
     del reference, c_state
-    say(f"驗證的六種情形：awgn0／10／20 是白雜訊 0／10／20 dB，awgn99 是沒有雜訊，fade5／15 是瑞利衰落平均 5／15 dB（PSNR，dB）")
+    say(f"驗證的情形：{args.checks}（awgn 是白雜訊、fade 是瑞利衰落的平均訊雜比，awgn99 是沒有雜訊；PSNR，dB）。"
+        f"訓練的訊雜比 {snr_lo:g}–{args.snr_hi:g} dB，{args.fade_share:g} 的畫面有衰落；解碼器認得的訊雜比上限 {args.max_snr_db:g} dB")
     say(f"對照的模型 {c_id:08X}  " + "  ".join(f"{k}:{v:.2f}" for k, v in compare.items()) + "　之後括號裡是和它的差距")
     say(f"另外列出「少掉六成」（其餘的值 10 dB、六成的值沒收到）的平均與最差的 1%，不算進平均差；"
         f"對照的模型是 {compare_lost['mean']:.2f}、{compare_lost['worst']:.1f}。整張壞掉的畫面會把最差的 1% 拉到 10 dB 以下")
@@ -433,7 +451,7 @@ def write(payload, path):
 def save(name, step, source=None):
     """存成 evaluate.py、export.py 讀的檢查點。source 不給就是正在訓練的模型。"""
     write({"model": (model if source is None else source).state_dict(), "latent": args.latent, "architecture": args.arch,
-           "widths": list(widths), "step": step}, os.path.join(args.out, name))
+           "widths": list(widths), "picture": [PIC_W, PIC_H], "step": step}, os.path.join(args.out, name))
 
 
 first = evaluate()

@@ -5,6 +5,7 @@
 // 不開執行緒；push() 會在呼叫端的執行緒上把能做的事做完。
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -30,7 +31,9 @@ struct RxFrame {
     int sequence = -1;
     float snr_db = 0.0f;
     float freq_offset_hz = 0.0f;
-    std::vector<std::uint8_t> rgb;  // 96×72×3 的畫面，decoded 時有效
+    int image_width = 0;            // 這個模式的畫面大小（像素）：模式 11–14 是 96×72，模式 5–7 與 15 是 192×144
+    int image_height = 0;
+    std::vector<std::uint8_t> rgb;  // 寬×高×3 的畫面，decoded 時有效
     std::int64_t start_sample = 0;  // 幀開頭在輸入串流裡的位置（12 kHz 的取樣編號）
 };
 
@@ -74,6 +77,9 @@ struct RxTuning {
     // 捕獲後的第二道驗證：用 S1 估出的通道預測酬載開頭 12 個符號的導頻，與收到的值的正規化相關
     // （同時搜尋 ±16 Hz 內的殘餘頻偏）。只有雜訊或對錯位置時約 0.2，−3 dB 的訊號約 0.65。
     double verify_pilots = 0.40;
+    // 沒有散佈導頻的幀（Mode::scattered_pilots 為 false）沒有導頻可以驗證，改看酬載開頭 12 個符號的循環字首
+    // 和符號的尾巴是不是相同（Receiver::cyclic_coherence）：只有雜訊時約 0.1，訊雜比 0 dB 的訊號約 0.5。
+    double verify_cyclic = 0.40;
     // 是否使用逐符號、逐載波的雜訊估計（見 ChannelEstimate::noise_at）。關掉時每個格點都用同一個雜訊變異數。
     bool noise_map = true;
     // 各格點雜訊不一樣大時，交給解碼器之前的處理方式，見 LearnedRxOptions（learned_frame.hpp）。
@@ -91,8 +97,8 @@ public:
 
     RxTuning& tuning() { return tuning_; }
 
-    // 各個模式用的模型。每個模式用「實數個數與寬度都和它相同」的那一個，所以要收幾個模式就設定幾個；
-    // 兩者都相同的再設定一次會取代前一個，傳空指標表示全部拿掉。某個模式沒有模型時，它的幀只回報
+    // 各個模式用的模型。每個模式用「實數個數、寬度與畫面大小都和它相同」的那一個，所以要收幾個模式就設定幾個；
+    // 三者都相同的再設定一次會取代前一個，傳空指標表示全部拿掉。某個模式沒有模型時，它的幀只回報
     // 「收到一幀，但沒有畫面」。reset() 不會清掉模型。
     void set_model(std::shared_ptr<const LearnedCodec> model) { models_.set(std::move(model)); }
 
@@ -154,6 +160,13 @@ private:
     };
     PilotCheck verify_pilots(std::int64_t t0, double cfo, const Mode& mode) const;
     void process_frame();
+    void decode_picture(const Mode& mode, const LearnedUnpacked& l, bool whole, RxFrame& frame);
+    // 沒有散佈導頻的幀（給 FM 語音通道用）走的路，對應上面靠導頻的那幾個：
+    double cyclic_coherence(std::int64_t t0, int first_row, int last_row) const;
+    bool signal_present(std::int64_t t0, const Mode& mode) const;
+    PilotCheck verify_frame_start(std::int64_t t0, double cfo, const Mode& mode) const;
+    void null_powers(std::int64_t t0, int rows, std::vector<float>& out) const;
+    void process_frame_free();
     const LearnedMerge* find_merge(std::uint32_t model_id) const;
     // 把前面幾幀合進這一幀。回傳用了幾幀；0 表示沒有可以用的（merged 不能用）。
     int merge_earlier(const LearnedMerge& merge, const Mode& mode, const LearnedUnpacked& frame, const RxFrame& info,
@@ -184,6 +197,9 @@ private:
     AnalyticFilter analytic_;
     ChannelEstimator chanest_;
     std::vector<float> clean_;   // push 進來的取樣整理後暫放的地方（非有限值換成 0）
+    // 還沒濾波的取樣，和 buf_ 用同樣的編號（buf_ 的第 i 個是它在 i − analytic_.delay_samples() 附近的值）。
+    // 解析濾波器只留 220–2780 Hz；沒有散佈導頻的幀要聽頻帶上方（到 4 kHz）的雜訊，得從這裡取。
+    std::vector<float> raw_;
     std::vector<cf> buf_;
     std::int64_t base_ = 0;      // buf_[0] 的取樣編號
     std::int64_t total_in_ = 0;
@@ -235,6 +251,25 @@ private:
     double sync_quality_ = 0.0;
     float snr_db_ = 0.0f;
     bool snr_valid_ = false;
+
+    // 沒有散佈導頻的幀：同一次發射（一幀接一幀）之間留著的東西。FM 的音訊通道整次發射都不變，
+    // 所以通道的估計可以跨幀平均；取樣時脈差多少也不會變。捕獲到新的一次發射時清掉（begin_frame）。
+    struct FreeTrack {
+        static constexpr int kNullBins = 28;        // 頻帶上方沒用到的頻率：第 58–85 格（2719–3984 Hz）
+        int frames = 0;                             // ref 是幾幀平均出來的；0 表示還沒有（這次發射的第一幀）
+        std::array<cf, kCarriers> ref{};            // 平均的通道（含參考符號的振幅），對齊到最近一幀開頭的參考符號
+        // 從最近一幀開頭的參考符號到下一幀開頭的，訊號預計再晚幾個取樣（已經扣掉視窗跟著移動的整數部分）、相位再轉多少
+        double pending_shift = 0.0;
+        double pending_phase = 0.0;
+        double drift = 0.0;                         // 時脈漂移：每過一個符號，訊號比照著幀長算的位置晚到幾個取樣（最近幾幀的平均）
+        int drift_count = 0;                        // drift 是幾幀平均出來的
+        double fraction = 0.0;                      // 幀起點還沒算進去的小數部分（取樣數）
+        std::array<double, kNullBins> null_sum{};   // 頻帶外各格的能量總和與列數：各格平常有多吵
+        long null_rows = 0;
+        double scale_num = 0.0, scale_den = 0.0;    // 頻帶外的相對大小換算成頻帶內雜訊變異數的係數（分子、分母）
+        float noise_var = 0.0f;                     // 最近一次量到的雜訊變異數（這一幀沒有參考符號可以量時沿用）
+    };
+    FreeTrack free_;
 
     bool trace_ = false;
     std::deque<RxFrame> frames_;

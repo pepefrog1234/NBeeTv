@@ -8,6 +8,8 @@
 // 合併後的值與它的雜訊變異數交給原來的 learned_picture。訊號弱、畫面平靜時好處最大；
 // 訊號很好或畫面一直在變時，結果和不合併幾乎一樣。做法、訓練與量到的結果見 tools/learned/README.md。
 //
+// 只配畫面是 96×72 的模型（模式 11–14）：小網路是照 9×12 的格子寫的。192×144 的大畫面（模式 5–7 與 15）沒有這種權重，照原來的方式解。
+//
 // 小網路的權重放在獨立的檔案（models/），每個畫面模型各一份：不同模型送出來的值互不相通。
 // 檔案裡記著它配的是哪一個畫面模型（model_id）。接收機怎麼用它見 receiver.hpp 的 set_merge。
 #pragma once
@@ -33,7 +35,7 @@ public:
     std::uint32_t merge_id() const;
     // 它配的畫面模型（LearnedCodec::model_id）。
     std::uint32_t model_id() const;
-    // 一幀幾個實數（和那個畫面模型的 value_count 相同）。
+    // 一幀幾個實數（和那個畫面模型的 value_count 相同）：潛在通道數 × 9 × 12。
     int value_count() const;
     // 一共看幾幀：現在這一幀，加上前面 frames() − 1 幀。
     int frames() const;

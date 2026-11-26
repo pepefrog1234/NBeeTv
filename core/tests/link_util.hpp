@@ -132,7 +132,7 @@ inline const std::vector<float>& burst(const Mode& mode, int frames, const std::
         tx.set_callsign(call);
         attach_models(tx);
         for (int i = 0; i < frames; ++i) {
-            const auto f = tx.learned_frame(mode, test_images::load(test_images::kNames[i % 3]));
+            const auto f = tx.learned_frame(mode, test_images::load(test_images::kNames[i % 3], mode.image_width, mode.image_height));
             slot->second.insert(slot->second.end(), f.begin(), f.end());
         }
     }

@@ -24,6 +24,7 @@ inline constexpr double kBandLowHz = 352.0;                 // 訊號頻帶
 inline constexpr double kBandHighHz = 2648.0;
 
 /// 一張 96×72 的畫面：RGB，每個像素三個位元組，由左上角開始逐列排列。
+/// 桌面版只處理這個大小：畫面是 192×144 的模式 15（給 FM 用的）還沒有搬過來。
 struct Picture {
     std::array<std::uint8_t, kRgbBytes> rgb{};
 };
@@ -49,7 +50,7 @@ public:
 
     const std::vector<LoadedModel>& models() const { return models_; }
     const std::vector<LoadedMerge>& merges() const { return merges_; }
-    /// 「一張畫面變成 values 個實數、第一層 width 個通道」的那個模型；沒有的話是 nullptr
+    /// 「一張 96×72 的畫面變成 values 個實數、第一層 width 個通道」的那個模型；沒有的話是 nullptr
     const LoadedModel* find(int values, int width) const;
     /// 這個畫面模型（以識別碼表示）有沒有配合併用的權重
     bool merge_covers(std::uint32_t model_id) const;

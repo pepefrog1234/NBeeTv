@@ -170,16 +170,19 @@ struct SidePanel: View {
     }
 
     private var previewDescription: String {
+        let sent = model.txPictureSize.text   // 送出的大小跟著發射模式
         switch model.settings.sourceKind {
-        case .camera: return L("鏡頭畫面縮成 96×72 後的預覽")
-        case .video: return L("影片目前這一格縮成 96×72 後的預覽")
-        case .images: return L("下一張要送的圖片縮成 96×72 後的預覽")
+        case .camera: return L("鏡頭畫面縮成 %@ 後的預覽", sent)
+        case .video: return L("影片目前這一格縮成 %@ 後的預覽", sent)
+        case .images: return L("下一張要送的圖片縮成 %@ 後的預覽", sent)
         }
     }
 
     private var sourceCaption: String {
-        guard let size = model.sourceSize, model.sourcePreview != nil else { return L("來源 — → 送出 96×72") }
-        return L("來源 %d×%d → 送出 96×72", Int(size.width), Int(size.height))
+        // 送出的大小跟著發射模式：96×72，模式 5–7 與 15 是 192×144
+        let sent = model.txPictureSize.text
+        guard let size = model.sourceSize, model.sourcePreview != nil else { return L("來源 — → 送出 %@", sent) }
+        return L("來源 %d×%d → 送出 %@", Int(size.width), Int(size.height), sent)
     }
 
     private var videoControls: some View {

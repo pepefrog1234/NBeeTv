@@ -18,7 +18,7 @@ import numpy as np
 import qrcode
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
-from .decoder import IMAGE_HEIGHT, IMAGE_WIDTH
+from .decoder import IMAGE_HEIGHT, IMAGE_WIDTH, picture_size
 
 log = logging.getLogger(__name__)
 
@@ -170,7 +170,7 @@ class CardContent:
     modes: str = ""
     frames: int = 0
     snr: str = ""
-    picture: bytes = b""       # 正中那一幀，96×72 的 RGB
+    picture: bytes = b""       # 正中那一幀的 RGB：96×72，模式 5–7 與 15 是 192×144
     picture_caption: str = ""
     strip: list[bytes] = field(default_factory=list)
 
@@ -305,8 +305,13 @@ def _fit(fonts: Fonts, role: str, text: str, width: float, size: int, smallest: 
 
 
 def _picture(rgb: bytes, scale: int) -> Image.Image:
-    image = Image.frombytes("RGB", (IMAGE_WIDTH, IMAGE_HEIGHT), rgb)
-    return image.resize((IMAGE_WIDTH * scale, IMAGE_HEIGHT * scale), Image.Resampling.NEAREST)
+    """一張畫面畫成 96×72 的 scale 倍。畫面本身比較大（模式 5–7 與 15 的 192×144）時也畫成同樣的大小，版面不必跟著變：
+    剛好是整數倍就一格一格放大（不內插），否則重新取樣。"""
+    width, height = picture_size(rgb)
+    image = Image.frombytes("RGB", (width, height), rgb)
+    target = (IMAGE_WIDTH * scale, IMAGE_HEIGHT * scale)
+    whole = target[0] % width == 0 and target[1] % height == 0
+    return image.resize(target, Image.Resampling.NEAREST if whole else Image.Resampling.LANCZOS)
 
 
 def qr_image(text: str, size: int) -> Image.Image:

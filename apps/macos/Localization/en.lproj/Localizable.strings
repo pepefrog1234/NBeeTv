@@ -89,6 +89,16 @@
 "每張 %@ · 大型的類神經網路編碼，實驗中" = "%@ per frame · large neural network, experimental";
 "每張 %@ · 類神經網路編碼，實驗中" = "%@ per frame · neural network, experimental";
 " · 模型 %@" = " · model %@";
+"FM 大畫面" = "FM large";
+"每張 %@ · %@ 的大畫面，給 FM 用，實驗中" = "%@ per frame · large %@ picture for FM, experimental";
+"FM 語音通道用的大畫面（實驗中）" = "Large picture for FM voice channels (experimental)";
+"畫面 %@，比較清楚。給 VHF／UHF 的 FM 用：訊號弱時比上面的模式差，不適合短波" = "%@ picture, noticeably sharper. For FM on VHF/UHF: worse than the modes above when the signal is weak, so not suited to HF";
+"FM 無導頻" = "FM no pilots";
+"標準" = "Standard";
+"較細" = "Finer";
+"每張 %@ · %@ 的大畫面，幀裡沒有導頻，只給 FM 用，實驗中" = "%@ per frame · large %@ picture, frame without pilots, FM only, experimental";
+"FM 大畫面，幀裡沒有導頻（實驗中）" = "Large picture for FM, frame without pilots (experimental)";
+"畫面 %@。同樣的時間多送 2 成的資料；只給訊號穩定的 FM 用，不適合短波" = "%@ picture. Carries 20% more data in the same time; only for FM with a steady signal, not suited to HF";
 "快速" = "Fast";
 "粗略" = "Coarse";
 "中等" = "Medium";
@@ -143,9 +153,9 @@
 
 // 主視窗：收到的畫面與它下面的資訊列
 "訊雜比 %@" = "SNR %@";
-"正在送出的畫面：壓縮後對方會看到的 96×72 影像" = "Picture being sent: the 96×72 image the other station will see after compression";
+"正在送出的畫面：壓縮後對方會看到的 %@ 影像" = "Picture being sent: the %@ image the other station will see after compression";
 "正在處理第一張畫面" = "Processing the first picture";
-"收到的畫面：%@ 傳來的 96×72 影像" = "Received picture: 96×72 image sent by %@";
+"收到的畫面：%@ 傳來的 %@ 影像" = "Received picture: %2$@ image sent by %1$@";
 "偵測到同步訊號後會自動解碼並顯示畫面" = "Pictures are decoded and shown automatically once a sync signal is detected";
 "尚未收到畫面" = "Nothing received yet";
 "儲存圖片" = "Save image";
@@ -278,8 +288,8 @@
 "發射模式" = "Transmit mode";
 "（沒有鏡頭）" = "(No cameras)";
 "選擇鏡頭：%@" = "Choose camera: %@";
-"鏡頭畫面縮成 96×72 後的預覽" = "Preview of the camera picture scaled to 96×72";
-"影片目前這一格縮成 96×72 後的預覽" = "Preview of the current video frame scaled to 96×72";
+"鏡頭畫面縮成 %@ 後的預覽" = "Preview of the camera picture scaled to %@";
+"影片目前這一格縮成 %@ 後的預覽" = "Preview of the current video frame scaled to %@";
 "等待來源畫面" = "Waiting for the source picture";
 "畫布" = "Canvas";
 "在送出去的每一張畫面上印字，例如「CQ %@」。上面的預覽就是送出去的樣子" = "Stamps text on every picture sent, for example “CQ %@”. The preview above shows exactly what goes out";
@@ -289,8 +299,8 @@
 "上" = "↑";
 "下" = "↓";
 "字印在畫面的上緣或下緣" = "Put the text at the top or the bottom of the picture";
-"來源 — → 送出 96×72" = "Source — → sent as 96×72";
-"來源 %d×%d → 送出 96×72" = "Source %d×%d → sent as 96×72";
+"來源 — → 送出 %@" = "Source — → sent as %@";
+"來源 %d×%d → 送出 %@" = "Source %d×%d → sent as %@";
 "暫停" = "Pause";
 "播放" = "Play";
 "播放位置" = "Playback position";
@@ -325,7 +335,7 @@
 "選擇要依序發射的圖片，或選一個資料夾" = "Choose the images to transmit in order, or choose a folder";
 "選擇要依序發射的圖片（可以多選），或選資料夾：裡面的圖片全部加入。順序照檔名" = "Choose the images to transmit one after another (you can select several), or choose folders: every image inside is added. They are sent in file-name order";
 "下一張要送的圖片：%@" = "Next image to send: %@";
-"下一張要送的圖片縮成 96×72 後的預覽" = "Preview of the next image to send, scaled to 96×72";
+"下一張要送的圖片縮成 %@ 後的預覽" = "Preview of the next image to send, scaled to %@";
 "上一張圖片" = "Previous image";
 "下一張圖片" = "Next image";
 "下一張要送第幾張" = "Position of the next image to send";

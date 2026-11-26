@@ -1,12 +1,12 @@
 # 訓練好的模型在各種通道下的 PSNR：白雜訊、瑞利衰落（每個值各自衰落），以及隨機少掉一部分的值。
-# 模型可以是檢查點（.pt）或權重檔（.bin）；影像可以是 .npy（[N,72,96,3]）或幾張 96×72 的 PPM。
+# 模型可以是檢查點（.pt）或權重檔（.bin）；影像可以是 .npy（[N,72,96,3]；模式 15 的模型是 [N,144,192,3]）或幾張 96×72 的 PPM。
 # 用法：python3 evaluate.py 模型 data/val.npy [測試圖.ppm …]
 import sys
 
 import numpy as np
 import torch
 
-from export import read_ppm, read_weights
+from export import STANDARD_PICTURE, read_picture, read_ppm, read_weights
 from model import DEFAULT_WIDTHS, JSCC, psnr_uint8, widths_of
 
 path = sys.argv[1]
@@ -14,6 +14,7 @@ widths = DEFAULT_WIDTHS
 if path.endswith(".bin"):
     state, latent, model_id, architecture = read_weights(path)
     widths = widths_of(state)
+    picture = read_picture(path)
     label = f"權重檔 {model_id:08X}"
     if widths != DEFAULT_WIDTHS:
         label += "，各層寬度 " + "／".join(str(w) for w in widths)
@@ -21,10 +22,13 @@ else:
     ckpt = torch.load(path, map_location="cpu")
     state, latent, architecture = ckpt["model"], ckpt["latent"], ckpt.get("architecture", 1)
     widths = tuple(ckpt.get("widths", DEFAULT_WIDTHS))
+    picture = tuple(ckpt.get("picture", STANDARD_PICTURE))
     label = f"檢查點，訓練 {ckpt['step']} 步"
     if widths != DEFAULT_WIDTHS:
         label += "，各層寬度 " + "／".join(str(w) for w in widths)
-model = JSCC(latent, architecture, widths)
+if picture != STANDARD_PICTURE:
+    label += f"，畫面 {picture[0]}×{picture[1]}"
+model = JSCC(latent, architecture, widths, picture)
 model.load_state_dict(state)
 dev = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 model.to(dev).eval()
@@ -38,7 +42,7 @@ if ppms:
     sets[f"{len(ppms)} 張 PPM"] = np.stack([read_ppm(p) for p in ppms])
 
 SNRS = (-6, -3, 0, 5, 10, 15, 20, 30, 99)
-print(f"模型：{label}；結構 {architecture}；{latent * 108} 個實數；解碼器認得的最低訊雜比 {model.min_snr_db:g} dB")
+print(f"模型：{label}；結構 {architecture}；{model.real_dims} 個實數；解碼器認得的最低訊雜比 {model.min_snr_db:g} dB")
 
 
 def measure(x_all, make_noise_var, g):
@@ -57,7 +61,7 @@ def measure(x_all, make_noise_var, g):
 
 for name, arr in sets.items():
     x_all = torch.from_numpy(arr).permute(0, 3, 1, 2).float().div(255.0).contiguous()
-    shape = (latent, 9, 12)
+    shape = (latent, arr.shape[1] // 8, arr.shape[2] // 8)   # 潛在張量的格子：畫面縮小 8 倍（96×72 是 9×12）
     print(f"\n{name}（{len(arr)} 張）")
     print("平均訊雜比（dB）        " + "".join(f"{('無雜訊' if s >= 90 else s):>7}" for s in SNRS))
     g = torch.Generator().manual_seed(11)

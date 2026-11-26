@@ -47,6 +47,18 @@ From top to bottom are modes 14, 12 and 11, which take 0.67, 1.04 and 2.72 secon
 The three numeric columns are picture quality (PSNR, in dB): the average over 16 photos that were not used in training, through the complete transmit and receive chain and the simulated "poor" channel described above.
 Results for the white-noise channel and other SNRs, and how they were measured, are in the [technical notes](docs/TECHNICAL.md).
 
+There is also an experimental **mode 15** for FM voice channels on VHF/UHF: the picture grows to 192×144, at 2.72 seconds per picture.
+Audio SNR on FM is high, and sending a larger picture with the same number of values makes it clearly sharper; with a weak signal it does
+worse than the four modes above, so it is not suited to HF. The command-line tools and the macOS app can send and receive it; the Windows
+and Linux apps do not support it yet. It has only been checked in simulation, not yet on real radios.
+Details are in the [technical notes](docs/TECHNICAL.md).
+
+Also for FM, there are experimental **modes 5, 6 and 7**: the picture is still 192×144, but the frame carries no pilots.
+The FM audio channel does not change during a frame, so the pilots can go, and the same time carries 20% more data.
+Mode 5 uses the same model as mode 15 at 2.29 seconds per picture; mode 6 takes 2.88 seconds and is 1.4 dB better;
+mode 7 takes 4.43 seconds and is 3.6 dB better. They only work on FM voice channels with no frequency offset and a steady signal
+(not on SSB); they too are supported only by the command-line tools and the macOS app, and have only been checked in simulation.
+
 ## Download
 
 Get the file for your platform from [Releases](https://github.com/pepefrog1234/NBeeTv/releases). Each one is built and tested on a machine of that platform and processor type.
@@ -62,7 +74,7 @@ Get the file for your platform from [Releases](https://github.com/pepefrog1234/N
 | Windows 10, 11 | x86_64 | `NBeeTv-<version>-windows-x86_64.zip` | Desktop app (`nbtv-gui.exe`) and command-line tools |
 | Windows 11 | arm64 | `NBeeTv-<version>-windows-arm64.zip` | Desktop app and command-line tools |
 
-Every package includes the weight files for all four modes and works as soon as it is unpacked. Builds of commits that have not been released yet can be downloaded from the Artifacts of each run under [Actions](https://github.com/pepefrog1234/NBeeTv/actions/workflows/build.yml) (you need to be signed in to GitHub; they are kept for 7 days).
+Every package includes the weight files for all the modes and works as soon as it is unpacked. Builds of commits that have not been released yet can be downloaded from the Artifacts of each run under [Actions](https://github.com/pepefrog1234/NBeeTv/actions/workflows/build.yml) (you need to be signed in to GitHub; they are kept for 7 days).
 
 ### The macOS app
 
@@ -100,13 +112,13 @@ The Windows and Linux packages contain `nbtv-gui` (`nbtv-gui.exe` on Windows): t
 
 Every package includes the command-line tools. They work on files rather than live audio: to transmit, you play the generated WAV file into the radio; to receive, you record the radio's audio to a WAV file and decode it.
 
-After unpacking, the executables and `models/` are in the same folder and can be run right there. Pictures are always 96×72 binary PPM files, which ffmpeg can produce.
+After unpacking, the executables and `models/` are in the same folder and can be run right there. Pictures are always 96×72 binary PPM files (192×144 for modes 5–7 and 15), which ffmpeg can produce.
 
 ```sh
 # Convert a photo to a 96×72 PPM
 ffmpeg -i photo.jpg -vf scale=96:72 -pix_fmt rgb24 photo.ppm
 
-# Make a WAV to play straight into the radio (--mode is 11 to 14, --call is your callsign)
+# Make a WAV to play straight into the radio (--mode is 11 to 15, --call is your callsign)
 ./nbtv-tx --mode 14 --call N0CALL --out tx.wav photo.ppm
 
 # Decode a recording into pictures: received/frame_0.ppm, frame_1.ppm, ... (--merge: merge recent frames before decoding)

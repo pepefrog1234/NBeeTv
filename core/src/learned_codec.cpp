@@ -39,14 +39,18 @@ struct LearnedCodec::Impl {
     int latent = 0;
     int architecture = 1;
     int widths[kStages + 1] = {};  // 解析度每減半一次的通道數
+    int image_w = kImageWidth;     // 畫面大小；權重檔沒有記的是標準大小
+    int image_h = kImageHeight;
+    int grid_w() const { return image_w / 8; }  // 潛在張量的格子：畫面縮小 8 倍
+    int grid_h() const { return image_h / 8; }
 
-    // 編碼器：96×72×3 →（每一級解析度減半）→ 12×9×latent
+    // 編碼器：畫面（寬×高×3）→（每一級解析度減半）→ 格子×latent。96×72 的畫面是 12×9 的格子
     Conv enc_stem;
     Conv enc_down[kStages];
     Block enc_block[kStages][kBlocksPerStage];
     Conv enc_head;
 
-    // 解碼器：12×9×latent 與訊雜比 →（每一級解析度加倍）→ 96×72×3
+    // 解碼器：格子×latent 與訊雜比 →（每一級解析度加倍）→ 畫面
     Linear snr1, snr2;
     Conv dec_inp;
     Block dec_block[kStages][kBlocksPerStage];
@@ -72,6 +76,18 @@ bool build(std::span<const std::uint8_t> file, LearnedCodec::Impl& m, std::strin
     if (!parse_file(file, kMagic, "不是學習式編碼的權重檔", accept, tensors, header, m.id, error)) return false;
     m.latent = static_cast<int>(header.latent);
     m.architecture = static_cast<int>(header.structure);
+    // 標頭的最後一個數是畫面大小：0 是 96×72（這個欄位原本是保留的，模式 11–14 的權重檔都是 0），
+    // 否則高 16 位元是寬、低 16 位元是高。網路把解析度減半三次，所以寬與高都要是 8 的倍數。
+    if (header.extra != 0) {
+        const std::uint32_t w = header.extra >> 16, h = header.extra & 0xFFFFu;
+        if (w == 0 || h == 0 || w % 8 != 0 || h % 8 != 0 || w > static_cast<std::uint32_t>(kMaxImageWidth) ||
+            h > static_cast<std::uint32_t>(kMaxImageHeight)) {
+            error = "權重檔記的畫面大小不是這個版本認得的";
+            return false;
+        }
+        m.image_w = static_cast<int>(w);
+        m.image_h = static_cast<int>(h);
+    }
 
     // 各層的寬度不另外記在檔案裡：就是編碼器開頭的卷積，以及三個把解析度減半的卷積的輸出通道數。
     // 其餘的張量下面逐一核對，都要和這四個數對得上。
@@ -136,7 +152,13 @@ std::unique_ptr<LearnedCodec> LearnedCodec::load(std::span<const std::uint8_t> f
 
 std::uint32_t LearnedCodec::model_id() const { return impl_->id; }
 
-int LearnedCodec::value_count() const { return impl_->latent * kGridH * kGridW; }
+int LearnedCodec::image_width() const { return impl_->image_w; }
+
+int LearnedCodec::image_height() const { return impl_->image_h; }
+
+int LearnedCodec::value_count() const { return impl_->latent * impl_->grid_h() * impl_->grid_w(); }
+
+int LearnedCodec::latent_channels() const { return impl_->latent; }
 
 std::array<int, 4> LearnedCodec::widths() const {
     static_assert(kStages + 1 == 4);
@@ -149,10 +171,11 @@ float LearnedCodec::min_snr_db() const { return impl_->architecture >= 2 ? -6.0f
 
 bool LearnedCodec::encode(std::span<const std::uint8_t> rgb, std::span<float> values) const {
     const Impl& m = *impl_;
-    if (rgb.size() != static_cast<std::size_t>(kImageRgbBytes) || values.size() != static_cast<std::size_t>(value_count())) return false;
+    if (rgb.size() != static_cast<std::size_t>(rgb_bytes()) || values.size() != static_cast<std::size_t>(value_count())) return false;
+    const int grid_h = m.grid_h(), grid_w = m.grid_w();
 
     Map x, a, t1, t2;
-    x.shape(kImageHeight, kImageWidth, 3);
+    x.shape(m.image_h, m.image_w, 3);
     for (std::size_t i = 0; i < rgb.size(); ++i) x.v[i] = static_cast<float>(rgb[i]) / 255.0f;
 
     conv2d(m.enc_stem, x, a);
@@ -174,16 +197,17 @@ bool LearnedCodec::encode(std::span<const std::uint8_t> rgb, std::span<float> va
     // 輸出的順序是 [通道][列][行]，和 PyTorch 把張量攤平的順序相同
     std::size_t n = 0;
     for (int c = 0; c < m.latent; ++c)
-        for (int y = 0; y < kGridH; ++y)
-            for (int col = 0; col < kGridW; ++col) values[n++] = z.at(y, col)[c] * scale;
+        for (int y = 0; y < grid_h; ++y)
+            for (int col = 0; col < grid_w; ++col) values[n++] = z.at(y, col)[c] * scale;
     return true;
 }
 
 bool LearnedCodec::decode(std::span<const float> values, std::span<const float> reliability, float snr_db,
                           std::span<std::uint8_t> rgb) const {
     const Impl& m = *impl_;
-    if (values.size() != static_cast<std::size_t>(value_count()) || rgb.size() != static_cast<std::size_t>(kImageRgbBytes)) return false;
+    if (values.size() != static_cast<std::size_t>(value_count()) || rgb.size() != static_cast<std::size_t>(rgb_bytes())) return false;
     if (!reliability.empty() && reliability.size() != values.size()) return false;
+    const int grid_h = m.grid_h(), grid_w = m.grid_w();
 
     // 訊雜比 → 一組特徵，用來調整每個殘差塊
     const float snr = std::isnan(snr_db) ? 10.0f : std::clamp(snr_db, min_snr_db(), kLearnedMaxSnrDb);
@@ -196,11 +220,11 @@ bool LearnedCodec::decode(std::span<const float> values, std::span<const float> 
     // 輸入：收到的值；結構 2 後面再接上各個值的可靠程度（順序和 PyTorch 的 cat([值, 可靠程度]) 相同）
     const bool with_reliability = m.architecture >= 2;
     Map z, a, t1, t2;
-    z.shape(kGridH, kGridW, m.latent * (with_reliability ? 2 : 1));
+    z.shape(grid_h, grid_w, m.latent * (with_reliability ? 2 : 1));
     std::size_t n = 0;
     for (int c = 0; c < m.latent; ++c)
-        for (int y = 0; y < kGridH; ++y)
-            for (int col = 0; col < kGridW; ++col, ++n) {
+        for (int y = 0; y < grid_h; ++y)
+            for (int col = 0; col < grid_w; ++col, ++n) {
                 const float v = values[n];
                 z.at(y, col)[c] = std::isfinite(v) ? v : 0.0f;
                 if (with_reliability) {

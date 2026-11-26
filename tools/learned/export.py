@@ -4,10 +4,12 @@
 #    0   8  魔術字 "NBTVLRN1"
 #    8   4  格式版本（1）
 #   12   4  結構編號（見 model.py：1 是只吃訊雜比的解碼器，2 是另外吃「各個值可不可靠」的解碼器）
-#   16   4  潛在通道數（一張畫面是「通道數 × 9 × 12」個實數：模式 11、13 的模型 72 → 7776，模式 12 的 24 → 2592，模式 14 的 14 → 1512）
+#   16   4  潛在通道數（一張畫面是「通道數 × 畫面縮小 8 倍的格子數」個實數。96×72 的格子是 9×12：模式 11、13 的模型 72 → 7776，
+#          模式 12 的 24 → 2592，模式 14 的 14 → 1512；192×144 的格子是 18×24：模式 15 的模型 18 → 7776）
 #   20   4  張量個數
 #   24   4  數值型別：0 = float32、1 = float16
-#   28   4  保留（0）
+#   28   4  畫面大小：0 是 96×72（這一欄原本是保留的，模式 11–14 的權重檔都是 0），否則是「寬 × 65536 ＋ 高」
+#          （模式 5–7 與 15 的是 192×144）。寬與高都是 8 的倍數
 #   之後每個張量：名稱長度（uint16）、名稱（ASCII，和 PyTorch 的 state_dict 相同）、維度數（uint8）、
 #                 各維度（uint32）、資料（PyTorch 的排列）
 #   最後 4 位元組：前面所有位元組的 CRC-32（和 zlib 相同）。這個值也是模型的識別碼，收發兩端必須相同。
@@ -27,11 +29,14 @@
 #   之後每張影像：
 #     通道值 float32[L]                編碼器的輸出
 #     可靠程度 float32[L]              測試用的一組 0–1 之間的值（固定的亂數）
-#     解碼結果 uint8[72×96×3]          輸入是通道值、可靠程度全部是 1、訊雜比 10 dB
-#     解碼結果 uint8[72×96×3]          輸入是通道值 × 可靠程度、連同那組可靠程度、訊雜比 5 dB
+#     解碼結果 uint8[高×寬×3]          輸入是通道值、可靠程度全部是 1、訊雜比 10 dB
+#     解碼結果 uint8[高×寬×3]          輸入是通道值 × 可靠程度、連同那組可靠程度、訊雜比 5 dB
+#   測試圖是 96×72 的 PPM。模型的畫面比較大時（寬、高是 96×72 的整數倍），每個像素照倍數重複放大後再餵進去；
+#   core/tests/test_images.hpp 的 load_scaled 做的是同一件事。
 #   全部在 CPU 上以 float32 計算，用的是從權重檔讀回來的權重。
 #
-# 用法：python3 export.py 檢查點.pt 權重檔.bin [--float32] [--reference 參考答案.bin 測試圖.ppm …]
+# 用法：python3 export.py 檢查點.pt 權重檔.bin [--float32] [--picture 寬x高] [--reference 參考答案.bin 測試圖.ppm …]
+#       畫面大小照檢查點記的（train.py 存的檢查點有記；權重檔也有）；都沒有記就是 96×72。--picture 可以另外指定。
 #       檢查點也可以是另一份權重檔（.bin）：用來換存檔的型別，或把結構 1 的權重轉成結構 2（多出來的輸入接 0）。
 import argparse
 import os
@@ -48,9 +53,17 @@ REF_MAGIC = b"NBTVLRF2"
 FORMAT_VERSION = 1
 
 
-def write_weights(path, state, latent, half, architecture):
+STANDARD_PICTURE = (96, 72)
+
+
+def write_weights(path, state, latent, half, architecture, picture=STANDARD_PICTURE):
+    """picture 是（寬, 高）。標準大小記成 0，這樣模式 11–14 的權重檔和加這一欄之前逐位元組相同（識別碼不變）。"""
+    width, height = int(picture[0]), int(picture[1])
+    if width % 8 or height % 8 or not (0 < width < 65536 and 0 < height < 65536):
+        raise ValueError("畫面的寬與高要是 8 的倍數")
+    size_field = 0 if (width, height) == STANDARD_PICTURE else (width << 16) | height
     body = bytearray(MAGIC)
-    body += struct.pack("<6I", FORMAT_VERSION, architecture, latent, len(state), 1 if half else 0, 0)
+    body += struct.pack("<6I", FORMAT_VERSION, architecture, latent, len(state), 1 if half else 0, size_field)
     for name, value in state.items():
         raw = name.encode("ascii")
         arr = value.detach().cpu().float().numpy()
@@ -90,6 +103,16 @@ def read_weights(path):
     return state, latent, crc, architecture
 
 
+def read_picture(path):
+    """權重檔記的畫面大小（寬, 高）。"""
+    with open(path, "rb") as f:
+        head = f.read(32)
+    if len(head) < 32 or head[:8] != MAGIC:
+        raise ValueError("不是權重檔")
+    size_field = struct.unpack("<I", head[28:32])[0]
+    return STANDARD_PICTURE if size_field == 0 else (size_field >> 16, size_field & 0xFFFF)
+
+
 def read_ppm(path):
     parts = open(path, "rb").read().split(b"\n", 3)       # "P6"、"96 72"、"255"、像素
     if parts[0] != b"P6" or parts[1].split() != [b"96", b"72"] or parts[2] != b"255":
@@ -112,14 +135,21 @@ if __name__ == "__main__":
     p.add_argument("weights")
     p.add_argument("--float32", action="store_true")
     p.add_argument("--architecture", type=int, default=0)   # 0：照檢查點的；2：把結構 1 的權重轉成結構 2
+    p.add_argument("--picture", default="")                 # 畫面大小「寬x高」，例如 192x144；不給就照檢查點記的（沒有記是 96x72）
     p.add_argument("--reference", nargs="+", metavar="檔名")
     args = p.parse_args()
 
     if args.checkpoint.endswith(".bin"):
         source, source_latent, _, source_arch = read_weights(args.checkpoint)
+        picture = read_picture(args.checkpoint)
     else:
         ckpt = torch.load(args.checkpoint, map_location="cpu")
         source, source_latent, source_arch = ckpt["model"], ckpt["latent"], ckpt.get("architecture", 1)
+        picture = tuple(ckpt.get("picture", STANDARD_PICTURE))
+    if args.picture:
+        picture = tuple(int(v) for v in args.picture.lower().split("x"))
+    if len(picture) != 2:
+        raise SystemExit("--picture 要寫成「寬x高」，例如 192x144")
     architecture = args.architecture or source_arch
     source = {k: v.detach().cpu().float() for k, v in source.items()}
     if architecture == 2 and source_arch == 1:
@@ -127,28 +157,33 @@ if __name__ == "__main__":
         source["dec.inp.weight"] = torch.cat([old, torch.zeros_like(old)], dim=1)   # 「可靠程度」那一半接 0
 
     half = not args.float32
-    model_id = write_weights(args.weights, source, source_latent, half, architecture)
+    model_id = write_weights(args.weights, source, source_latent, half, architecture, picture)
     state, latent, crc, arch = read_weights(args.weights)   # 讀回來用，之後算的和 C++ 看到的是同一份數值
     assert crc == model_id and latent == source_latent and arch == architecture and list(state) == list(source)
+    assert read_picture(args.weights) == tuple(picture)
     worst = max(float((state[k] - v).abs().max()) for k, v in source.items())
     widths = widths_of(state)   # 權重檔沒有另外記寬度，讀的一方都是由張量的形狀看出來
     print(f"已寫入 {args.weights}：結構 {architecture}、{len(state)} 個張量、{sum(v.numel() for v in state.values())} 個參數、"
           f"{'float16' if half else 'float32'}、{os.path.getsize(args.weights)} 位元組；識別碼 {model_id:08X}"
-          + ("" if widths == DEFAULT_WIDTHS else f"；各層寬度 {'／'.join(str(w) for w in widths)}"))
+          + ("" if widths == DEFAULT_WIDTHS else f"；各層寬度 {'／'.join(str(w) for w in widths)}")
+          + ("" if tuple(picture) == STANDARD_PICTURE else f"；畫面 {picture[0]}×{picture[1]}"))
     print(f"存檔捨入造成的最大權重誤差 {worst:.2e}")
 
     if args.reference:
         out_path, images = args.reference[0], args.reference[1:]
-        model = JSCC(latent, architecture, widths)
+        model = JSCC(latent, architecture, widths, picture)
         model.load_state_dict(state)
         model.eval()
         count = model.real_dims
+        times = picture[0] // STANDARD_PICTURE[0]               # 測試圖是 96×72：畫面比較大的模型，每個像素重複這麼多次
+        if (picture[0], picture[1]) != (STANDARD_PICTURE[0] * times, STANDARD_PICTURE[1] * times):
+            raise SystemExit("參考答案只做得出畫面是 96×72 整數倍的模型")
         blob = bytearray(REF_MAGIC + struct.pack("<3I", model_id, len(images), count))
         gen = torch.Generator().manual_seed(1)
         awgn_all, fade_all = [], []
         with torch.no_grad():
             for path in images:
-                rgb = read_ppm(path)
+                rgb = np.ascontiguousarray(read_ppm(path).repeat(times, axis=0).repeat(times, axis=1))
                 x = torch.from_numpy(rgb.copy()).permute(2, 0, 1)[None].float().div(255.0)
                 z = model.encode(x)
                 weight = torch.rand(z.shape, generator=gen).pow(0.5)                    # 0–1 之間，偏向 1

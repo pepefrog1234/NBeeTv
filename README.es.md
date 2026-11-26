@@ -47,6 +47,18 @@ De arriba abajo están los modos 14, 12 y 11, que tardan 0.67, 1.04 y 2.72 segun
 Las tres columnas numéricas son la calidad de imagen (PSNR, en dB): la media de 16 fotos que no se usaron en el entrenamiento, pasando por toda la cadena de transmisión y recepción y por el canal «pobre» simulado descrito arriba.
 Los resultados con el canal de ruido blanco y con otras SNR, y cómo se midieron, están en las [notas técnicas](docs/TECHNICAL.md).
 
+Hay además un **modo 15** experimental para canales de voz en FM de VHF/UHF: la imagen crece a 192×144 y cada una tarda 2.72 segundos.
+En FM la SNR del audio es alta, y enviar una imagen más grande con la misma cantidad de valores la hace claramente más nítida;
+con señal débil rinde peor que los cuatro modos de arriba, así que no es adecuado para HF. Las herramientas de línea de comandos y la app de macOS
+pueden enviarlo y recibirlo; las apps de Windows y Linux todavía no. Solo se ha comprobado en simulación, aún no con equipos reales.
+Los detalles están en las [notas técnicas](docs/TECHNICAL.md).
+
+También para FM hay unos **modos 5, 6 y 7** experimentales: la imagen sigue siendo de 192×144, pero la trama no lleva pilotos.
+El canal de audio de FM no cambia durante una trama, así que los pilotos sobran y en el mismo tiempo cabe un 20 % más de datos.
+El modo 5 usa el mismo modelo que el modo 15 y tarda 2.29 segundos por imagen; el modo 6 tarda 2.88 segundos y mejora la calidad en 1.4 dB;
+el modo 7 tarda 4.43 segundos y la mejora en 3.6 dB. Solo sirven en canales de voz en FM sin desplazamiento de frecuencia y con señal estable
+(no en SSB); también funcionan únicamente con las herramientas de línea de comandos y la app de macOS, y solo se han comprobado en simulación.
+
 ## Descarga
 
 Descarga el archivo de tu plataforma desde [Releases](https://github.com/pepefrog1234/NBeeTv/releases). Cada uno se compila y se prueba en una máquina de esa plataforma y con ese tipo de procesador.
@@ -62,7 +74,7 @@ Descarga el archivo de tu plataforma desde [Releases](https://github.com/pepefro
 | Windows 10, 11 | x86_64 | `NBeeTv-<versión>-windows-x86_64.zip` | App de escritorio (`nbtv-gui.exe`) y herramientas de línea de comandos |
 | Windows 11 | arm64 | `NBeeTv-<versión>-windows-arm64.zip` | App de escritorio y herramientas de línea de comandos |
 
-Todos los paquetes incluyen los archivos de pesos de los cuatro modos y funcionan nada más descomprimirlos. Las compilaciones de versiones aún no publicadas se pueden descargar de los Artifacts de cada ejecución en [Actions](https://github.com/pepefrog1234/NBeeTv/actions/workflows/build.yml) (hay que iniciar sesión en GitHub; se conservan 7 días).
+Todos los paquetes incluyen los archivos de pesos de todos los modos y funcionan nada más descomprimirlos. Las compilaciones de versiones aún no publicadas se pueden descargar de los Artifacts de cada ejecución en [Actions](https://github.com/pepefrog1234/NBeeTv/actions/workflows/build.yml) (hay que iniciar sesión en GitHub; se conservan 7 días).
 
 ### La app de macOS
 
@@ -100,13 +112,13 @@ Los paquetes de Windows y Linux incluyen `nbtv-gui` (`nbtv-gui.exe` en Windows):
 
 Todos los paquetes incluyen las herramientas de línea de comandos. Trabajan con archivos, no en directo: para transmitir se reproduce en el equipo el archivo WAV generado; para recibir se graba el audio del equipo en un archivo WAV y se decodifica.
 
-Al descomprimir el paquete, los ejecutables y `models/` quedan en la misma carpeta y se pueden usar ahí mismo. Las imágenes son siempre archivos PPM binarios de 96×72, que se pueden generar con ffmpeg.
+Al descomprimir el paquete, los ejecutables y `models/` quedan en la misma carpeta y se pueden usar ahí mismo. Las imágenes son siempre archivos PPM binarios de 96×72 (192×144 para los modos 5 a 7 y 15), que se pueden generar con ffmpeg.
 
 ```sh
 # Convertir una foto en un PPM de 96×72
 ffmpeg -i photo.jpg -vf scale=96:72 -pix_fmt rgb24 photo.ppm
 
-# Crear un WAV para reproducirlo directamente en el equipo (--mode va de 11 a 14, --call es tu indicativo)
+# Crear un WAV para reproducirlo directamente en el equipo (--mode va de 11 a 15, --call es tu indicativo)
 ./nbtv-tx --mode 14 --call N0CALL --out tx.wav photo.ppm
 
 # Decodificar una grabación en imágenes: received/frame_0.ppm, frame_1.ppm, ... (--merge: combina las últimas tramas antes de decodificar)

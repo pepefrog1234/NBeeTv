@@ -21,6 +21,8 @@
 #define NBTV_STR(x) NBTV_STR_(x)
 
 static_assert(NBTV_IMAGE_RGB_BYTES == nbtv::kImageRgbBytes);
+static_assert(NBTV_IMAGE_MAX_RGB_BYTES == nbtv::kMaxImageRgbBytes);
+static_assert(NBTV_IMAGE_MAX_WIDTH == nbtv::kMaxImageWidth && NBTV_IMAGE_MAX_HEIGHT == nbtv::kMaxImageHeight);
 static_assert(NBTV_CALLSIGN_MAX == nbtv::kCallsignMaxChars);
 static_assert(NBTV_SPECTRUM_BINS == nbtv::kSpectrumBins);
 
@@ -40,11 +42,17 @@ void fill(const Mode& m, nbtv_mode_info* out) {
     out->value_capacity = m.value_capacity();
     out->learned_values = m.learned_values;
     out->learned_width = m.learned_width;
+    out->image_width = m.image_width;
+    out->image_height = m.image_height;
+    out->scattered_pilots = m.scattered_pilots ? 1 : 0;
 }
 
 constexpr bool valid_rate(int sample_rate) { return sample_rate == 12000 || sample_rate == 48000; }
 
-std::span<const std::uint8_t> rgb_span(const std::uint8_t* rgb) { return {rgb, static_cast<std::size_t>(nbtv::kImageRgbBytes)}; }
+// 這個模式的一張畫面
+std::span<const std::uint8_t> rgb_span(const std::uint8_t* rgb, const Mode& mode) {
+    return {rgb, static_cast<std::size_t>(mode.image_rgb_bytes())};
+}
 
 }  // namespace
 
@@ -155,6 +163,10 @@ int nbtv_model_values(const nbtv_model* model) { return model != nullptr ? model
 
 int nbtv_model_width(const nbtv_model* model) { return model != nullptr ? model->codec->base_width() : 0; }
 
+int nbtv_model_image_width(const nbtv_model* model) { return model != nullptr ? model->codec->image_width() : 0; }
+
+int nbtv_model_image_height(const nbtv_model* model) { return model != nullptr ? model->codec->image_height() : 0; }
+
 /* ---- 合併最近幾幀 ---- */
 
 nbtv_merge* nbtv_merge_load(const uint8_t* data, size_t size) {
@@ -227,7 +239,7 @@ int nbtv_tx_encode_image(nbtv_tx* tx, const uint8_t* rgb, float* samples, int ca
     local.sequence = tx->tx.sequence();
     std::vector<std::uint8_t> preview;
     tx->remember();
-    const std::vector<float> frame = tx->tx.learned_frame(mode, rgb_span(rgb), preview_rgb != nullptr ? &preview : nullptr);
+    const std::vector<float> frame = tx->tx.learned_frame(mode, rgb_span(rgb, mode), preview_rgb != nullptr ? &preview : nullptr);
     if (frame.empty()) {
         tx->undo.valid = false;
         return -1;
@@ -331,7 +343,11 @@ int nbtv_rx_poll_frame(nbtv_rx* rx, nbtv_rx_frame* out) {
     out->sequence = f.header_ok ? f.sequence : -1;
     out->snr_db = f.snr_db;
     out->freq_offset_hz = f.freq_offset_hz;
-    if (f.decoded && f.rgb.size() == sizeof out->rgb) {
+    out->image_width = f.image_width;
+    out->image_height = f.image_height;
+    // 畫面比緩衝區大是不會發生的（模式表在編譯期檢查過），多一道保險：放不下就當成沒有畫面
+    if (f.decoded && !f.rgb.empty() && f.rgb.size() <= sizeof out->rgb &&
+        f.rgb.size() == static_cast<std::size_t>(f.image_width) * static_cast<std::size_t>(f.image_height) * 3) {
         std::copy(f.rgb.begin(), f.rgb.end(), out->rgb);
         out->decoded = 1;
     }

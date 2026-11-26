@@ -16,7 +16,9 @@ std::string normalize_callsign(const std::string& text) {
     return buffer;
 }
 
-// 依序是模式 11、12、13、14 用的模型；後兩份是加寬的大型網路。和 tools/model_file.hpp、macOS 版的 CoreBridge.swift 相同。
+// 依序是模式 11、12、13、14 用的模型；後兩份是加寬的大型網路。和 tools/model_file.hpp、macOS 版的 CoreBridge.swift 相同，
+// 只少了模式 15（給 FM 用的 192×144 大畫面）的 261125-3：桌面版的畫面還是固定 96×72（Picture），所以不載入它的模型，
+// 模式 15 不會列在選單裡，收到那種幀時核心回報「沒有模型」，這裡照「模型不符」顯示。
 static const char* const kModelNames[] = {"261123-1", "261122-3", "261122-4", "261123-4"};
 // 接收端「合併最近幾幀」用的權重，每個畫面模型各配一份（配哪一個記在檔案裡，由核心對應）。
 static const char* const kMergeNames[] = {"261124-10", "261124-8", "261124-9", "261124-7"};
@@ -40,8 +42,11 @@ const Models& Models::shared() {
 }
 
 const LoadedModel* Models::find(int values, int width) const {
+    // 只認畫面是 96×72 的模型：實數個數與寬度都相同、畫面比較大的（模式 15 的）不是給這裡用的
     for (const LoadedModel& model : models_) {
-        if (nbtv_model_values(model.handle) == values && nbtv_model_width(model.handle) == width) return &model;
+        if (nbtv_model_values(model.handle) == values && nbtv_model_width(model.handle) == width &&
+            nbtv_model_image_width(model.handle) == kImageWidth && nbtv_model_image_height(model.handle) == kImageHeight)
+            return &model;
     }
     return nullptr;
 }
@@ -80,6 +85,8 @@ const std::vector<ModeInfo>& all() {
         nbtv_mode_info info{};
         for (int index = 0; index < nbtv_mode_count(); ++index) {
             if (nbtv_mode_at(index, &info) != 0) continue;
+            // 畫面不是 96×72 的模式（模式 15）這裡還不支援：它的實數個數與寬度和模式 11 相同，不跳過的話會被當成有模型
+            if (info.image_width != kImageWidth || info.image_height != kImageHeight) continue;
             const LoadedModel* model = Models::shared().find(info.learned_values, info.learned_width);
             if (model == nullptr) continue;
             ModeInfo mode;
@@ -146,8 +153,10 @@ std::optional<DecodedFrame> CoreReceiver::poll_frame() {
     if (nbtv_rx_poll_frame(handle_, frame_.get()) != 1) return std::nullopt;
     DecodedFrame frame;
     frame.mode_id = frame_->mode_id;
-    frame.decoded = frame_->decoded != 0;
-    frame.model_missing = frame_->model_missing != 0;
+    // 畫面不是 96×72 的幀這裡放不下（Picture 是固定大小）。沒有載入那種模型，本來就不會有畫面；多一道保險
+    const bool standard = frame_->image_width == kImageWidth && frame_->image_height == kImageHeight;
+    frame.decoded = frame_->decoded != 0 && standard;
+    frame.model_missing = frame_->model_missing != 0 || (frame_->decoded != 0 && !standard);
     frame.header_ok = frame_->header_ok != 0;
     frame_->callsign[NBTV_CALLSIGN_MAX] = '\0';
     frame.callsign = frame_->callsign;

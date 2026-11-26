@@ -64,4 +64,14 @@ std::vector<CellPos> data_cell_positions(int payload_symbols) {
     return cells;
 }
 
+std::vector<CellPos> data_cell_positions(const Mode& mode) {
+    if (mode.scattered_pilots) return data_cell_positions(mode.payload_symbols);
+    std::vector<CellPos> cells;
+    cells.reserve(static_cast<std::size_t>(mode.data_cells()));
+    for (int j = 0; j < mode.payload_symbols; ++j) {
+        for (int k = kFirstBin; k <= kLastBin; ++k) cells.push_back({static_cast<std::uint16_t>(j), static_cast<std::uint8_t>(k)});
+    }
+    return cells;
+}
+
 }  // namespace nbtv

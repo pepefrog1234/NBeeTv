@@ -30,13 +30,13 @@ inline constexpr int kLearnedFrameFormat = 1;
 // 是 0..learned_values−1 的一個排列，由固定種子的亂數洗牌產生，收發兩端算出來的相同。
 const std::vector<std::uint16_t>& learned_value_order(const Mode& mode);
 
-// 這個模型能不能用在這個模式：實數的個數與寬度（LearnedCodec::base_width）都要和模式的相同。
+// 這個模型能不能用在這個模式：實數的個數、寬度（LearnedCodec::base_width）與畫面大小都要和模式的相同。
 bool learned_model_fits(const Mode& mode, const LearnedCodec& codec);
 
-// 發射機、接收機手上的一組模型。每個模式用「實數個數與寬度都和它相同」的那一個，所以每種組合最多留一個。
+// 發射機、接收機手上的一組模型。每個模式用「實數個數、寬度與畫面大小都和它相同」的那一個，所以每種組合最多留一個。
 class LearnedModels {
 public:
-    // 加進一個模型；已經有實數個數與寬度都相同的就換成這一個。空指標表示全部拿掉。
+    // 加進一個模型；已經有實數個數、寬度與畫面大小都相同的就換成這一個。空指標表示全部拿掉。
     void set(std::shared_ptr<const LearnedCodec> model);
     // 這個模式用的模型；沒有的話是空指標。
     const LearnedCodec* find(const Mode& mode) const;
@@ -45,7 +45,7 @@ private:
     std::vector<std::shared_ptr<const LearnedCodec>> models_;
 };
 
-// 畫面 → mode.data_cells() 個格點，依傳送順序。header 的 format 與 model_tag 由這裡填。
+// 畫面（mode.image_rgb_bytes() 個位元組）→ mode.data_cells() 個格點，依傳送順序。header 的 format 與 model_tag 由這裡填。
 // values 不是空指標時，另外交出編碼器產生的實數（發射端做預覽用）。模型和模式不合時回傳空的。
 std::vector<cf> learned_encode(const Mode& mode, const LearnedCodec& codec, const FrameHeader& header,
                                std::span<const std::uint8_t> rgb, std::vector<float>* values = nullptr);
@@ -77,7 +77,7 @@ struct LearnedRxOptions {
     bool floor = true;
 };
 
-// 取出的實數 → 96×72×3 的畫面。回傳告訴解碼器的訊雜比（dB）。
+// 取出的實數 → 畫面（rgb 要有 codec.rgb_bytes() 個位元組）。回傳告訴解碼器的訊雜比（dB）。
 float learned_picture(const LearnedCodec& codec, const LearnedUnpacked& frame, const LearnedRxOptions& options,
                       std::span<std::uint8_t> rgb);
 

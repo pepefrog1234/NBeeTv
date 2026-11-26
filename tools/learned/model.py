@@ -1,4 +1,6 @@
-# 學出來的影像「訊源—通道聯合編碼」：96×72 的畫面 ↔ 通道上的實數值（每兩個組成一個格點的 I 與 Q）。
+# 學出來的影像「訊源—通道聯合編碼」：畫面 ↔ 通道上的實數值（每兩個組成一個格點的 I 與 Q）。
+# 畫面是 96×72（模式 11–14）；網路只有卷積，別的大小只要寬與高是 8 的倍數也能用（模式 15 的模型是 192×144）。
+# 模型是照哪個大小訓練的記在權重檔裡（export.py）。
 # 編碼器不知道對方的訊雜比（發射端無從得知）；解碼器知道（接收機本來就會估雜訊變異數）。
 #
 # 兩種結構（權重檔的「結構編號」）：
@@ -12,7 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-H, W = 72, 96
+H, W = 72, 96        # 標準的畫面大小
 MAX_SNR_DB = 30.0
 MIN_SNR_DB = {1: -2.0, 2: -6.0}   # 各結構的解碼器認得的最低訊雜比（訓練時涵蓋到這裡）
 # 解析度每減半一次的通道數。模式 11、12 的模型是這一組；模式 13、14 的模型每一層加寬一倍（64, 128, 256, 384，train.py --widths）。
@@ -43,7 +45,7 @@ class ResBlock(nn.Module):
 
 
 class Encoder(nn.Module):
-    """3×72×96 → latent_ch×9×12"""
+    """3×高×寬 → latent_ch×(高/8)×(寬/8)；96×72 的畫面是 latent_ch×9×12"""
 
     def __init__(self, latent_ch, widths=DEFAULT_WIDTHS, blocks=2):
         super().__init__()
@@ -60,7 +62,7 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    """latent_ch×9×12（收到的值）＋訊雜比 → 3×72×96。reliability 為真時，另外吃同樣形狀的「可靠程度」。"""
+    """latent_ch×(高/8)×(寬/8)（收到的值）＋訊雜比 → 3×高×寬。reliability 為真時，另外吃同樣形狀的「可靠程度」。"""
 
     def __init__(self, latent_ch, widths=DEFAULT_WIDTHS, blocks=2, reliability=False):
         super().__init__()
@@ -108,7 +110,7 @@ def reference_noise(noise_var, min_snr_db, max_snr_db=MAX_SNR_DB):
 
 def receive(y, noise_var, ref):
     """接收端交給解碼器之前的處理（和 learned_picture 相同）。
-    y、noise_var 是 [B,C,9,12]：收到的值與它所在格點的複數雜訊變異數；ref 是 [B]：reference_noise 的結果。
+    y、noise_var 是 [B,C,格子的列數,行數]：收到的值與它所在格點的複數雜訊變異數；ref 是 [B]：reference_noise 的結果。
     每個實數的訊號變異數是 1/2、雜訊變異數是 σ²/2，最小均方誤差的權重是 1/(1+σ²)。比參考值吵的值壓到相對於
     參考值的權重，其餘不動。回傳（壓過的值，權重，告訴解碼器的訊雜比 dB）。"""
     ref = ref.to(y.device)[:, None, None, None]
@@ -117,9 +119,11 @@ def receive(y, noise_var, ref):
 
 
 class JSCC(nn.Module):
-    def __init__(self, latent_ch, architecture=1, widths=DEFAULT_WIDTHS):
+    def __init__(self, latent_ch, architecture=1, widths=DEFAULT_WIDTHS, picture=(W, H)):
+        """picture 是（寬, 高）：這個模型照哪個畫面大小訓練、使用。只影響 real_dims；網路本身吃什麼大小都算得出來。"""
         super().__init__()
         self.latent_ch = latent_ch
+        self.picture = (int(picture[0]), int(picture[1]))
         self.architecture = architecture
         self.widths = tuple(int(w) for w in widths)
         self.min_snr_db = MIN_SNR_DB[architecture]
@@ -128,7 +132,7 @@ class JSCC(nn.Module):
 
     @property
     def real_dims(self):
-        return self.latent_ch * (H // 8) * (W // 8)
+        return self.latent_ch * (self.picture[1] // 8) * (self.picture[0] // 8)
 
     def encode(self, x):
         """回傳功率正規化後的通道值：每個實數的均方值是 1/2，也就是每個複數格點的平均功率是 1。"""

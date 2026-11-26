@@ -24,13 +24,14 @@ public:
     int sequence() const { return sequence_; }
     void set_sequence(int sequence) { sequence_ = sequence & 0xFF; }
 
-    // 各個模式用的模型。每個模式用「實數個數與寬度都和它相同」的那一個，所以要用幾個模式就設定幾個；
-    // 兩者都相同的再設定一次會取代前一個。可以和接收機共用同一份；傳空指標表示全部拿掉。
+    // 各個模式用的模型。每個模式用「實數個數、寬度與畫面大小都和它相同」的那一個，所以要用幾個模式就設定幾個；
+    // 三者都相同的再設定一次會取代前一個。可以和接收機共用同一份；傳空指標表示全部拿掉。
     void set_model(std::shared_ptr<const LearnedCodec> model) { models_.set(std::move(model)); }
     // 這個模式會用的模型；沒有的話是空指標。
     const LearnedCodec* model_for(const Mode& mode) const { return models_.find(mode); }
 
-    // rgb 是 96×72×3 的畫面。preview 不是空指標時，填入沒有雜訊時對方看到的畫面（要多跑一次解碼器）。
+    // rgb 是這個模式的一張畫面（mode.image_rgb_bytes() 個位元組：模式 11–14 是 96×72×3，模式 5–7 與 15 是 192×144×3）。
+    // preview 不是空指標時，填入沒有雜訊時對方看到的畫面（同樣大小；要多跑一次解碼器）。
     // 沒有這個模式用的模型時回傳空的，幀序號不變。
     std::vector<float> learned_frame(const Mode& mode, std::span<const std::uint8_t> rgb, std::vector<std::uint8_t>* preview = nullptr);
 

@@ -1,4 +1,6 @@
-// 發射模式選單：app 裡有權重檔的模式（模式 11 到 14），由快到慢。每一列的資料都取自核心的模式表。
+// 發射模式選單：app 裡有權重檔的模式（模式 11 到 14），由快到慢；給 FM 用的大畫面另外排在後面，
+// 分成兩組：幀裡有導頻的（模式 15）與沒有導頻的（模式 5、6、7）。
+// 每一列的資料都取自核心的模式表。
 import SwiftUI
 
 struct ModeMenuView: View {
@@ -25,8 +27,22 @@ struct ModeMenuView: View {
             if Modes.menuOrder.isEmpty {
                 group(L("沒有可以用的模式"), L("app 裡找不到模型的權重檔"))
             } else {
-                group(L("類神經網路編碼（實驗中）"), L("訊號愈弱畫面愈糊，不會整張收不到；兩邊要用同一份權重"))
-                ForEach(Modes.menuOrder) { row($0) }
+                let standard = Modes.menuOrder.filter { !$0.largePicture }
+                let large = Modes.menuOrder.filter { $0.largePicture && !$0.pilotFree }, free = Modes.menuOrder.filter(\.pilotFree)
+                if !standard.isEmpty {
+                    group(L("類神經網路編碼（實驗中）"), L("訊號愈弱畫面愈糊，不會整張收不到；兩邊要用同一份權重"))
+                    ForEach(standard) { row($0) }
+                }
+                if let picture = large.first?.pictureSize {
+                    group(L("FM 語音通道用的大畫面（實驗中）"),
+                          L("畫面 %@，比較清楚。給 VHF／UHF 的 FM 用：訊號弱時比上面的模式差，不適合短波", picture.text))
+                    ForEach(large) { row($0) }
+                }
+                if let picture = free.first?.pictureSize {
+                    group(L("FM 大畫面，幀裡沒有導頻（實驗中）"),
+                          L("畫面 %@。同樣的時間多送 2 成的資料；只給訊號穩定的 FM 用，不適合短波", picture.text))
+                    ForEach(free) { row($0) }
+                }
             }
         }
         .padding(6)
@@ -61,7 +77,7 @@ struct ModeMenuView: View {
                 }
                 .frame(width: 16)
                 Text(mode.name).font(Theme.ui(13, selected ? .semibold : .regular)).frame(width: 64, alignment: .leading)
-                Text(mode.detail).foregroundColor(Theme.secondary).frame(maxWidth: .infinity, alignment: .leading)
+                Text(mode.menuDetail).foregroundColor(Theme.secondary).frame(maxWidth: .infinity, alignment: .leading)
                 Text(mode.secondsText).font(Theme.mono(13)).frame(width: 64, alignment: .trailing)
                 Text(mode.contentText).foregroundColor(Theme.secondary).frame(width: 84, alignment: .trailing)
             }

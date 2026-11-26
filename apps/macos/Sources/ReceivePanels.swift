@@ -1,7 +1,7 @@
 // 主區的四塊：收到的畫面、訊號（或發射）面板、最近收到、音訊頻譜。
 import SwiftUI
 
-/// 96×72 的畫面放大顯示，用最近鄰，不要糊掉。
+/// 96×72（或 192×144）的畫面放大顯示，用最近鄰，不要糊掉。
 /// 直接用 CoreGraphics 畫：SwiftUI 的 Image 在離屏算圖時不保證照 interpolation(.none) 做。
 struct PixelImage: View {
     let image: CGImage
@@ -63,13 +63,13 @@ struct PictureSection: View {
         if model.txPhase != .idle {
             if let preview = model.txPreview {
                 PixelImage(image: preview)
-                    .accessibilityLabel(L("正在送出的畫面：壓縮後對方會看到的 96×72 影像"))
+                    .accessibilityLabel(L("正在送出的畫面：壓縮後對方會看到的 %@ 影像", "\(preview.width)×\(preview.height)"))
             } else {
                 placeholder(L("準備發射"), L("正在處理第一張畫面"))
             }
         } else if let frame = model.displayedFrame {
             PixelImage(image: frame.image)
-                .accessibilityLabel(L("收到的畫面：%@ 傳來的 96×72 影像", frame.callsign))
+                .accessibilityLabel(L("收到的畫面：%@ 傳來的 %@ 影像", frame.callsign, "\(frame.image.width)×\(frame.image.height)"))
                 .overlay(alignment: .topLeading) {
                     if model.settings.showFrameSNR { SNRBadge(snrDb: frame.snrDb) }
                 }

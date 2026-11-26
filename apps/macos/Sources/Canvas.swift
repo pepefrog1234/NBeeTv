@@ -1,5 +1,7 @@
 // 畫布：疊在送出畫面上的一層字（例如「CQ BX4ACP」），發射前印在每一張畫面上。
-// 字帶的樣子只跟文字與位置有關，所以先在 96×72 的透明底上算好一張圖層，之後每一張畫面疊上去就好。
+// 字帶的樣子只跟文字、位置與畫面的大小有關，所以先在透明底上算好一張圖層，之後每一張畫面疊上去就好。
+// 排版一律照 96×72 來算（下面的字級、留白都是這個大小上的像素）；畫面是 192×144 的模式整個放大兩倍，
+// 字帶佔畫面的比例相同，字的筆畫細一倍。
 import CoreGraphics
 import CoreText
 import Foundation
@@ -19,13 +21,15 @@ final class CanvasLayer {
     let style: CanvasStyle
     /// 實際排出來的幾行字（太長時拆成兩行；再放不下的那一行結尾是「…」）
     let lines: [String]
-    /// 字的大小（點；畫面上一點就是一個像素）
+    /// 這一層是給多大的畫面用的
+    let size: PictureSize
+    /// 字的大小（點；96×72 的畫面上一點就是一個像素，192×144 的是兩個）
     let fontSize: CGFloat
-    /// 字帶佔畫面的哪幾列（從上往下數）
+    /// 字帶佔畫面的哪幾列（從上往下數；這個大小的畫面上的列）
     let rows: Range<Int>
-    private let pixels: [UInt8]   // 96×72 的 RGBA，顏色已經乘過透明度；字帶以外是全透明
+    private let pixels: [UInt8]   // 和畫面一樣大的 RGBA，顏色已經乘過透明度；字帶以外是全透明
 
-    /// 一張畫面只有 96×72，還要經過很省頻寬的編碼，字太小對方看不出來：盡量大，放不下才縮，再放不下就拆成兩行。
+    /// 一張畫面只有 96×72（大的也只有 192×144），還要經過很省頻寬的編碼，字太小對方看不出來：盡量大，放不下才縮，再放不下就拆成兩行。
     static let maximumFontSize: CGFloat = 18
     static let minimumFontSize: CGFloat = 9
     /// 一行放得下、但字得縮到比這個還小的時候，改排成兩行
@@ -38,11 +42,15 @@ final class CanvasLayer {
     private static let bandOpacity: CGFloat = 0.62
     static let maximumCharacters = 40
 
-    /// 沒有字可以印時回傳 nil。
-    init?(style: CanvasStyle) {
+    /// size 是畫面的大小（預設 96×72）。沒有字可以印時回傳 nil。
+    init?(style: CanvasStyle, size picture: PictureSize = .standard) {
         let text = String(style.text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(CanvasLayer.maximumCharacters))
         guard !text.isEmpty else { return nil }
+        // 排版用的座標是 96×72；實際的像素是它的 times 倍
         let width = NBTV.imageWidth, height = NBTV.imageHeight
+        let times = picture.scale
+        guard picture.width == width * times, picture.height == height * times else { return nil }
+        let pixelWidth = picture.width, pixelHeight = picture.height
         let available = CGFloat(width) - 2 * CanvasLayer.sideMargin
 
         // 1. 決定排成幾行、字多大
@@ -70,11 +78,13 @@ final class CanvasLayer {
         let band = min(CGFloat(height), ceil(inkHeight + 2 * CanvasLayer.padding))
 
         // 3. 畫在透明的底上。CoreGraphics 的 y 軸朝上；記憶體裡的第一列是畫面的最上面那一列。
-        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        var pixels = [UInt8](repeating: 0, count: pixelWidth * pixelHeight * 4)
         let drawn: Bool = pixels.withUnsafeMutableBytes { raw in
             guard let space = CGColorSpace(name: CGColorSpace.sRGB),
-                  let context = CGContext(data: raw.baseAddress, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
-                                          space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+                  let context = CGContext(data: raw.baseAddress, width: pixelWidth, height: pixelHeight, bitsPerComponent: 8,
+                                          bytesPerRow: pixelWidth * 4, space: space,
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            context.scaleBy(x: CGFloat(times), y: CGFloat(times))   // 之後都用 96×72 的座標畫
             let bandBottom = style.position == .top ? CGFloat(height) - band : 0
             context.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: CanvasLayer.bandOpacity))
             context.fill(CGRect(x: 0, y: bandBottom, width: CGFloat(width), height: band))
@@ -94,18 +104,19 @@ final class CanvasLayer {
         }
         guard drawn else { return nil }
         self.style = style
+        self.size = picture
         self.lines = chosen
         self.fontSize = fontSize
         self.pixels = pixels
-        let bandRows = Int(band)
-        rows = style.position == .top ? 0..<bandRows : (height - bandRows)..<height
+        let bandRows = Int(band) * times
+        rows = style.position == .top ? 0..<bandRows : (pixelHeight - bandRows)..<pixelHeight
     }
 
-    /// 疊到一張 96×72 的畫面上（RGB，每個像素三個位元組），回傳疊好的畫面。
+    /// 疊到一張畫面上（RGB，每個像素三個位元組；要是這一層的大小），回傳疊好的畫面。大小不對時原樣回傳。
     func apply(to rgb: Data) -> Data {
-        guard rgb.count == NBTV.rgbBytes else { return rgb }
+        guard rgb.count == size.rgbBytes else { return rgb }
         var out = rgb
-        let width = NBTV.imageWidth
+        let width = size.width
         out.withUnsafeMutableBytes { raw in
             let dst = raw.bindMemory(to: UInt8.self)
             for index in (rows.lowerBound * width)..<(rows.upperBound * width) {

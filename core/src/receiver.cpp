@@ -258,13 +258,163 @@ S1Match s1_agreement(const Mode& mode, const SymbolGrid& grid, const ChannelEsti
     return match;
 }
 
+// ───── 沒有散佈導頻的幀（Mode::scattered_pilots 為 false；給 FM 語音通道用）─────
+// 這種幀的酬載每個載波都是資料，前後各有一個已知的符號：開頭的 S1，與結尾再送一次的 S1（結尾的參考符號）。
+// FM 的音訊通道在一幀之內不變（沒有衰落、沒有頻偏），會變的只有兩件事：兩邊音效卡的取樣時脈差一點，
+// 所以訊號一個符號比一個符號晚到（或早到）；以及殘餘的一點點共同相位。兩者都隨時間線性變化，
+// 由頭尾兩個參考符號量出來，中間的符號照比例內插（Receiver::process_frame_free）。
+constexpr int kNullFirst = 58;        // 頻帶上方沒用到的頻率從第幾格開始（共 FreeTrack::kNullBins 格，到第 85 格）
+constexpr int kCyclicFirst = 16;      // 循環字首（64 個取樣）裡拿來和符號尾巴比的那一段：前面一截留給通道的拖尾，
+constexpr int kCyclicLast = 56;       // 最後幾個留給定時誤差
+constexpr double kDriftRange = 14.0;  // 頭尾兩個參考符號之間的時間差找到 ±這麼多個取樣（4.4 秒的幀、時脈差 250 ppm 是 13 個）
+constexpr double kFreeReliable = 0.5;       // 參考符號和預測的對得上（正規化相關值）才採用；結尾的對不上就是這一幀沒有送完
+constexpr double kFreeFreshStart = 0.8;     // 頭尾兩個參考符號彼此對得這麼好、卻和預測的對不上：留著的通道不對了，重新開始
+constexpr int kFreeAverageFrames = 8;       // 通道最多平均這麼多幀
+constexpr double kFreeMaxCellSnrDb = 35.0;  // 交給解碼器的雜訊不低於這個訊雜比對應的值：削波、量化這些量不到的失真大約在這裡
+constexpr double kFreeNullFloor = 1e-7;     // 頻帶外的能量至少是頻帶內的這個比例才拿來用（檔案對檔案、沒有雜訊時那裡是空的）
+// 被雜訊的突波打壞的符號（見 process_frame_free）：頻帶上方的雜訊是平常的這麼多倍以上、估出來的雜訊至少是訊號的這個比例，
+// 才拿收到的總能量和預期的比；多出、少掉這麼多才調高那個符號的雜訊。
+constexpr double kFreeBurstRelative = 1.5;
+constexpr double kFreeBurstShare = 0.02;
+constexpr double kFreeExcess = 1.3;
+constexpr double kFreeDeficit = 0.7;
+// 收到的能量不到預期的這個比例：那個符號根本沒有訊號（對方送到一半就停了）。不管雜訊看起來正不正常，都不能把它當成收到的值。
+// 乾淨的訊號一個符號的能量起伏不會到這麼低。
+constexpr double kFreeAbsent = 0.25;
+
+// 兩個通道估計（49 個載波）差多少：b ≈ gain · a · exp(−j2πk·tau/N + j·phi)。
+// tau 是 b 比 a 晚幾個取樣，phi 是共同的相位，rho 是對齊之後的正規化相關值（同一個通道、訊號乾淨時接近 1）。
+struct TimeShift {
+    double tau = 0.0;
+    double phi = 0.0;
+    double rho = 0.0;
+    double gain = 1.0;
+};
+
+TimeShift time_shift_between(const cf* a, const cf* b) {
+    std::array<cd, kCarriers> q;
+    double ea = 0.0, eb = 0.0;
+    for (int c = 0; c < kCarriers; ++c) {
+        q[static_cast<std::size_t>(c)] = cd(b[c]) * std::conj(cd(a[c]));
+        ea += std::norm(a[c]);
+        eb += std::norm(b[c]);
+    }
+    TimeShift out;
+    if (ea <= 0.0 || eb <= 0.0) return out;
+    // 把 b 往回轉 tau 個取樣之後和 a 的相關
+    auto sum_at = [&](double tau) {
+        const double step = kTwoPi * tau / kFftSize;
+        cd rot = std::polar(1.0, step * kFirstBin);
+        const cd inc = std::polar(1.0, step);
+        cd acc(0, 0);
+        for (int c = 0; c < kCarriers; ++c) {
+            acc += q[static_cast<std::size_t>(c)] * rot;
+            rot *= inc;
+        }
+        return acc;
+    };
+    // 先每 0.25 個取樣找一次（相關值的主瓣寬約 5 個取樣），再在最高的那一格附近每 0.01 個取樣找一次
+    constexpr double kCoarse = 0.25, kFine = 0.01;
+    double best = -1.0, best_tau = 0.0;
+    const int coarse_steps = static_cast<int>(kDriftRange / kCoarse);
+    for (int i = -coarse_steps; i <= coarse_steps; ++i) {
+        const double m = std::abs(sum_at(i * kCoarse));
+        if (m > best) {
+            best = m;
+            best_tau = i * kCoarse;
+        }
+    }
+    const double center = best_tau;
+    const int fine_steps = static_cast<int>(kCoarse / kFine);
+    for (int i = -fine_steps; i <= fine_steps; ++i) {
+        const double tau = center + i * kFine;
+        const double m = std::abs(sum_at(tau));
+        if (m > best) {
+            best = m;
+            best_tau = tau;
+        }
+    }
+    const cd sum = sum_at(best_tau);
+    out.tau = best_tau;
+    out.phi = std::arg(sum);
+    out.rho = std::abs(sum) / std::sqrt(ea * eb);
+    out.gain = std::abs(sum) / ea;
+    return out;
+}
+
+// 由一列參考符號估出的通道（49 個載波，已經除掉已知值、也拿掉了視窗提前量的相位）求第一條有份量的路徑
+// 相對於目前時間基準的延遲（取樣數，可為負）。做法和 Receiver::s1_path_delays 相同。
+double response_first_path(const cf* h) {
+    cf x[kFftSize];
+    std::fill(x, x + kFftSize, cf(0, 0));
+    for (int c = 0; c < kCarriers; ++c) {
+        const float hann = static_cast<float>(0.5 - 0.5 * std::cos(kTwoPi * (c + 1) / (kCarriers + 1)));
+        x[kFirstBin + c] = h[c] * hann;
+    }
+    fft256().inverse(x);
+    std::array<double, kFftSize> profile{};
+    for (int t = 0; t < kFftSize; ++t) profile[static_cast<std::size_t>(t)] = std::norm(x[t]);
+    const int peak = static_cast<int>(std::max_element(profile.begin(), profile.end()) - profile.begin());
+    std::array<double, kFftSize> sorted = profile;
+    std::nth_element(sorted.begin(), sorted.begin() + kFftSize / 2, sorted.end());
+    const double threshold = std::max(0.2 * profile[static_cast<std::size_t>(peak)], 12.0 * sorted[kFftSize / 2]);
+    int first = peak;
+    for (int back = 64; back > 0; --back) {
+        const int t = ((peak - back) % kFftSize + kFftSize) % kFftSize;
+        if (profile[static_cast<std::size_t>(t)] >= threshold) {
+            first = peak - back;
+            break;
+        }
+    }
+    double delay = first + (first == peak ? 0.0 : 5.0);  // 加窗後主瓣在門檻處提前約 5 個取樣
+    if (delay >= kFftSize / 2.0) delay -= kFftSize;
+    return delay;
+}
+
+// 一列已知的符號除掉已知值之後，相鄰載波的通道估計是不是幾乎相同（正規化的相關值）。
+// 真正的參考符號乘上的是平滑的通道：相鄰兩格只差一點點相位（定時偏了也只是每一格多轉同樣的角度），相關值接近 S/(S+N)。
+// 那裡如果不是這個符號（別種訊號的酬載、導頻加上資料），除完之後各格的相位是亂的，相關值在 0 附近。
+double adjacent_coherence(const cf* h, int count) {
+    cd acc(0, 0);
+    double ea = 0.0, eb = 0.0;
+    for (int i = 0; i + 1 < count; ++i) {
+        acc += cd(h[i + 1]) * std::conj(cd(h[i]));
+        ea += std::norm(h[i]);
+        eb += std::norm(h[i + 1]);
+    }
+    return ea > 0.0 && eb > 0.0 ? std::abs(acc) / std::sqrt(ea * eb) : 0.0;
+}
+
+// 酬載的能量是不是分散在整個頻帶：49 個載波各自把這幾列的能量加起來，回傳最強的 3 個佔的比例。
+// 真正的幀每個載波平均一樣強（3 個佔 6% 上下，音訊濾波器把頻帶邊緣壓低的話多一點）；
+// 單頻載波，或只佔幾個載波的別種訊號，會超過一半。
+double payload_top_share(const SymbolGrid& grid, int first_row, int last_row) {
+    std::array<double, kCarriers> energy{};
+    double total = 0.0;
+    for (int r = first_row; r < last_row; ++r) {
+        for (int c = 0; c < kCarriers; ++c) {
+            const double e = std::norm(grid.at(r, c));
+            energy[static_cast<std::size_t>(c)] += e;
+            total += e;
+        }
+    }
+    if (total <= 0.0) return 1.0;
+    std::partial_sort(energy.begin(), energy.begin() + 3, energy.end(), std::greater<double>());
+    return (energy[0] + energy[1] + energy[2]) / total;
+}
+
 }  // namespace
 
-Receiver::Receiver() { buf_.reserve(1 << 17); }
+Receiver::Receiver() {
+    buf_.reserve(1 << 17);
+    raw_.reserve(1 << 17);
+}
 
 void Receiver::reset() {
     analytic_.reset();
     buf_.clear();
+    raw_.clear();
+    free_ = FreeTrack{};
     base_ = 0;
     total_in_ = 0;
     level_ = 0.0;
@@ -313,6 +463,7 @@ void Receiver::push(std::span<const float> raw) {
     const double alpha = 1.0 / (0.1 * kSampleRate);
     for (float s : samples) level_ += alpha * (static_cast<double>(s) * s - level_);
     analytic_.process(samples, buf_);
+    raw_.insert(raw_.end(), samples.begin(), samples.end());  // 和 buf_ 一樣長、同樣的編號
     total_in_ += static_cast<std::int64_t>(samples.size());
     while (step()) {
     }
@@ -357,6 +508,7 @@ void Receiver::trim() {
     }
     if (keep - base_ > kBufferSlack) {
         buf_.erase(buf_.begin(), buf_.begin() + static_cast<std::ptrdiff_t>(keep - base_));
+        raw_.erase(raw_.begin(), raw_.begin() + static_cast<std::ptrdiff_t>(keep - base_));
         base_ = keep;
     }
 }
@@ -375,15 +527,17 @@ bool Receiver::step() {
                 const int rows = std::min(mode_->frame_symbols(), kPreambleSymbols + kPresenceSymbols);
                 if (end() < t0_ + static_cast<std::int64_t>(rows) * kSymbolSamples + kCyclicPrefix) return false;
                 presence_checked_ = true;
-                if (!pilots_present(t0_, cfo_, *mode_)) {
-                    if (trace_) std::fprintf(stderr, "[rx] 幀起點 %lld 之後沒有導頻，放棄\n", static_cast<long long>(t0_));
+                const bool there = mode_->scattered_pilots ? pilots_present(t0_, cfo_, *mode_) : signal_present(t0_, *mode_);
+                if (!there) {
+                    if (trace_) std::fprintf(stderr, "[rx] 幀起點 %lld 之後沒有%s，放棄\n", static_cast<long long>(t0_), mode_->scattered_pilots ? "導頻" : "訊號");
                     mode_ = nullptr;
                     enter_search(rescan_from_);
                     return true;
                 }
             }
             if (end() < t0_ + mode_->frame_samples() + 2 * kCyclicPrefix) return false;
-            process_frame();
+            if (mode_->scattered_pilots) process_frame();
+            else process_frame_free();
             return true;
         }
         case State::Confirm: {
@@ -673,7 +827,15 @@ bool Receiver::try_acquire(std::int64_t s0_start, cd corr, double metric) {
     const bool receiving = state_ == State::Receive;
     if (receiving && (tentative() ? chk.score <= frame_evidence_ : chk.score < 2.0 * tuning_.acquire_score)) return false;
 
-    double cfo = eps + static_cast<double>(chk.shift) / kFftSize;
+    // 沒有散佈導頻的幀是給 FM 用的：FM 解調出來的音訊沒有頻偏，量到的只是雜訊造成的誤差，而且這種幀一點頻偏都禁不起
+    // （頭尾兩個參考符號之間相位只要轉超過半圈就接不起來），所以一律當成 0；看起來偏了好幾格的不是這種訊號。
+    const bool free = !mode->scattered_pilots;
+    if (free && chk.shift != 0) {
+        if (trace_) std::fprintf(stderr, "[rx]   模式 %d 的幀不該有頻偏，不收\n", mode->id);
+        return false;
+    }
+    double cfo = free ? 0.0 : eps + static_cast<double>(chk.shift) / kFftSize;
+    const double verify_need = free ? tuning_.verify_cyclic : tuning_.verify_pilots;
     const std::int64_t w1 = w0 + kSymbolSamples;
     const PathDelays paths = s1_path_delays(w1, cfo, chk.mode_id);
     // 路徑的 S1 有效部分從 w1 + 延遲 開始，往前推一個循環字首和一個符號就是 S0 的起點
@@ -687,12 +849,12 @@ bool Receiver::try_acquire(std::int64_t s0_start, cd corr, double metric) {
 
     // 第二道驗證：酬載開頭的導頻要與 S1 估出的通道相符。雜訊偶爾會通過前導符號的檢查，
     // 但不會連導頻都對得上；有了這一步，前面的門檻可以放低，弱訊號比較不會漏掉。
-    PilotCheck pilots = verify_pilots(t0, cfo, *mode);
+    PilotCheck pilots = verify_frame_start(t0, cfo, *mode);
     if (std::fabs(paths.first - paths.peak) > 8.0) {
         // 「第一條路徑」可能只是雜訊：以最強路徑為準再驗證一次，取相關較高的定時
         const std::int64_t alt = frame_start(paths.peak);
         if (alt + kCyclicPrefix - kTrackBackoff >= base_) {
-            const PilotCheck other = verify_pilots(alt, cfo, *mode);
+            const PilotCheck other = verify_frame_start(alt, cfo, *mode);
             if (other.rho > pilots.rho) {
                 pilots = other;
                 tau = paths.peak;
@@ -702,10 +864,10 @@ bool Receiver::try_acquire(std::int64_t s0_start, cd corr, double metric) {
     }
     if (trace_) {
         std::fprintf(stderr, "[rx] %s：模式 %d、頻偏 %+.2f Hz（導頻修正 %+.2f）、S1 第一條路徑 %+.1f、幀起點 %lld、導頻相關 %.2f\n",
-                     pilots.rho >= tuning_.verify_pilots ? "捕獲" : "導頻不符，放棄", mode->id, cfo * kSampleRate,
+                     pilots.rho >= verify_need ? "捕獲" : "導頻不符，放棄", mode->id, cfo * kSampleRate,
                      pilots.cfo_delta * kSampleRate, tau, static_cast<long long>(t0), pilots.rho);
     }
-    if (pilots.rho < tuning_.verify_pilots) return false;
+    if (pilots.rho < verify_need) return false;
     // 已經收完的幀不再收一次。搜尋都從上一幀的前導符號之後開始，候選位置往回最多只看到那之前 248 個取樣，
     // 照理不會再找到同一幀；這一關是保險：不管流程怎麼走，處理過的幀起點只會愈來愈後面，
     // 所以手上的取樣一定處理得完，不會在同樣幾個位置之間來回。
@@ -731,6 +893,7 @@ void Receiver::begin_frame(const Acquisition& found) {
     mode_ = found.mode;
     cfo_ = found.cfo;
     t0_ = found.t0;
+    free_ = FreeTrack{};  // 另一次發射：通道、時脈差都重新量
     state_ = State::Receive;
     confirmed_ = true;
     presence_checked_ = true;
@@ -841,6 +1004,426 @@ bool Receiver::pilots_present(std::int64_t t0, double cfo, const Mode& mode) con
     return pilot_coherence(demodulate(t0, cfo, rows), 0, rows - kPreambleSymbols) > kPresenceThreshold;
 }
 
+// ───── 沒有散佈導頻的幀 ─────
+
+// 循環字首和符號的尾巴是不是相同：每個符號開頭的 64 個取樣是它最後 64 個取樣的複本，相隔 256 個取樣。
+// 每個符號各自算出正規化的相關值再平均（每個符號的份量相同，讀不到的符號算 0）。有訊號而且位置對的時候
+// 接近 S/(S+N)；只有雜訊時在 0 附近（一個符號約 ±0.3，平均 12 個符號約 0.1、36 個約 0.06）。
+// 不必知道酬載放了什麼，所以沒有導頻的幀靠它判斷訊號在不在、送到哪裡為止。
+// 單頻載波的循環字首也和尾巴相同，要另外用 payload_top_share 擋。
+double Receiver::cyclic_coherence(std::int64_t t0, int first_row, int last_row) const {
+    cd total(0, 0);
+    int rows = 0;
+    for (int r = first_row; r < last_row; ++r) {
+        ++rows;
+        const std::int64_t s = t0 + static_cast<std::int64_t>(r) * kSymbolSamples;
+        if (s + kCyclicFirst < base_ || s + kCyclicLast + kFftSize > end()) continue;
+        cd acc(0, 0);
+        double ea = 0.0, eb = 0.0;
+        for (int n = kCyclicFirst; n < kCyclicLast; ++n) {
+            const cd a = sample(s + n), b = sample(s + n + kFftSize);
+            acc += b * std::conj(a);
+            ea += std::norm(a);
+            eb += std::norm(b);
+        }
+        if (ea > 0.0 && eb > 0.0) total += acc / std::sqrt(ea * eb);
+    }
+    return rows > 0 ? std::abs(total) / rows : 0.0;
+}
+
+// 開頭幾十個酬載符號裡訊號在不在（對應靠導頻的 pilots_present）。
+bool Receiver::signal_present(std::int64_t t0, const Mode& mode) const {
+    const int last = kPreambleSymbols + std::min(mode.payload_symbols, kPresenceSymbols);
+    return cyclic_coherence(t0, kPreambleSymbols, last) > kPresenceThreshold;
+}
+
+// 捕獲後的第二道驗證。有散佈導頻的幀看酬載開頭的導頻（verify_pilots）。沒有的幀沒有導頻可看，改成三件事都要成立，
+// 回傳其中最差的一個：
+//   * S0 與 S1 除掉已知的序列之後，相鄰載波的通道估計幾乎相同（adjacent_coherence）。前導符號的判定（check_preamble）
+//     看的是延遲域裡能量集不集中，別種訊號的酬載偶爾會過關：導頻每 6 格一個，剛好和某條 S1 序列在那幾格上同號時，
+//     延遲域裡也會出現集中的峰。有導頻的幀靠導頻驗證擋掉這種位置；這裡靠的是那種符號相鄰的載波之間沒有關係。
+//   * 酬載開頭那幾個符號的循環字首和符號的尾巴相同（cyclic_coherence）：後面確實接著同樣節拍的符號。
+//   * 能量分散在整個頻帶：單頻載波的循環字首也和尾巴相同。
+Receiver::PilotCheck Receiver::verify_frame_start(std::int64_t t0, double cfo, const Mode& mode) const {
+    if (mode.scattered_pilots) return verify_pilots(t0, cfo, mode);
+    PilotCheck out;
+    const int last = kPreambleSymbols + std::min(mode.payload_symbols, kVerifySymbols);
+    const SymbolGrid grid = demodulate(t0, 0.0, last);
+    if (payload_top_share(grid, kPreambleSymbols, last) >= kPilotTopShare) return out;
+    std::array<cf, kCarriers> h1;
+    for (int c = 0; c < kCarriers; ++c) h1[static_cast<std::size_t>(c)] = grid.at(1, c) * (s1_value(mode.id, kFirstBin + c) > 0.0f ? 1.0f : -1.0f);
+    std::array<cf, kS0Carriers> h0;
+    for (int i = 0; i < kS0Carriers; ++i) h0[static_cast<std::size_t>(i)] = grid.at(0, 2 * i) * std::conj(s0_value(kFirstBin + 2 * i));
+    out.rho = std::min({cyclic_coherence(t0, kPreambleSymbols, last), adjacent_coherence(h1.data(), kCarriers), adjacent_coherence(h0.data(), kS0Carriers)});
+    return out;
+}
+
+// 每個符號在頻帶上方沒用到的那幾格（第 58–85 格，2719–3984 Hz）的能量：out[列·kNullBins + 第幾格]。
+// 取的是還沒濾波的取樣（解析濾波器把那一段濾掉了），視窗和 demodulate 的對齊：一個符號裡各個載波正交，
+// 訊號自己不會漏到這幾格，聽到的就是那個符號的雜訊。讀不到的列留 0。
+void Receiver::null_powers(std::int64_t t0, int rows, std::vector<float>& out) const {
+    constexpr int kBins = FreeTrack::kNullBins;
+    out.assign(static_cast<std::size_t>(rows) * kBins, 0.0f);
+    const int delay = analytic_.delay_samples();
+    cf y[kFftSize];
+    for (int r = 0; r < rows; ++r) {
+        const std::int64_t start = t0 + static_cast<std::int64_t>(r) * kSymbolSamples + kCyclicPrefix - kTrackBackoff - delay;
+        if (start < base_ || start + kFftSize > end()) continue;
+        const float* in = &raw_[static_cast<std::size_t>(start - base_)];
+        for (int n = 0; n < kFftSize; ++n) y[n] = cf(in[n], 0.0f);
+        fft256().forward(y);
+        for (int i = 0; i < kBins; ++i) out[static_cast<std::size_t>(r * kBins + i)] = std::norm(y[kNullFirst + i]);
+    }
+}
+
+// 收滿一幀沒有散佈導頻的幀之後：解調、估通道、解碼，再預測下一幀的位置。流程和 process_frame 相同，
+// 靠導頻的地方換成：頭尾兩個參考符號（通道、時脈漂移、這一幀有沒有送完）、循環字首（訊號在不在）、
+// 頻帶上方沒用到的頻率（每個符號的雜訊）。
+void Receiver::process_frame_free() {
+    const Mode& mode = *mode_;
+    const int rows = mode.frame_symbols();
+    const int tail = rows - 1;      // 結尾的參考符號那一列
+    const double span = tail - 1;   // 頭尾兩個參考符號相隔幾個符號
+    const int payload_first = kPreambleSymbols, payload_last = kPreambleSymbols + mode.payload_symbols;
+    const bool previous_ok = last_ok_;
+    const std::int64_t t0_before = t0_;
+    if (confirmed_) done_start_ = t0_before;
+    cfo_ = 0.0;  // FM 解調出來的音訊沒有頻偏
+    SymbolGrid grid = demodulate(t0_, 0.0, rows);
+    auto turn = [](int c, double samples, double phase) {  // 第 c 個載波晚 samples 個取樣、相位多 phase
+        return cf(std::polar(1.0, -kTwoPi * (kFirstBin + c) * samples / kFftSize + phase));
+    };
+
+    // 頭尾兩個參考符號各自量到的通道（含參考符號的振幅；資料格的振幅和它相同，所以等化時直接除就好）
+    std::array<float, kCarriers> head_sign, tail_sign;
+    for (int c = 0; c < kCarriers; ++c) {
+        head_sign[static_cast<std::size_t>(c)] = s1_value(mode.id, kFirstBin + c) > 0.0f ? 1.0f : -1.0f;
+        tail_sign[static_cast<std::size_t>(c)] = s1_value(kTailReferenceId, kFirstBin + c) > 0.0f ? 1.0f : -1.0f;
+    }
+    std::array<cf, kCarriers> h1, h2;
+    auto take_references = [&] {
+        for (int c = 0; c < kCarriers; ++c) {
+            h1[static_cast<std::size_t>(c)] = grid.at(1, c) * head_sign[static_cast<std::size_t>(c)];
+            h2[static_cast<std::size_t>(c)] = grid.at(tail, c) * tail_sign[static_cast<std::size_t>(c)];
+        }
+    };
+    take_references();
+
+    // 同一次發射的前幾幀留下了平均的通道與時脈漂移（free_）：照它們預測這一幀頭尾兩個參考符號會收到什麼，
+    // 再量實際收到的和預測差多少（時間、相位、音量）。訊號忽強忽弱時，參考符號可能剛好落在訊號弱的那一刻；
+    // 和預測對不上的那一個不用，改照預測走，兩個都對不上就整幀照預測。
+    // 這次發射的第一幀沒有東西可以預測：開頭的參考符號就是基準，結尾的和它比。
+    bool tracked = free_.frames > 0;
+    std::array<cf, kCarriers> predicted;  // 預測開頭的參考符號量到的通道
+    TimeShift head, end_shift;
+    auto measure = [&] {
+        if (tracked) {
+            for (int c = 0; c < kCarriers; ++c) {
+                predicted[static_cast<std::size_t>(c)] = free_.ref[static_cast<std::size_t>(c)] * turn(c, free_.pending_shift, free_.pending_phase);
+            }
+            head = time_shift_between(predicted.data(), h1.data());
+        } else {
+            predicted = h1;
+            head = TimeShift{};
+            head.rho = 1.0;
+        }
+        std::array<cf, kCarriers> at_tail;  // 預測結尾的參考符號：比開頭的再晚 drift × span 個取樣
+        for (int c = 0; c < kCarriers; ++c) at_tail[static_cast<std::size_t>(c)] = predicted[static_cast<std::size_t>(c)] * turn(c, free_.drift * span, 0.0);
+        end_shift = time_shift_between(at_tail.data(), h2.data());
+    };
+    measure();
+    if (tracked && (head.rho < kFreeReliable || end_shift.rho < kFreeReliable) &&
+        time_shift_between(h1.data(), h2.data()).rho >= kFreeFreshStart) {
+        // 頭尾兩個參考符號都很清楚、彼此也對得上，卻和預測的不一樣：留著的通道不對了（對方換了設備或音量大改），重新開始
+        if (trace_) std::fprintf(stderr, "[rx]   參考符號和前幾幀留下的通道對不上，重新開始估\n");
+        free_.frames = 0;
+        free_.drift = 0.0;
+        free_.drift_count = 0;
+        free_.pending_shift = free_.pending_phase = 0.0;
+        tracked = false;
+        measure();
+    }
+
+    // 定時：開頭的參考符號偏離基準 3 個取樣以上就移動視窗重新解調。第一幀看它的第一條路徑；之後看它比預測的晚多少。
+    double moved_by = tracked ? (head.rho >= kFreeReliable ? head.tau : 0.0) : response_first_path(h1.data());
+    moved_by = std::clamp(moved_by, -48.0, 48.0);
+    std::int64_t window_moved = 0;  // 視窗實際移了幾個取樣
+    if (std::fabs(moved_by) >= 3.0) {
+        const std::int64_t shift = std::llround(moved_by);
+        const std::int64_t moved = t0_ + shift;
+        if (moved + kCyclicPrefix - kTrackBackoff >= base_ && moved + mode.frame_samples() + kCyclicPrefix <= end()) {
+            t0_ = moved;
+            window_moved = shift;
+            if (tracked) free_.pending_shift -= static_cast<double>(shift);
+            grid = demodulate(t0_, 0.0, rows);
+            take_references();
+            measure();
+        }
+    }
+
+    const bool head_ok = head.rho >= kFreeReliable;
+    const bool tail_ok = end_shift.rho >= kFreeReliable;  // 結尾的參考符號在：對方把這一幀送完了
+    // 開頭與結尾相對於「預測的開頭」晚了多少、相位差多少；中間的符號照比例內插
+    const double predicted_span = free_.drift * span;
+    double tau0 = 0.0, tau1 = predicted_span, phi0 = 0.0, phi1 = 0.0;
+    if (head_ok && tail_ok) {
+        tau0 = head.tau;
+        phi0 = head.phi;
+        tau1 = end_shift.tau + predicted_span;
+        phi1 = end_shift.phi;
+    } else if (head_ok) {
+        tau0 = head.tau;
+        tau1 = tau0 + predicted_span;
+        phi0 = phi1 = head.phi;
+    } else if (tail_ok) {
+        tau0 = end_shift.tau;
+        tau1 = tau0 + predicted_span;
+        phi0 = phi1 = end_shift.phi;
+    }
+    const double dphi = std::remainder(phi1 - phi0, kTwoPi);
+    // 這一幀的音量是前幾幀平均的幾倍（對方或自己中途調了音量）
+    double gain = 1.0;
+    if (tracked && (head_ok || tail_ok)) gain = ((head_ok ? head.gain : 0.0) + (tail_ok ? end_shift.gain : 0.0)) / ((head_ok ? 1 : 0) + (tail_ok ? 1 : 0));
+
+    // 這一幀的通道（對齊到預測的開頭）：前幾幀的平均，加上這一幀可用的參考符號（各自轉回開頭的時間）
+    const int earlier = tracked ? 2 * free_.frames : 0;  // 前幾幀的平均相當於幾個參考符號
+    const int fresh = (head_ok ? 1 : 0) + (tail_ok ? 1 : 0);
+    const int references = std::max(earlier + fresh, 1);
+    std::array<cf, kCarriers> base, back1{}, back2{};
+    double power = 0.0;  // 一個符號所有載波的訊號功率
+    for (int c = 0; c < kCarriers; ++c) {
+        const std::size_t i = static_cast<std::size_t>(c);
+        cd sum = tracked ? cd(predicted[i]) * (gain * earlier) : cd(0, 0);
+        if (head_ok) {
+            back1[i] = h1[i] * turn(c, -tau0, -phi0);
+            sum += cd(back1[i]);
+        }
+        if (tail_ok) {
+            back2[i] = h2[i] * turn(c, -tau1, -phi1);
+            sum += cd(back2[i]);
+        }
+        base[i] = earlier + fresh > 0 ? cf(sum / static_cast<double>(references)) : predicted[i];
+        power += std::norm(base[i]);
+    }
+    const double mean_power = power / kCarriers;
+    // 雜訊：這一幀的參考符號和平均出來的通道差多少。n 個裡的一個和平均值的差，變異數是雜訊的 (1 − 1/n) 倍。
+    double pair_var = free_.noise_var > 0.0f ? static_cast<double>(free_.noise_var) : 0.01 * mean_power;  // 每個格點的複數雜訊變異數（FFT 輸出的刻度）
+    const bool measured = fresh > 0 && references > 1;
+    if (measured) {
+        double residual = 0.0;
+        for (int c = 0; c < kCarriers; ++c) {
+            const std::size_t i = static_cast<std::size_t>(c);
+            if (head_ok) residual += std::norm(back1[i] - base[i]);
+            if (tail_ok) residual += std::norm(back2[i] - base[i]);
+        }
+        pair_var = residual / (kCarriers * fresh * (1.0 - 1.0 / references));
+        free_.noise_var = static_cast<float>(pair_var);
+    }
+    // 留給下一幀的：對齊到這一幀實際的開頭
+    if (fresh > 0) {
+        for (int c = 0; c < kCarriers; ++c) free_.ref[static_cast<std::size_t>(c)] = base[static_cast<std::size_t>(c)] * turn(c, tau0, phi0);
+        free_.frames = std::min((tracked ? free_.frames : 0) + 1, kFreeAverageFrames);
+    } else {
+        free_.ref = predicted;
+    }
+    const double slope = (tau1 - tau0) / span;  // 這一幀裡每過一個符號晚幾個取樣
+    if (head_ok && tail_ok) {
+        free_.drift_count = std::min(free_.drift_count + 1, 4);
+        free_.drift += (slope - free_.drift) / free_.drift_count;
+    }
+
+    // 每個符號的雜訊。訊號忽強忽弱時（車上、手持），FM 解調出來的雜訊跟著一個符號一個符號地變；整幀只用一個值的話，
+    // 弱的那幾個符號會被當成和其他的一樣可信。頻帶上方沒用到的頻率只有雜訊，而且和頻帶內的雜訊同進退：
+    // 每一格先除以它自己平常的大小（電台的音訊濾波器在那裡壓得多深都無所謂），平均起來就是「這個符號比平常吵幾倍」，
+    // 再用參考符號量到的雜訊定出絕對的大小。
+    std::vector<double> row_var(static_cast<std::size_t>(rows), pair_var);
+    // 每個酬載符號收到的總能量是預期的幾倍（預期的是「通道 × 資料格的平均功率 1」）
+    std::vector<double> energy_ratio(static_cast<std::size_t>(rows), 1.0);
+    for (int row = payload_first; row < payload_last; ++row) {
+        double energy = 0.0;
+        for (int c = 0; c < kCarriers; ++c) energy += std::norm(grid.at(row, c));
+        energy_ratio[static_cast<std::size_t>(row)] = power > 0.0 ? energy / power : 1.0;
+    }
+    bool profiled = false;
+    if (tuning_.noise_map) {
+        constexpr int kBins = FreeTrack::kNullBins;
+        std::vector<float> nulls;
+        null_powers(t0_, rows, nulls);
+        if (fresh > 0) {  // 這裡確實有這一幀：算進「各格平常有多吵」
+            for (int r = 0; r < rows; ++r) {
+                for (int i = 0; i < kBins; ++i) free_.null_sum[static_cast<std::size_t>(i)] += nulls[static_cast<std::size_t>(r * kBins + i)];
+            }
+            free_.null_rows += rows;
+        }
+        std::array<double, kBins> level{};
+        double level_total = 0.0;
+        bool usable = free_.null_rows > 0;
+        for (int i = 0; usable && i < kBins; ++i) {
+            level[static_cast<std::size_t>(i)] = free_.null_sum[static_cast<std::size_t>(i)] / static_cast<double>(free_.null_rows);
+            level_total += level[static_cast<std::size_t>(i)];
+            if (!(level[static_cast<std::size_t>(i)] > 0.0)) usable = false;
+        }
+        // 解析訊號的功率是原來取樣的 4 倍（只留正頻率、振幅乘 2），比的時候換成同一個刻度
+        if (usable && level_total >= kFreeNullFloor * power / 4.0) {
+            std::vector<double> relative(static_cast<std::size_t>(rows), 1.0);  // 每個符號比平常吵幾倍
+            for (int r = 0; r < rows; ++r) {
+                double sum = 0.0;
+                for (int i = 0; i < kBins; ++i) sum += nulls[static_cast<std::size_t>(r * kBins + i)] / level[static_cast<std::size_t>(i)];
+                relative[static_cast<std::size_t>(r)] = sum / kBins;
+            }
+            if (measured) {
+                free_.scale_num += pair_var * fresh;
+                free_.scale_den += (head_ok ? relative[1] : 0.0) + (tail_ok ? relative[static_cast<std::size_t>(tail)] : 0.0);
+            }
+            if (free_.scale_den > 0.0) {
+                const double scale = free_.scale_num / free_.scale_den;
+                for (int r = 0; r < rows; ++r) row_var[static_cast<std::size_t>(r)] = scale * relative[static_cast<std::size_t>(r)];
+                profiled = true;
+                // 被雜訊的突波打壞的符號。FM 的訊號掉到門檻以下時出現的喀喀聲能量集中在低頻，頻帶上方聽到的比頻帶內少，
+                // 上面的估計會偏低（最多差 10 dB）；訊號再弱，連訊號本身都會被壓掉。這兩種從收到的總能量看得出來：
+                // 和「通道 × 資料格的平均功率 1」比，多出很多或少了很多。49 個資料格的能量本來就有起伏
+                // （乾淨的訊號也偶爾差到三四成），所以只在頻帶上方顯示這個符號明顯比平常吵、估出來的雜訊也已經不小的時候才看。
+                for (int row = payload_first; row < payload_last; ++row) {
+                    const std::size_t r = static_cast<std::size_t>(row);
+                    if (relative[r] < kFreeBurstRelative || row_var[r] < kFreeBurstShare * mean_power) continue;
+                    const double ratio = energy_ratio[r];
+                    if (ratio > kFreeExcess) row_var[r] = std::max(row_var[r], (ratio - 1.0) * mean_power);
+                    else if (ratio < kFreeDeficit) row_var[r] = std::max(row_var[r], (1.0 - std::sqrt(ratio)) * (1.0 - std::sqrt(ratio)) * mean_power);
+                }
+            }
+        }
+    }
+    // 根本沒有訊號的符號（見 kFreeAbsent）
+    for (int row = payload_first; row < payload_last; ++row) {
+        const std::size_t r = static_cast<std::size_t>(row);
+        const double ratio = energy_ratio[r];
+        if (ratio < kFreeAbsent) row_var[r] = std::max(row_var[r], (1.0 - std::sqrt(ratio)) * (1.0 - std::sqrt(ratio)) * mean_power);
+    }
+    const double floor_var = mean_power * std::pow(10.0, -kFreeMaxCellSnrDb / 10.0);
+    double payload_var = 0.0;
+    for (int row = payload_first; row < payload_last; ++row) payload_var += std::max(row_var[static_cast<std::size_t>(row)], floor_var);
+    payload_var /= mode.payload_symbols;
+    snr_db_ = static_cast<float>(10.0 * std::log10(power / (64.0 * payload_var)));  // 3 kHz 的雜訊頻寬是 64 格
+    snr_valid_ = true;
+
+    // 訊號在不在：整個酬載一次，再分成 2–4 段各看一次（對方把整幀送完了，不是送到一半就停）
+    const double coherence = cyclic_coherence(t0_, payload_first, payload_last);
+    const bool present = coherence > kPresenceThreshold;
+    bool present_throughout = true;
+    const int segments = std::clamp(mode.payload_symbols / 18, 2, 4);
+    for (int k = 0; k < segments && present_throughout; ++k) {
+        const int from = mode.payload_symbols * k / segments, to = mode.payload_symbols * (k + 1) / segments;
+        present_throughout = cyclic_coherence(t0_, payload_first + from, payload_first + to) > kPresenceThreshold;
+    }
+    const bool late_candidate = (cand_ready_ && cand_metric_ >= kSolidScThreshold) || (peak_active_ && peak_metric_ >= kSolidScThreshold);
+    const bool intact = present_throughout && tail_ok && pending_start_ < 0 && !late_candidate;
+    const double top_share = payload_top_share(grid, payload_first, payload_last);
+    const bool spread = top_share < kPilotTopShare;
+    const bool clear = intact && spread && coherence > kFollowThreshold;
+    if (trace_) {
+        std::fprintf(stderr, "[rx] 幀 @%lld 模式 %d（沒有導頻）：定時修正 %+.1f；開頭的參考符號相關 %.2f、晚 %+.2f；結尾的相關 %.2f、晚 %+.2f、相位差 %+.2f；"
+                             "通道是 %d 個參考符號的平均；訊雜比 %.1f dB；循環字首相干 %.2f；最強的 3 個載波佔 %.0f%%；%s\n",
+                     static_cast<long long>(t0_), mode.id, moved_by, head.rho, tau0, end_shift.rho, tau1, dphi, references, static_cast<double>(snr_db_),
+                     coherence, 100.0 * top_share, profiled ? "逐符號的雜訊" : "整幀同一個雜訊");
+    }
+
+    // 等化。第 row 列離開頭的參考符號 row − 1 個符號，時間差與相位照比例內插。
+    std::vector<cf> cells(static_cast<std::size_t>(mode.data_cells()));
+    std::vector<float> noise(cells.size());
+    const double estimate_gain = 1.0 / references;  // 通道估計的誤差：等化之後多出這麼多倍的雜訊
+    std::size_t n = 0;
+    for (int row = payload_first; row < payload_last; ++row) {
+        const double alpha = static_cast<double>(row - 1) / span;
+        const double step = -kTwoPi * (tau0 + (tau1 - tau0) * alpha) / kFftSize;
+        cd rot = std::polar(1.0, step * kFirstBin + phi0 + dphi * alpha);
+        const cd inc = std::polar(1.0, step);
+        const float var = static_cast<float>(std::max(row_var[static_cast<std::size_t>(row)], floor_var) * (1.0 + estimate_gain));
+        for (int c = 0; c < kCarriers; ++c) {
+            const cf h = base[static_cast<std::size_t>(c)] * cf(rot);
+            rot *= inc;
+            const float h2_power = std::max(std::norm(h), 1e-20f);
+            cells[n] = grid.at(row, c) * std::conj(h) / h2_power;
+            noise[n] = var / h2_power;
+            ++n;
+        }
+    }
+
+    RxFrame frame;
+    frame.mode_id = mode.id;
+    frame.image_width = mode.image_width;
+    frame.image_height = mode.image_height;
+    frame.snr_db = snr_db_;
+    frame.freq_offset_hz = 0.0f;
+    frame.start_sample = t0_;
+
+    // 只有確定這是一整幀才當成畫面：標頭正確；或是前導符號確認過（而且很明確，或緊接在一張好的後面）、
+    // 從頭到尾都有訊號、結尾的參考符號對得上、能量也分散在整個頻帶。
+    // 前導符號沒確認到的幀（confirm_next 照節拍接著收的）只有標頭正確才算數。
+    const LearnedUnpacked l = learned_unpack(mode, cells, noise);
+    const bool ok = l.header_ok;
+    frame.header_ok = l.header_ok;
+    if (l.header_ok) {
+        frame.callsign = l.header.callsign_valid ? l.header.callsign : std::string();
+        frame.sequence = l.header.sequence;
+    }
+    const bool by_preamble = !l.header_ok && confirmed_ && (previous_ok || !tentative()) && intact && spread;
+    const bool whole = l.header_ok || by_preamble;
+    decode_picture(mode, l, whole, frame);
+    const bool emit = whole || (confirmed_ && intact && spread);
+    if (trace_) std::fprintf(stderr, "[rx]   → 標頭%s、%s\n", ok ? "正確" : "沒解出來", frame.decoded ? "有畫面" : "沒有畫面");
+    if (emit) {
+        if (frame.decoded) ++frames_decoded_;
+        else ++frames_failed_;
+        frames_.push_back(std::move(frame));
+    }
+    const bool solid = whole && clear;
+    last_ok_ = ok || solid;
+    last_complete_ = false;
+    last_clear_ = clear && (whole || confirmed_);
+    follow_misses_ = 0;
+    if (!ok && !present) t0_ = t0_before;  // 整幀都沒有訊號：這一幀量到的定時只是雜訊，不採用
+    const double undone = t0_ == t0_before ? static_cast<double>(window_moved) : 0.0;  // 視窗移回去了：留給下一幀的通道是照移過的位置對齊的
+
+    // 下一幀緊接在後，再加上這一幀量到的時脈漂移（不到一個取樣的部分記在 pending_shift，下一幀預測時用）
+    const std::int64_t frame_start = t0_;
+    const double step = slope * rows;
+    free_.fraction += step;
+    const std::int64_t drifted = std::llround(free_.fraction);
+    free_.fraction -= static_cast<double>(drifted);
+    free_.pending_shift = step - static_cast<double>(drifted) + undone;
+    free_.pending_phase = dphi * rows / span;
+    t0_ += mode.frame_samples() + drifted;
+    if (ok || solid) {
+        // 解出來的這一幀不必再搜尋；但和有導頻的幀一樣，從尾端一段一段往回看訊號到哪裡為止，
+        // 對方中途停了的話，另一次發射可能就在那之後開始。
+        int seen = mode.payload_symbols;
+        while (seen > 0) {
+            const int first = seen >= 2 * kTailSegment ? seen - kTailSegment : 0;
+            if (cyclic_coherence(frame_start, payload_first + first, payload_first + seen) > kPresenceThreshold) break;
+            seen = first;
+        }
+        const int unseen_tail = kPreambleSymbols + kVerifySymbols + 2;
+        const int rescan_row = std::min(seen >= mode.payload_symbols ? mode.payload_symbols : std::max(seen - kTailSegment, 0),
+                                        std::max(mode.payload_symbols - unseen_tail, 0));
+        rescan_from_ = frame_start + static_cast<std::int64_t>(kPreambleSymbols + rescan_row) * kSymbolSamples;
+        last_complete_ = tail_ok && seen >= mode.payload_symbols;
+        if (trace_ && !last_complete_) {
+            std::fprintf(stderr, "[rx]   訊號只到第 %d 個酬載符號（共 %d 個）%s：對方可能中途停了\n", seen, mode.payload_symbols,
+                         tail_ok ? "" : "，結尾的參考符號也對不上");
+        }
+    }
+    if (pending_start_ >= 0) {
+        if (pending_.t0 >= done_start_ + kCyclicPrefix) {
+            begin_frame(pending_);
+        } else {
+            mode_ = nullptr;
+            enter_search(t0_before + kSymbolSamples);
+        }
+        return;
+    }
+    state_ = State::Confirm;
+}
+
 void Receiver::set_merge(std::shared_ptr<const LearnedMerge> merge) {
     earlier_.clear();
     if (merge == nullptr) {
@@ -901,6 +1484,31 @@ void Receiver::remember(const LearnedMerge& merge, const Mode& mode, const Learn
     e.noise_var = frame.noise_var;
     earlier_.push_front(std::move(e));
     while (earlier_.size() > static_cast<std::size_t>(merge.frames() - 1)) earlier_.pop_back();
+}
+
+// 把一幀收到的值解成畫面（whole：確定這是一整幀）。兩種幀共用。
+void Receiver::decode_picture(const Mode& mode, const LearnedUnpacked& l, bool whole, RxFrame& frame) {
+    // 沒有這個模式用的模型，或標頭說對方用的是另一份權重：解出來只會是雜訊，不交出畫面，只回報收到了一幀
+    const LearnedCodec* model = models_.find(mode);
+    const bool usable = model != nullptr && learned_model_matches(l, *model);
+    frame.model_missing = whole && !usable;
+    frame.decoded = whole && usable;
+    if (frame.decoded) {
+        frame.rgb.resize(static_cast<std::size_t>(model->rgb_bytes()));
+        LearnedRxOptions options;
+        options.median_snr = tuning_.learned_median_snr;
+        options.attenuate = tuning_.learned_attenuate;
+        options.floor = tuning_.learned_floor;
+        // 合併最近幾幀（要打開、而且這個模型有合併用的權重）：畫面沒變的地方把前面幾幀收到的值合進來。
+        // 記下來的是這一幀原來收到的值，不是合併後的：每一幀都只和實際收到的東西合。
+        const LearnedMerge* merge = tuning_.learned_merge ? find_merge(model->model_id()) : nullptr;
+        LearnedUnpacked merged;
+        const int used = merge != nullptr ? merge_earlier(*merge, mode, l, frame, merged) : 0;
+        const float told = learned_picture(*model, used > 0 ? merged : l, options, frame.rgb);
+        if (merge != nullptr) remember(*merge, mode, l, frame);
+        else earlier_.clear();
+        if (trace_) std::fprintf(stderr, "[rx]   告訴解碼器的訊雜比 %.1f dB（合併了前面 %d 幀）\n", told, used);
+    }
 }
 
 void Receiver::process_frame() {
@@ -979,6 +1587,8 @@ void Receiver::process_frame() {
 
     RxFrame frame;
     frame.mode_id = mode.id;
+    frame.image_width = mode.image_width;
+    frame.image_height = mode.image_height;
     frame.snr_db = est.snr_db;
     frame.freq_offset_hz = static_cast<float>(cfo_ * kSampleRate);
     frame.start_sample = t0_;
@@ -1015,27 +1625,7 @@ void Receiver::process_frame() {
                              : suspect ? (usual ? "；有強的載波，S1 對得上，算一幀" : "；有強的載波，S1 對不上，不算") : "");
     }
     const bool whole = usual || followed;
-    // 沒有這個模式用的模型，或標頭說對方用的是另一份權重：解出來只會是雜訊，不交出畫面，只回報收到了一幀
-    const LearnedCodec* model = models_.find(mode);
-    const bool usable = model != nullptr && learned_model_matches(l, *model);
-    frame.model_missing = whole && !usable;
-    frame.decoded = whole && usable;
-    if (frame.decoded) {
-        frame.rgb.resize(static_cast<std::size_t>(kImageRgbBytes));
-        LearnedRxOptions options;
-        options.median_snr = tuning_.learned_median_snr;
-        options.attenuate = tuning_.learned_attenuate;
-        options.floor = tuning_.learned_floor;
-        // 合併最近幾幀（要打開、而且這個模型有合併用的權重）：畫面沒變的地方把前面幾幀收到的值合進來。
-        // 記下來的是這一幀原來收到的值，不是合併後的：每一幀都只和實際收到的東西合。
-        const LearnedMerge* merge = tuning_.learned_merge ? find_merge(model->model_id()) : nullptr;
-        LearnedUnpacked merged;
-        const int used = merge != nullptr ? merge_earlier(*merge, mode, l, frame, merged) : 0;
-        const float told = learned_picture(*model, used > 0 ? merged : l, options, frame.rgb);
-        if (merge != nullptr) remember(*merge, mode, l, frame);
-        else earlier_.clear();
-        if (trace_) std::fprintf(stderr, "[rx]   告訴解碼器的訊雜比 %.1f dB（合併了前面 %d 幀）\n", told, used);
-    }
+    decode_picture(mode, l, whole, frame);
     // 沒有畫面的幀：前導符號確認過、從頭到尾都有導頻、中途也沒有出現別的前導符號，才回報「有一幀沒解出來」。
     // 只有開頭一段有導頻的，是對方送到一半就停了，或是誤認的前導符號剛好落在別人的酬載裡。
     const bool emit = whole || (confirmed_ && intact && spread);  // 有強的載波、S1 又對不上的，多半不是一幀，不回報
@@ -1146,9 +1736,9 @@ void Receiver::confirm_next() {
     if (confirmed && !last_complete_) {
         // 上一幀沒解出來（或沒送完）：頻偏與定時都不那麼可靠了，前導符號的分數也可能是別的訊號湊巧造成的。
         // 和捕獲時一樣，再用酬載開頭的導頻驗證一次，順便把頻偏校正回來。
-        const PilotCheck pilots = verify_pilots(t0_, cfo_, *mode_);
+        const PilotCheck pilots = verify_frame_start(t0_, cfo_, *mode_);
         if (trace_) std::fprintf(stderr, "[rx]   上一幀不完整，導頻驗證：相關 %.2f、頻偏修正 %+.2f Hz\n", pilots.rho, pilots.cfo_delta * kSampleRate);
-        if (pilots.rho >= tuning_.verify_pilots) {
+        if (pilots.rho >= (mode_->scattered_pilots ? tuning_.verify_pilots : tuning_.verify_cyclic)) {
             cfo_ += pilots.cfo_delta;
         } else {
             confirmed = false;

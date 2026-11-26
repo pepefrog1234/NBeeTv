@@ -14,6 +14,30 @@ enum Demo {
         return parsePPM(data)
     }
 
+    /// 一張 96×72 的畫面每個像素重複整數倍，放大成 size（模式 5–7 與 15 的 192×144 是兩倍）。已經是那個大小就原樣回傳；
+    /// 不是 96×72 的整數倍時回傳 nil。核心的測試（core/tests/test_images.hpp）也是這樣放大測試圖的。
+    static func enlarge(_ rgb: Data, to size: PictureSize) -> Data? {
+        if rgb.count == size.rgbBytes { return rgb }
+        let times = size.scale, width = NBTV.imageWidth, height = NBTV.imageHeight
+        guard rgb.count == NBTV.rgbBytes, size.width == width * times, size.height == height * times else { return nil }
+        var out = Data(count: size.rgbBytes)
+        out.withUnsafeMutableBytes { raw in
+            let dst = raw.bindMemory(to: UInt8.self)
+            rgb.withUnsafeBytes { source in
+                let src = source.bindMemory(to: UInt8.self)
+                for y in 0..<size.height {
+                    for x in 0..<size.width {
+                        let from = 3 * ((y / times) * width + x / times), to = 3 * (y * size.width + x)
+                        dst[to] = src[from]
+                        dst[to + 1] = src[from + 1]
+                        dst[to + 2] = src[from + 2]
+                    }
+                }
+            }
+        }
+        return out
+    }
+
     /// 二進位 PPM（P6、96×72、最大值 255）→ RGB。
     static func parsePPM(_ data: Data) -> Data? {
         var fields: [String] = []

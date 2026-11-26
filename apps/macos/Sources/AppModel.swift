@@ -177,15 +177,18 @@ final class AppModel: ObservableObject {
         let url: URL
         let scale: ScaleMode
         let canvas: Int
+        let size: PictureSize   // 送出的畫面大小（跟著發射模式）
     }
     private var imagePreviewKey: ImagePreviewKey?
     private var imagePreviewLoading = false
     private let latestFrame = LatestFrameBox()
     private var previewVersion = -1
     private var previewScale: ScaleMode?
-    // 畫布（印在送出畫面上的字）：圖層照設定算好留著，設定改了才重算（見 currentCanvas）
+    private var previewPicture: PictureSize?   // 預覽是照多大的畫面算的：換到畫面大小不同的模式時要重算
+    // 畫布（印在送出畫面上的字）：圖層照設定與畫面的大小算好留著，改了才重算（見 currentCanvas）
     private var canvasLayer: CanvasLayer?
     private var canvasBuilt: CanvasStyle?
+    private var canvasBuiltPicture: PictureSize?
     private var canvasVersion = 0
     private var previewCanvasVersion = 0
     private var previewTime = Date.distantPast
@@ -226,7 +229,7 @@ final class AppModel: ObservableObject {
     }
     /// 取來源的一格的結果（見 captureSourceFrame）。
     private struct SourceCapture {
-        var rgb: Data?         // 縮成 96×72 的畫面，還沒有印上畫布的字；來源沒有畫面時是 nil
+        var rgb: Data?         // 縮成送出的大小的畫面，還沒有印上畫布的字；來源沒有畫面時是 nil
         var last = false       // 來源到此為止：只播一次的影片播完了（這是它的最後一格），或圖片序列已經沒有圖片可以送（這時 rgb 是 nil）
         var image: URL? = nil  // 圖片序列：這一格是哪一個圖片檔
     }
@@ -513,7 +516,7 @@ final class AppModel: ObservableObject {
 
     func isDisplayed(_ frame: ReceivedFrame) -> Bool { displayedFrame?.id == frame.id }
 
-    /// 一張收到的畫面存成檔案時的內容與檔名：96×72 的 PNG，像素和收到的畫面完全相同。
+    /// 一張收到的畫面存成檔案時的內容與檔名：和收到的畫面一樣大的 PNG（96×72，模式 5–7 與 15 是 192×144），像素完全相同。
     static func exportFile(for frame: ReceivedFrame) -> (data: Data, name: String)? {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -689,18 +692,25 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// 畫布目前的圖層；沒有打開（或沒有字）時是 nil。設定改了就在這裡重算一次（不到一毫秒）。
+    /// 送出的畫面多大：跟著發射模式（模式 11–14 是 96×72，模式 5–7 與 15 是 192×144）。
+    /// 沒在發射時是設定裡選的模式，發射中是這一次發射用的模式（txModeID 兩種情形都照實）。
+    var txPictureSize: PictureSize { Modes.find(txModeID)?.pictureSize ?? .standard }
+
+    /// 畫布目前的圖層；沒有打開（或沒有字）時是 nil。設定或畫面的大小改了就在這裡重算一次（不到一毫秒）。
     private func currentCanvas() -> CanvasLayer? {
         let style = settings.canvasStyle
-        if style != canvasBuilt {
+        let picture = txPictureSize
+        if style != canvasBuilt || picture != canvasBuiltPicture {
             canvasBuilt = style
-            canvasLayer = style.flatMap { CanvasLayer(style: $0) }
+            canvasBuiltPicture = picture
+            canvasLayer = style.flatMap { CanvasLayer(style: $0, size: picture) }
             canvasVersion += 1
         }
         return canvasLayer
     }
 
-    /// 把畫布的字印到一張 96×72 的來源畫面上（畫布沒開就原樣回傳）。發射前的每一張與右側欄的預覽都經過這裡。
+    /// 把畫布的字印到一張來源畫面上（畫布沒開就原樣回傳）。發射前的每一張與右側欄的預覽都經過這裡。
+    /// 畫面要是送出的大小（txPictureSize）。
     func applyCanvas(to rgb: Data) -> Data { currentCanvas()?.apply(to: rgb) ?? rgb }
 
     /// 打開、關掉畫布。第一次打開而還沒有填字的時候，先填上「CQ 呼號」。
@@ -879,13 +889,15 @@ final class AppModel: ObservableObject {
     /// 下一張要送的那個圖片檔；還沒選圖片時是 nil
     var nextImage: URL? { imageFiles.indices.contains(imageIndex) ? imageFiles[imageIndex] : nil }
 
-    /// 圖片序列的預覽：「下一張要送的」那一張縮成 96×72、印上畫布的樣子。位置、縮放方式或畫布變了就重算。
+    /// 圖片序列的預覽：「下一張要送的」那一張縮成送出的大小（96×72，模式 5–7 與 15 是 192×144）、印上畫布的樣子。
+    /// 位置、縮放方式、畫布或送出的大小變了就重算。
     /// 一次只算一張：還在算的時候位置又變了（拖著滑桿），等這一張算完再算最新的那一張，不會越積越多。
     private func refreshImagePreview() {
         guard !imagePreviewLoading, let url = nextImage else { return }
         let canvas = currentCanvas()
         let mode = settings.scaleMode
-        let key = ImagePreviewKey(url: url, scale: mode, canvas: canvasVersion)
+        let size = txPictureSize
+        let key = ImagePreviewKey(url: url, scale: mode, canvas: canvasVersion, size: size)
         guard key != imagePreviewKey else { return }
         imagePreviewLoading = true
         let epoch = sourceEpoch
@@ -893,7 +905,7 @@ final class AppModel: ObservableObject {
         let ahead = imageFiles[(imageIndex + 1) % imageFiles.count]
         previewQueue.async { [weak self, images] in
             let picture = images.picture(at: url)
-            let rgb = picture.flatMap { FrameScaler.scale($0.image, mode: mode) }
+            let rgb = picture.flatMap { FrameScaler.scale($0.image, mode: mode, size: size) }
             let image = rgb.flatMap { NBTV.image(fromRGB: canvas?.apply(to: $0) ?? $0) }
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -932,18 +944,18 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// 圖片序列：讀「下一張要送的」那一張，縮成 96×72。讀不到的從序列裡拿掉，改讀它後面那一張
+    /// 圖片序列：讀「下一張要送的」那一張，縮成送出的大小。讀不到的從序列裡拿掉，改讀它後面那一張
     /// （勾了循環播放的話，找到最後一張還沒有，再從第一張找）。都讀不到時 rgb 是 nil、last 是 true。
     /// 位置在這一格確定要用的時候才往後移（見 accept）：取了之後才發現這次發射已經取消的話，這一張就不算取走。
     private func captureNextImage(_ completion: @escaping (SourceCapture) -> Void) {
-        let files = imageFiles, mode = settings.scaleMode
+        let files = imageFiles, mode = settings.scaleMode, size = txPictureSize
         let start = min(imageIndex, max(files.count - 1, 0))
         let candidates = files.isEmpty ? [] : Array(files[start...]) + (settings.loopImages ? Array(files[..<start]) : [])
         previewQueue.async { [weak self, images] in
             var unreadable: [URL] = []
             var taken: (url: URL, rgb: Data)?
             for url in candidates {
-                if let picture = images.picture(at: url), let rgb = FrameScaler.scale(picture.image, mode: mode) {
+                if let picture = images.picture(at: url), let rgb = FrameScaler.scale(picture.image, mode: mode, size: size) {
                     taken = (url, rgb)
                     break
                 }
@@ -981,7 +993,7 @@ final class AppModel: ObservableObject {
     /// 示範用：把「下一張要送的」那一張圖片直接讀進來當預覽（不經過計時器）。讀到了回傳 true。
     func demoLoadImage() -> Bool {
         guard let url = nextImage, let picture = ImageSequenceSource.load(url),
-              let rgb = FrameScaler.scale(picture.image, mode: settings.scaleMode) else { return false }
+              let rgb = FrameScaler.scale(picture.image, mode: settings.scaleMode, size: txPictureSize) else { return false }
         lastSourceRGB = rgb
         sourcePreview = NBTV.image(fromRGB: applyCanvas(to: rgb))
         sourceSize = picture.size
@@ -1029,12 +1041,14 @@ final class AppModel: ObservableObject {
         txElapsed = display.elapsed
     }
 
-    /// 來源有新的一格（或縮放方式、畫布改了）時，重算 96×72 的預覽。預覽就是會送出去的樣子，畫布的字也印在上面。
+    /// 來源有新的一格（或縮放方式、畫布、送出的畫面大小改了）時，重算預覽。預覽就是會送出去的樣子：
+    /// 和送出的畫面一樣大（96×72，模式 5–7 與 15 是 192×144），畫布的字也印在上面。
     private func refreshPreview() {
         let (buffer, turns, version) = latestFrame.get()
         let mode = settings.scaleMode
+        let picture = txPictureSize
         let canvas = currentCanvas()
-        let restyled = mode != previewScale || canvasVersion != previewCanvasVersion
+        let restyled = mode != previewScale || canvasVersion != previewCanvasVersion || picture != previewPicture
         guard let buffer, version != previewVersion || restyled else { return }
         // 把整格來源畫面縮小並不便宜：來源一直在動時每秒更新 5 次就夠了；改縮放方式、改畫布或剛換來源時立刻更新
         let now = Date()
@@ -1042,10 +1056,11 @@ final class AppModel: ObservableObject {
         previewTime = now
         previewVersion = version
         previewScale = mode
+        previewPicture = picture
         previewCanvasVersion = canvasVersion
         let epoch = sourceEpoch
         previewQueue.async { [weak self] in
-            guard let frame = FrameScaler.scale(buffer, mode: mode, quarterTurns: turns) else { return }
+            guard let frame = FrameScaler.scale(buffer, mode: mode, quarterTurns: turns, size: picture) else { return }
             let image = NBTV.image(fromRGB: canvas?.apply(to: frame.rgb) ?? frame.rgb)
             DispatchQueue.main.async {
                 guard let self, epoch == self.sourceEpoch else { return }   // 這段時間裡換了來源
@@ -1055,7 +1070,8 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// 取來源當下那一格（縮成 96×72，還沒有印上畫布的字）。鏡頭與影片檔沒有新的畫面時沿用上一格；
+    /// 取來源當下那一格（縮成送出的大小，還沒有印上畫布的字）。鏡頭與影片檔沒有新的畫面時沿用上一格
+    /// （上一格是照另一種畫面大小縮的話，換成現在的大小）；
     /// 圖片序列取的是「下一張要送的」那一張（見 captureNextImage）。取到之後確定要用，再呼叫 accept。
     private func captureSourceFrame(_ completion: @escaping (SourceCapture) -> Void) {
         if settings.sourceKind == .images {
@@ -1067,9 +1083,11 @@ final class AppModel: ObservableObject {
         if settings.sourceKind == .video, let buffer = video.copyCurrentFrame() { latestFrame.set(buffer, turns: video.quarterTurns) }
         let (buffer, turns, _) = latestFrame.get()
         let mode = settings.scaleMode
+        let picture = txPictureSize
         let fallback = lastSourceRGB
         previewQueue.async {
-            let rgb = buffer.flatMap { FrameScaler.scale($0, mode: mode, quarterTurns: turns)?.rgb } ?? fallback
+            let rgb = buffer.flatMap { FrameScaler.scale($0, mode: mode, quarterTurns: turns, size: picture)?.rgb }
+                ?? fallback.flatMap { FrameScaler.resize($0, to: picture) }
             DispatchQueue.main.async { completion(SourceCapture(rgb: rgb, last: last)) }
         }
     }
@@ -1077,7 +1095,7 @@ final class AppModel: ObservableObject {
     /// 示範用：取影片目前位置的那一格當預覽（不經過計時器）。取到了回傳 true。
     func demoGrabVideoFrame() -> Bool {
         guard let buffer = video.copyCurrentFrame(),
-              let frame = FrameScaler.scale(buffer, mode: settings.scaleMode, quarterTurns: video.quarterTurns) else { return false }
+              let frame = FrameScaler.scale(buffer, mode: settings.scaleMode, quarterTurns: video.quarterTurns, size: txPictureSize) else { return false }
         lastSourceRGB = frame.rgb
         sourcePreview = NBTV.image(fromRGB: applyCanvas(to: frame.rgb))
         sourceSize = frame.sourceSize
@@ -1413,7 +1431,8 @@ final class AppModel: ObservableObject {
                 return
             }
             // 來源一時沒有畫面（剛切換來源）：重送上一格，不要讓電台空著發射
-            guard let rgb = capture.rgb ?? self.txLastRGB else {
+            // （上一格是照另一種畫面大小縮的話，換成現在這個模式的大小）
+            guard let rgb = capture.rgb ?? self.txLastRGB.flatMap({ FrameScaler.resize($0, to: self.txPictureSize) }) else {
                 DebugTap.log("準備下一張：沒有畫面可用")
                 self.txPreparing = false
                 return

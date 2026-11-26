@@ -13,7 +13,8 @@
  * 音訊：單聲道 float，滿刻度是 ±1.0。取樣率是 12000（數據機內部的取樣率）或 48000（核心做 4:1 的重取樣）。
  * 推進來的取樣（nbtv_rx_push、nbtv_spectrum_push）裡如果有非有限值（NaN、無限大），會被當成 0；
  * 絕對值超過 100 的會被限制在 ±100。交出來的讀數（音量、訊雜比、頻率偏移、頻譜）因此一定是有限值。
- * 畫面：96×72，8 位元 RGB，由左上角開始逐列排列，共 NBTV_IMAGE_RGB_BYTES 個位元組。
+ * 畫面：8 位元 RGB，由左上角開始逐列排列，共「寬 × 高 × 3」個位元組。大小由模式決定（nbtv_mode_info 的
+ * image_width、image_height）：模式 11–14 是 96×72，模式 5–7 與 15（FM 用的大畫面）是 192×144。
  */
 #ifndef NBTV_H
 #define NBTV_H
@@ -29,10 +30,15 @@ extern "C" {
 #define NBTV_VERSION_MINOR 1
 #define NBTV_VERSION_PATCH 0
 
-/* 畫面大小（像素）。 */
+/* 標準的畫面大小（像素）：模式 11–14 的畫面。 */
 #define NBTV_IMAGE_WIDTH 96
 #define NBTV_IMAGE_HEIGHT 72
 #define NBTV_IMAGE_RGB_BYTES (NBTV_IMAGE_WIDTH * NBTV_IMAGE_HEIGHT * 3)
+
+/* 最大的畫面：任何模式的畫面都不超過這個大小（模式 5–7 與 15 就是這麼大）。準備緩衝區時用。 */
+#define NBTV_IMAGE_MAX_WIDTH 192
+#define NBTV_IMAGE_MAX_HEIGHT 144
+#define NBTV_IMAGE_MAX_RGB_BYTES (NBTV_IMAGE_MAX_WIDTH * NBTV_IMAGE_MAX_HEIGHT * 3)
 
 /* 呼號最多 9 個字元：數字、大寫字母與 '/'、'-'、'.'。 */
 #define NBTV_CALLSIGN_MAX 9
@@ -47,16 +53,21 @@ const char *nbtv_version_string(void);
  * 每一幀是一張畫面：類神經網路把畫面變成 learned_values 個實數，兩個一組放進資料格。
  */
 typedef struct nbtv_mode_info {
-    int id;                /* 空中的模式編號：11–14（0–5、8–10 是已經移除的數位與類比模式用過的編號，不再使用） */
+    int id;                /* 空中的模式編號（0..15 之間）：5–7 與 11–15。其餘的沒有定義，草案裡用過它們的數位與類比模式已經移除 */
     int payload_symbols;   /* 每幀的酬載符號數 */
-    int frame_symbols;     /* 含開頭的 S0、S1 */
+    int frame_symbols;     /* 含開頭的 S0、S1；沒有散佈導頻的幀再加結尾的一個參考符號 */
     int frame_samples;     /* 每幀的取樣數 */
     double frame_seconds;  /* 每張畫面的時間 */
-    int data_cells;        /* 酬載裡扣掉導頻後的資料格數 */
+    int data_cells;        /* 酬載裡的資料格數（有散佈導頻的幀要扣掉導頻） */
     int header_cells;      /* 標頭（呼號、幀序號）佔用的格數 */
     int value_capacity;    /* 標頭之外可以放的實數個數（每格兩個） */
     int learned_values;    /* 一張畫面變成幾個實數（模型的輸出要一樣多） */
     int learned_width;     /* 模型第一層的通道數（實數個數相同、大小不同的模型各用一個模式） */
+    int image_width;       /* 畫面的寬與高（像素）：模式 11–14 是 96×72，模式 5–7 與 15 是 192×144 */
+    int image_height;
+    /* 酬載裡有沒有散佈導頻（1 有、0 沒有）。沒有的是給 FM 語音通道用的幀（模式 5–7）：同樣的時間多 2 成的資料格，
+     * 但通道在一幀之內不能變、也不能有頻偏，所以不適合短波。 */
+    int scattered_pilots;
 } nbtv_mode_info;
 
 /* 已定義的模式個數。 */
@@ -72,8 +83,9 @@ int nbtv_mode_by_id(int id, nbtv_mode_info *out);
 
 /*
  * 畫面的編解碼是一個類神經網路，權重放在獨立的檔案裡（models/ 底下的 .bin）。
- * 每個模式各有自己的模型：模型的實數個數（nbtv_model_values）與寬度（nbtv_model_width）
- * 和模式的 learned_values、learned_width 都相同，就是給它用的。
+ * 每個模式各有自己的模型：模型的實數個數（nbtv_model_values）、寬度（nbtv_model_width）與畫面大小
+ * （nbtv_model_image_width、nbtv_model_image_height）和模式的 learned_values、learned_width、image_width、
+ * image_height 都相同，就是給它用的。
  * 收發兩端必須用同一份權重。外殼把檔案內容讀進記憶體後交給 nbtv_model_load，再設定給發射機與接收機
  * （要用幾個模式就設定幾個）；同一個模型可以給多個物件用，設定之後就可以 nbtv_model_destroy（物件自己會留著）。
  * 模型載入後不會再改變，可以同時被不同執行緒上的物件使用。
@@ -92,6 +104,10 @@ int nbtv_model_values(const nbtv_model *model);
 
 /* 模型第一層的通道數（愈大的模型愈寬，運算量也愈大）；要和模式的 learned_width 相同才能用在那個模式。 */
 int nbtv_model_width(const nbtv_model *model);
+
+/* 模型的畫面大小（像素）：模型是照這個大小訓練的，記在權重檔裡；要和模式的 image_width、image_height 相同才能用在那個模式。 */
+int nbtv_model_image_width(const nbtv_model *model);
+int nbtv_model_image_height(const nbtv_model *model);
 
 /* ------------------------------------------------------------------ 合併最近幾幀 */
 
@@ -131,7 +147,7 @@ typedef struct nbtv_tx nbtv_tx;
 nbtv_tx *nbtv_tx_create(int sample_rate);
 void nbtv_tx_destroy(nbtv_tx *tx);
 
-/* 換模式，下一幀生效。模式編號沒有定義時回傳 -1。 */
+/* 換模式，下一幀生效。模式編號沒有定義時回傳 -1。畫面大小跟著模式變（見 nbtv_tx_encode_image）。 */
 int nbtv_tx_set_mode(nbtv_tx *tx, int mode_id);
 int nbtv_tx_mode(const nbtv_tx *tx);
 
@@ -139,7 +155,7 @@ int nbtv_tx_mode(const nbtv_tx *tx);
 void nbtv_tx_set_callsign(nbtv_tx *tx, const char *callsign);
 
 /*
- * 各個模式用的模型。可以設定好幾個，每個模式用實數個數與寬度都和它相同的那一個；兩者都相同的再設定一次會取代前一個。
+ * 各個模式用的模型。可以設定好幾個，每個模式用實數個數、寬度與畫面大小都和它相同的那一個；三者都相同的再設定一次會取代前一個。
  * model 是 NULL 表示全部拿掉。某個模式沒有模型時，那個模式編不出幀。
  */
 void nbtv_tx_set_model(nbtv_tx *tx, const nbtv_model *model);
@@ -156,10 +172,12 @@ typedef struct nbtv_tx_frame_info {
 } nbtv_tx_frame_info;
 
 /*
- * 把一張畫面做成一幀音訊。samples 的容量至少要 nbtv_tx_frame_samples()；回傳寫入的取樣數，失敗回傳 -1
+ * 把一張畫面做成一幀音訊。rgb 是目前這個模式的一張畫面：image_width × image_height × 3 個位元組
+ * （模式 11–14 是 NBTV_IMAGE_RGB_BYTES，模式 5–7 與 15 是 NBTV_IMAGE_MAX_RGB_BYTES）。
+ * samples 的容量至少要 nbtv_tx_frame_samples()；回傳寫入的取樣數，失敗回傳 -1
  * （沒有設定目前這個模式用的模型、容量不足）。幀與幀可以直接相接連續播放。
  * 輸出的峰值不超過 ±1.0；音量由外殼自己調整。
- * preview_rgb 不是 NULL 時，填入「沒有雜訊時對方看到的畫面」：編碼後直接解回來的結果（要多花一次解碼的時間）。
+ * preview_rgb 不是 NULL 時，填入「沒有雜訊時對方看到的畫面」：編碼後直接解回來的結果（大小和 rgb 相同；要多花一次解碼的時間）。
  * info 可以是 NULL。
  */
 int nbtv_tx_encode_image(nbtv_tx *tx, const uint8_t *rgb, float *samples, int capacity, uint8_t *preview_rgb,
@@ -193,7 +211,7 @@ void nbtv_rx_destroy(nbtv_rx *rx);
 void nbtv_rx_reset(nbtv_rx *rx);
 
 /*
- * 各個模式用的模型。和發射機一樣可以設定好幾個（每個模式用實數個數與寬度都和它相同的那一個；兩者都相同的取代前一個），
+ * 各個模式用的模型。和發射機一樣可以設定好幾個（每個模式用實數個數、寬度與畫面大小都和它相同的那一個；三者都相同的取代前一個），
  * model 是 NULL 表示全部拿掉。某個模式沒有模型、或對方用的是另一份權重時，
  * 那個模式的幀照樣會回報（呼號、訊雜比都有），但沒有畫面：decoded = 0、model_missing = 1。
  */
@@ -201,7 +219,8 @@ void nbtv_rx_set_model(nbtv_rx *rx, const nbtv_model *model);
 
 /*
  * 合併最近幾幀用的權重。可以設定好幾個（每個畫面模型各一份；同一個模型的取代前一個），merge 是 NULL 表示全部拿掉。
- * 設定了還要用 nbtv_rx_set_merging 打開才會用。某個模式的模型沒有對應的權重時，那個模式照原來的方式解。
+ * 設定了還要用 nbtv_rx_set_merging 打開才會用。某個模式的模型沒有對應的權重時，那個模式照原來的方式解
+ * （192×144 的大畫面沒有這種權重）。
  */
 void nbtv_rx_set_merge(nbtv_rx *rx, const nbtv_merge *merge);
 
@@ -234,7 +253,9 @@ typedef struct nbtv_rx_frame {
     int sequence;        /* 幀序號 0..255；header_ok 為 0 時是 -1 */
     float snr_db;
     float freq_offset_hz;
-    uint8_t rgb[NBTV_IMAGE_RGB_BYTES];
+    int image_width;     /* 這個模式的畫面大小（像素）；rgb 的前 image_width × image_height × 3 個位元組是畫面 */
+    int image_height;
+    uint8_t rgb[NBTV_IMAGE_MAX_RGB_BYTES];
     int model_missing;   /* 收到了一幀，但沒有設定這個模式的模型、或權重和對方不同，所以沒有畫面 */
 } nbtv_rx_frame;
 

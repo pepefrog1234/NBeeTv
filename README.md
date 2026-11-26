@@ -47,6 +47,15 @@
 三欄數字是畫質（PSNR，dB）：16 張沒有參與訓練的照片的平均，經過完整的收發鏈與上面那個模擬的「差」通道。
 白雜訊通道、其他訊雜比與量法見[技術說明](docs/TECHNICAL.md)。
 
+另有一個實驗中的**模式 15**，給 VHF／UHF 的 FM 語音通道用：畫面加大成 192×144，每張 2.72 秒。FM 的音訊訊雜比高，
+同樣多的值改送大畫面明顯比較清楚；訊號弱時比上面四個模式差，不適合短波。命令列工具與 macOS 的 app 可以收發，
+Windows 與 Linux 的 app 還不支援；只在模擬裡驗證過，還沒有經過真的電台。細節見[技術說明](docs/TECHNICAL.md)。
+
+同樣給 FM 用的還有實驗中的**模式 5、6、7**：畫面一樣是 192×144，但幀裡沒有導頻。FM 的音訊通道在一幀之內不變，導頻可以省，
+同樣的時間多送 2 成的資料。模式 5 用的模型和模式 15 相同，每張 2.29 秒；模式 6 每張 2.88 秒、畫質高 1.4 dB；
+模式 7 每張 4.43 秒、高 3.6 dB。只能用在沒有頻偏、訊號穩定的 FM 語音通道（不能用在 SSB）；
+同樣只有命令列工具與 macOS 的 app 支援，也只在模擬裡驗證過。
+
 ## 下載
 
 到 [Releases](https://github.com/pepefrog1234/NBeeTv/releases) 下載自己平台的檔案。每一個都是在那個平台、那種處理器的機器上建置並跑過測試的。
@@ -62,7 +71,7 @@
 | Windows 10、11 | x86_64 | `NBeeTv-<版本>-windows-x86_64.zip` | 桌面 app（`nbtv-gui.exe`）與命令列工具 |
 | Windows 11 | arm64 | `NBeeTv-<版本>-windows-arm64.zip` | 桌面 app 與命令列工具 |
 
-每一包都附了四個模式的權重檔，解開就能用。還沒發佈的版本可以在 [Actions](https://github.com/pepefrog1234/NBeeTv/actions/workflows/build.yml) 每一次建置的 Artifacts 裡下載（要登入 GitHub，保留 7 天）。
+每一包都附了各個模式的權重檔，解開就能用。還沒發佈的版本可以在 [Actions](https://github.com/pepefrog1234/NBeeTv/actions/workflows/build.yml) 每一次建置的 Artifacts 裡下載（要登入 GitHub，保留 7 天）。
 
 ### macOS 的 app
 
@@ -100,13 +109,13 @@ Windows 與 Linux 的下載包裡有 `nbtv-gui`（Windows 是 `nbtv-gui.exe`）�
 
 每個平台的下載包裡都有命令列工具，處理的是檔案，不是即時收發：發射是把做好的 WAV 檔播給電台，接收是把電台的聲音錄成 WAV 檔再解。
 
-解開之後，執行檔和 `models/` 在同一個資料夾，直接執行就可以。影像一律是 96×72 的二進位 PPM，可以用 ffmpeg 轉。
+解開之後，執行檔和 `models/` 在同一個資料夾，直接執行就可以。影像一律是 96×72 的二進位 PPM（模式 5–7 與 15 是 192×144），可以用 ffmpeg 轉。
 
 ```sh
 # 照片轉成 96×72 的 PPM
 ffmpeg -i photo.jpg -vf scale=96:72 -pix_fmt rgb24 photo.ppm
 
-# 做成可以直接播給電台的 WAV（--mode 是 11 到 14，--call 是你的呼號）
+# 做成可以直接播給電台的 WAV（--mode 是 11 到 15，--call 是你的呼號）
 ./nbtv-tx --mode 14 --call N0CALL --out tx.wav photo.ppm
 
 # 把錄音解回畫面，存成 received/frame_0.ppm、frame_1.ppm……（--merge：把最近幾幀合起來解）
