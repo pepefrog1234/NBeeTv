@@ -2,8 +2,10 @@
 #
 # 每個平台都在那個平台、那種處理器的機器上編譯並跑完測試，不是交叉編譯。產物是可以直接解開來用的下載包：
 #   NBeeTv-<版本>-<平台>.tar.gz（Windows 是 .zip）  命令列工具與 models/，放在同一層；
-#                                                 Windows 與 Linux 的包裡另外有桌面 app（nbtv-gui）
+#                                                 Windows 與 Linux 的包裡另外有桌面 app（nbtv-gui），
+#                                                 Windows 的包裡還有 ffmpeg.exe（影片檔來源與存影片用，不必另外安裝）
 #   NBeeTv-<版本>-macos-<處理器>-app.zip             macOS 的 NBTV.app
+#   NBeeTv-<版本>-windows-ffmpeg-source.tar         Windows 的包裡那個 ffmpeg.exe 的全部原始碼（它以 GPL 發佈）
 # 另外每次執行都留一份 screens-<平台>：桌面 app 在那個平台上不開視窗算出來的畫面（五種語言），用來看字型與版面對不對。
 #
 # 什麼時候跑：推到 main、開 PR、手動執行時，下載包留在那一次執行的 Artifacts 裡（7 天）；
@@ -26,8 +28,78 @@ concurrency:
   cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
+  # Windows 的下載包附的 ffmpeg.exe：在 Linux 上從官方的原始碼交叉編譯，只放 nbtv-gui 用得到的格式
+  # （apps/desktop/ffmpeg/build-windows.sh、components.txt）。這兩個檔案沒有改的話直接用上一次建好的（快取）。
+  # ffmpeg.exe 以 GPL 發佈：它的原始碼另外留一份 NBeeTv-<版本>-windows-ffmpeg-source，推版本標籤時和下載包一起放上 GitHub Releases。
+  ffmpeg-windows:
+    name: ffmpeg-windows-${{ matrix.arch }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 原始碼那一份的名稱
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$(git rev-parse --short=7 HEAD)"
+          fi
+          echo "SOURCE_PACKAGE=NBeeTv-$version-windows-ffmpeg-source" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@v6
+        id: cache
+        with:
+          path: ffmpeg-out
+          key: ffmpeg-windows-${{ matrix.arch }}-${{ hashFiles('apps/desktop/ffmpeg/build-windows.sh', 'apps/desktop/ffmpeg/components.txt') }}
+
+      - name: 安裝建置要用的套件
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends nasm meson ninja-build pkg-config
+
+      # 原始碼與 llvm-mingw 都固定版本、核對 SHA-256；檢查做出來的是那種處理器的執行檔、只用到 Windows 本身就有的 DLL
+      - name: 建置 ffmpeg.exe
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: apps/desktop/ffmpeg/build-windows.sh "${{ matrix.arch }}" ffmpeg-out "$RUNNER_TEMP/ffmpeg-work"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ffmpeg-windows-${{ matrix.arch }}
+          path: |
+            ffmpeg-out/ffmpeg.exe
+            ffmpeg-out/FFMPEG-LICENSE.txt
+          if-no-files-found: error
+          retention-days: 1
+
+      # 兩種處理器用的原始碼相同，留 x86_64 那一份
+      - name: 原始碼的那一份
+        if: matrix.arch == 'x86_64'
+        run: |
+          mkdir -p ffmpeg-source
+          cp ffmpeg-out/ffmpeg-windows-source.tar "ffmpeg-source/$SOURCE_PACKAGE.tar"
+          ls -l ffmpeg-source
+
+      - uses: actions/upload-artifact@v7
+        if: matrix.arch == 'x86_64'
+        with:
+          name: ${{ env.SOURCE_PACKAGE }}
+          path: ffmpeg-source/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
   build:
     name: ${{ matrix.target }}
+    needs: ffmpeg-windows
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
@@ -53,11 +125,13 @@ jobs:
           - target: windows-x86_64
             runner: windows-2025
             vs_arch: x64
+            ffmpeg_arch: x86_64
             file_says: "x86-64"
             gui_says: "GUI.*x86-64"
           - target: windows-arm64
             runner: windows-11-arm
             vs_arch: ARM64
+            ffmpeg_arch: aarch64
             file_says: "aarch64|arm64"
             gui_says: "GUI.*(aarch64|arm64)"
     defaults:
@@ -89,13 +163,14 @@ jobs:
             libdbus-1-dev libudev-dev libibus-1.0-dev \
             xvfb xauth fontconfig fonts-dejavu-core fonts-noto-cjk ffmpeg libhamlib-utils
 
-      # Windows 上檢查影片檔來源與存影片要用 ffmpeg。裝不起來不算錯（那幾項檢查會略過）。
-      - name: Windows：安裝 ffmpeg（檢查用）
+      # Windows 的下載包附上 ffmpeg.exe（上面的 ffmpeg-windows 建置的），放在 nbtv-gui.exe 旁邊。
+      # 下面的檢查用的也是它，不另外安裝別的 ffmpeg。
+      - name: Windows：拿要附在下載包裡的 ffmpeg
         if: runner.os == 'Windows'
-        continue-on-error: true
-        run: |
-          command -v ffmpeg || choco install ffmpeg --no-progress -y
-          command -v ffmpeg && ffmpeg -version | head -1
+        uses: actions/download-artifact@v8
+        with:
+          name: ffmpeg-windows-${{ matrix.ffmpeg_arch }}
+          path: ${{ runner.temp }}/ffmpeg-bundle
 
       # Linux：命令列工具整個靜態連結，不挑發行版與 glibc 的版本；桌面 app 只把 C++ 的執行階段連進去（見 apps/desktop/CMakeLists.txt）。
       # macOS：命令列工具最低支援 macOS 11（NBTV.app 另外設定，見下面）。
@@ -113,7 +188,8 @@ jobs:
                 -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 ;;
             Windows)
               cmake -S . -B build -A "${{ matrix.vs_arch }}" -DNBTV_INSTALL_FLAT=ON \
-                -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DNBTV_BUILD_DESKTOP_APP=ON ;;
+                -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DNBTV_BUILD_DESKTOP_APP=ON \
+                -DNBTV_DESKTOP_BUNDLED_FFMPEG="$RUNNER_TEMP/ffmpeg-bundle" ;;
           esac
 
       - name: 建置
@@ -191,6 +267,9 @@ jobs:
       #      另外多算給 FM 用的大畫面（192×144）那三張：接收中、模式選單、發射中；
       #   3. 真的開視窗幾秒鐘：示範資料兩次（一般的，與給 FM 用的 192×144 大畫面），再照平常的方式啟動一次
       #      （Linux 的機器沒有螢幕，用 xvfb 給一個假的）。
+      # Windows 另外檢查包裡附的 ffmpeg.exe：是那種處理器的、app 用的就是它（--version 印出來的路徑），
+      # 讀得了各種格式的影片、存得了影片（apps/desktop/ffmpeg/check.sh）。自我測試裡影片檔來源與存影片的項目也不准略過。
+      # Linux 的包不附 ffmpeg，用的是機器上 apt 裝的。
       # 視窗程式在 Windows 上沒有主控台可以印字，所以結果一律另外寫進檔案（--report）再印出來。
       - name: 解開下載包，跑桌面 app 的檢查
         if: runner.os != 'macOS'
@@ -198,6 +277,7 @@ jobs:
           work="$RUNNER_TEMP/桌面 gui"
           mkdir -p "$work" "$GITHUB_WORKSPACE/screens"
           archive="$PWD/dist/$PACKAGE"
+          checker="$PWD/apps/desktop/ffmpeg/check.sh"
           mv models models.hidden
           trap 'mv "$GITHUB_WORKSPACE/models.hidden" "$GITHUB_WORKSPACE/models"' EXIT
           cd "$work"
@@ -205,8 +285,7 @@ jobs:
             cmake -E tar xf "$archive.zip"
             exe=.exe
             window=
-            require=cjk,fonts,audio
-            if command -v ffmpeg > /dev/null; then require=$require,ffmpeg; fi
+            require=cjk,fonts,audio,ffmpeg
           else
             tar -xzf "$archive.tar.gz"
             exe=
@@ -237,6 +316,14 @@ jobs:
           export SDL_AUDIODRIVER=dummy SDL_AUDIO_DRIVER=dummy
           run version "$gui" --version
           grep -q "nbtv-gui" version.log
+          if [ "$RUNNER_OS" = Windows ]; then
+            ffmpeg="./$PACKAGE/ffmpeg.exe"
+            test -s "./$PACKAGE/FFMPEG-LICENSE.txt"
+            file "$ffmpeg"
+            file "$ffmpeg" | grep -i -E -q "${{ matrix.file_says }}"
+            grep -E "ffmpeg：.*$PACKAGE[\\/]ffmpeg\.exe" version.log
+            bash "$checker" "$ffmpeg" "$work/ffmpeg-check"
+          fi
           NBTV_SELFTEST_REQUIRE=$require run selftest "$gui" --selftest --work "$work/selftest"
           NBTV_SNAPSHOT_FM=1 run snapshot "$gui" --snapshot "$GITHUB_WORKSPACE/screens" --lang all
           test -s "$GITHUB_WORKSPACE/screens/en/1-receiving.png"
@@ -276,7 +363,7 @@ jobs:
           retention-days: 7
           compression-level: 0
 
-  # 推版本標籤時：把六個平台的下載包與一份 SHA-256 清單放上 GitHub Releases。
+  # 推版本標籤時：把六個平台的下載包、Windows 的包裡那個 ffmpeg.exe 的原始碼，與一份 SHA-256 清單放上 GitHub Releases。
   release:
     name: release
     if: github.ref_type == 'tag'

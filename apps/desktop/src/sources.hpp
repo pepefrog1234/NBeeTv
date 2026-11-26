@@ -2,7 +2,8 @@
 // （96×72；模式 4–7 與 15 是 192×144）。
 // 對應 macOS 版的 VideoSources.swift 與 ImageSequence.swift。
 //
-// 影片檔靠使用者電腦上的 ffmpeg 解碼（這個程式自己不帶影片的解碼器）：播放時開一個 ffmpeg 把畫面從管線送過來，
+// 影片檔交給另外的 ffmpeg 程式解碼（這個程式自己不帶影片的解碼器）：先找自己旁邊的（Windows 的下載包附了一個，
+// 見 apps/desktop/ffmpeg/），再找電腦上裝的。播放時開一個 ffmpeg 把畫面從管線送過來，
 // 這裡照實際的速度一格一格換上去；暫停就把它結束、記住位置，再播放或移動位置時從那個位置重新開一個。
 // 圖片（JPEG、PNG、BMP、GIF）自己讀，不需要 ffmpeg；JPEG 照檔案裡記載的方向（EXIF）轉正。
 #pragma once

@@ -1,0 +1,12 @@
+# check.sh 用：這個目錄裡的檔案，與用 nbtv-gui 播放影片的參數解出來的第一格多大（縮到 512 點以內，8 位元的 RGB）。
+# 原本都是 96×72、1 秒、每秒 10 格的測試圖；怎麼做的見 make.sh。照片（photo.jpg）nbtv-gui 自己讀，不經過 ffmpeg，
+# 這裡只拿它試「把照片轉成 PPM」。
+h264-rotated.mp4  384x512   H.264，檔案裡記著要轉 90 度（像手機直拍）：轉正之後是直的
+hevc.mp4          512x384   H.265（iPhone 用的 hvc1）
+hevc-10bit.mp4    512x384   10 位元的 H.265（像 iPhone 的 HDR 影片）
+vp9.webm          512x384   VP9（WebM）
+av1.mp4           512x384   AV1（dav1d）
+mpeg4.avi         512x384   MPEG-4 Part 2（Xvid）
+mpeg2.ts          512x384   MPEG-2（TS）
+wmv2.wmv          512x384   Windows Media Video 8
+prores.mov        512x384   ProRes（10 位元）

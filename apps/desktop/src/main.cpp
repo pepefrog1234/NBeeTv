@@ -389,6 +389,9 @@ int main(int argc, char** argv) {
         log::line(std::string("nbtv-gui ") + nbtv_version_string());
         // 這台電腦上畫面的編解碼用的是哪一種寫法、幾條執行緒（回報「會卡」的時候附上這一行，比較好判斷）
         log::line(std::string("畫面的編解碼：") + nbtv_inference_kernel() + "，最多 " + std::to_string(nbtv_inference_threads()) + " 條執行緒");
+        // 影片檔來源與存影片用的是哪一個 ffmpeg（Windows 的下載包附了一個，放在 nbtv-gui.exe 旁邊；CI 用這一行確認用的是它）
+        if (const std::string ffmpeg = FileSource::ffmpeg_path(); !ffmpeg.empty()) log::line("ffmpeg：" + ffmpeg);
+        else log::line("ffmpeg：找不到（影片檔來源與存影片不能用）");
         return 0;
     case Options::Mode::selftest: {
         init_headless();

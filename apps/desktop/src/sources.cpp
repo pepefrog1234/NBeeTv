@@ -499,10 +499,27 @@ struct VideoInfo {
     int height = 0;
 };
 
+/// 和用的那個 ffmpeg 放在同一個目錄的 ffprobe；沒有的話是空字串。不到別處找：Windows 的下載包只附了 ffmpeg，
+/// 配上電腦上另外裝的 ffprobe 的話兩個的版本對不起來。沒有 ffprobe 時改問 ffmpeg 本身（見 probe_video）。
+std::string ffprobe_beside_ffmpeg() {
+    const std::string ffmpeg = FileSource::ffmpeg_path();
+#if defined(_WIN32)
+    const std::size_t slash = ffmpeg.find_last_of("/\\");
+    const char* name = "ffprobe.exe";
+#else
+    const std::size_t slash = ffmpeg.rfind('/');
+    const char* name = "ffprobe";
+#endif
+    if (slash == std::string::npos) return {};
+    const std::string candidate = ffmpeg.substr(0, slash + 1) + name;
+    SDL_PathInfo info{};
+    return SDL_GetPathInfo(candidate.c_str(), &info) && info.type == SDL_PATHTYPE_FILE ? candidate : std::string();
+}
+
 /// 影片多長、畫面多大。
 VideoInfo probe_video(const std::string& path) {
     VideoInfo info;
-    const std::string ffprobe = find_ffmpeg_tool("ffprobe");
+    const std::string ffprobe = ffprobe_beside_ffmpeg();
     if (!ffprobe.empty()) {
         // 印出來的是「width=1920」「height=1080」「duration=38.000000」各一行
         if (const auto text = run_and_capture({ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height:format=duration", "-of", "default=noprint_wrappers=1", path}, 10)) {
@@ -751,7 +768,9 @@ void FileSource::decode_loop(std::uint64_t generation, double from, bool single_
         std::snprintf(filter, sizeof filter, "fps=%.0f,scale=512:512:force_original_aspect_ratio=decrease", kDecodeFps);
         options.args.push_back(filter);
         if (single_frame) options.args.insert(options.args.end(), {"-frames:v", "1"});
-        options.args.insert(options.args.end(), {"-f", "image2pipe", "-c:v", "ppm", "-"});
+        // 一定要 8 位元的 RGB：10 位元的影片（iPhone 的 HDR、ProRes）不指定的話，ffmpeg 送來的是每個顏色 16 位元的 PPM，read_ppm 讀不了。
+        // 改了這裡的參數，apps/desktop/ffmpeg/check.sh 也要照著改（它用同樣的參數檢查內附的 ffmpeg 讀不讀得了各種影片）
+        options.args.insert(options.args.end(), {"-pix_fmt", "rgb24", "-f", "image2pipe", "-c:v", "ppm", "-"});
         options.pipe_stdout = true;
         std::unique_ptr<Process> process = Process::spawn(options, nullptr);
         if (!process) return;

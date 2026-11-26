@@ -1,0 +1,77 @@
+# Windows 的下載包附的 ffmpeg.exe 裡有什麼：給 ffmpeg 的 configure 的選項，一行一個（# 之後是說明）。
+# build-windows.sh 讀這個檔案。先全部關掉（--disable-everything），再一樣一樣打開。
+#
+# nbtv-gui 用 ffmpeg 做三件事（apps/desktop/src/sources.cpp、app.cpp）：
+#   1. 影片檔當發射來源：讀使用者的影片檔，每秒取 10 格、縮到 512 點以內，用 PPM 從管線送給 app
+#   2. 把收到的畫面存成 .mp4：從管線收 RGB，放大、貼上印了訊雜比的那一塊，用 x264 編成 H.264
+#   3. 不給輸出檔時印出影片的資訊（多長、畫面多大）：這個包不附 ffprobe，app 改讀這個
+# 另外說明文件裡「用 ffmpeg 把照片轉成 96×72 的 PPM」也要能用（讀圖片、寫 PPM）。
+# 改了這個檔案，CI 會重新建置 ffmpeg（快取的鍵是這個檔案與 build-windows.sh 的內容）；check.sh 用 samples/ 檢查讀不讀得了。
+
+# ---- 整體
+--disable-everything       # 所有的編解碼器、格式、濾鏡、通訊協定先關掉
+--disable-autodetect       # 不自動找電腦上的函式庫：要用的都在這裡寫明
+--disable-programs
+--enable-ffmpeg            # 只建 ffmpeg（不建 ffprobe、ffplay）
+--disable-doc
+--disable-network          # 只讀寫本機的檔案與管線
+--disable-avdevice         # 不直接開鏡頭、麥克風（nbtv-gui 自己開）
+--disable-debug
+--enable-gpl               # x264 是 GPL：整個 ffmpeg.exe 因此以 GPL 2.0 以後的版本發佈
+--enable-zlib              # PNG 的解碼與 MP4 裡壓縮過的檔頭要用
+--enable-libx264           # H.264 的編碼器（存成 .mp4）
+--enable-libdav1d          # AV1 的解碼器（ffmpeg 自己的 AV1 解碼器只能用顯示卡解）
+
+# ---- 讀檔案：影片的容器
+--enable-demuxer=mov       # .mp4 .mov .m4v .3gp：手機、相機與大多數的影片
+--enable-demuxer=matroska  # .mkv .webm
+--enable-demuxer=avi
+--enable-demuxer=asf       # .wmv .asf
+--enable-demuxer=flv
+--enable-demuxer=mpegts    # .ts .m2ts .mts：數位電視、AVCHD 攝影機
+--enable-demuxer=mpegps    # .mpg .vob
+--enable-demuxer=mxf       # 專業攝影機
+--enable-demuxer=dv
+--enable-demuxer=ogg       # .ogv
+--enable-demuxer=nut
+--enable-demuxer=ivf       # VP8、VP9、AV1 的原始串流
+--enable-demuxer=obu       # AV1 的原始串流
+--enable-demuxer=h264,hevc,m4v,mpegvideo,mjpeg,yuv4mpegpipe,rawvideo
+# 圖片與圖片的序列（照片也可以當成只有一格的影片讀）
+--enable-demuxer=image2,image2pipe,gif,apng
+--enable-demuxer=image_bmp_pipe,image_jpeg_pipe,image_png_pipe,image_webp_pipe,image_tiff_pipe,image_qoi_pipe
+--enable-demuxer=image_ppm_pipe,image_pgm_pipe,image_pbm_pipe,image_pam_pipe
+
+# ---- 解碼：影片
+--enable-decoder=h264,hevc,vp8,vp9,libdav1d                 # 現在常見的：H.264、H.265、VP8、VP9、AV1
+--enable-decoder=mpeg4,msmpeg4v1,msmpeg4v2,msmpeg4v3        # MPEG-4 Part 2（DivX、Xvid）
+--enable-decoder=h263,h263p,h263i,flv                       # 舊手機的 .3gp、舊的 .flv
+--enable-decoder=mpeg1video,mpeg2video                      # VCD、DVD、數位電視
+--enable-decoder=vc1,wmv1,wmv2,wmv3                         # Windows Media Video
+--enable-decoder=mjpeg,mjpegb                               # 相機的 Motion JPEG
+--enable-decoder=prores,dnxhd,cfhd,dvvideo                  # 剪輯用的格式、GoPro 的 CineForm、DV 攝影機
+--enable-decoder=theora,vp3,vp6,vp6a,vp6f                   # Ogg Theora、舊的 Flash 影片
+--enable-decoder=utvideo,ffv1,huffyuv,ffvhuff,magicyuv      # 無損的格式（螢幕錄影常用）
+--enable-decoder=rawvideo,v210,qtrle,svq1,svq3,cinepak,msvideo1,msrle
+# ---- 解碼：圖片（JPEG 是 mjpeg）
+--enable-decoder=png,apng,gif,bmp,webp,tiff,targa,qoi,ppm,pgm,pgmyuv,pbm,pam
+
+# ---- 切開原始串流（讀 .ts、.mpg 與原始串流時要用；聲音只用來認出串流，不解碼：app 一律 -an）
+--enable-parser=h264,hevc,vp8,vp9,av1,mpeg4video,mpegvideo,h263,vc1,mjpeg
+--enable-parser=png,gif,bmp,webp,pnm
+--enable-parser=aac,ac3,mpegaudio
+
+# ---- 濾鏡（ffmpeg 自己一定要的 crop、format、null、transpose、hflip、vflip、rotate、trim 等由 configure 自動打開；
+#      手機直拍的影片轉正靠的就是這幾個）
+--enable-filter=scale      # 縮小（來源）、放大（存影片）、像素格式的轉換
+--enable-filter=fps        # 來源每秒取 10 格
+--enable-filter=split,overlay   # 存影片時把印了訊雜比的那一塊貼回左上角
+
+# ---- 寫出去
+--enable-encoder=libx264   # 存成 .mp4
+--enable-encoder=ppm       # 來源的畫面送給 app（image2pipe）、把照片轉成 PPM
+--enable-encoder=rawvideo
+--enable-muxer=mp4,image2,image2pipe,rawvideo,null
+
+# ---- 通訊協定：只有本機的檔案與管線
+--enable-protocol=file,pipe

@@ -188,8 +188,9 @@ std::string find_program(const std::string& name, const std::vector<std::string>
     const std::string file = name;
     const char separator = ':';
 #endif
-    std::vector<std::string> dirs = extra_dirs;
+    std::vector<std::string> dirs;
     if (!nbtv::tools::program_dir().empty()) dirs.push_back(nbtv::tools::program_dir());
+    dirs.insert(dirs.end(), extra_dirs.begin(), extra_dirs.end());
     if (const char* path = std::getenv("PATH")) {
         const std::string all = path;
         std::size_t start = 0;

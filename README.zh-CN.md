@@ -106,7 +106,7 @@ Windows 与 Linux 的下载包里有 `nbtv-gui`（Windows 是 `nbtv-gui.exe`）�
 
 - **Windows**：可执行文件没有代码签名，第一次运行时 SmartScreen 可能会拦下来；确认文件是从这个 repo 下载的之后，点“更多信息 → 仍要运行”。
 - **Linux**：需要 glibc 2.35 及以上（Ubuntu 22.04、Debian 12、Raspberry Pi OS bookworm 及之后的版本）。界面的中文、日文要靠系统的字体（例如 `fonts-noto-cjk`），找不到的话会改用英文显示。
-- 用视频文件作为发射来源、把收到的画面保存成视频，需要另外安装 [ffmpeg](https://ffmpeg.org)（图片文件与图片序列不需要）；用 CAT 指令控制 PTT 需要另外安装 [Hamlib](https://github.com/Hamlib/Hamlib)。
+- 用视频文件作为发射来源、把收到的画面保存成视频要用 [ffmpeg](https://ffmpeg.org)：Windows 的下载包里已经附带（`ffmpeg.exe`），不必另外安装；Linux 需要另外安装（例如 `sudo apt install ffmpeg`）。图片文件与图片序列不需要 ffmpeg。用 CAT 指令控制 PTT 需要另外安装 [Hamlib](https://github.com/Hamlib/Hamlib)。
 
 > 这个 app 是新的：它在 CI 上有完整的自动检查，但**还没有人在真正的 Windows、Linux 电脑上接着电台用过**——真实的声卡、摄像头、串口的 PTT 都还没有实机验证。使用之前请先看 [apps/desktop/README.md](apps/desktop/README.md)（繁体中文）里的“驗證過與還沒驗證的”（验证过与还没验证的），遇到问题欢迎到 Issues 反馈。
 
@@ -114,7 +114,7 @@ Windows 与 Linux 的下载包里有 `nbtv-gui`（Windows 是 `nbtv-gui.exe`）�
 
 每个平台的下载包里都有命令行工具，处理的是文件，不是实时收发：发射是把做好的 WAV 文件播放给电台，接收是把电台的声音录成 WAV 文件再解码。
 
-解压之后，可执行文件和 `models/` 在同一个文件夹里，直接运行即可。图像一律是 96×72 的二进制 PPM（模式 4–7 与 15 是 192×144），可以用 ffmpeg 转换。
+解压之后，可执行文件和 `models/` 在同一个文件夹里，直接运行即可。图像一律是 96×72 的二进制 PPM（模式 4–7 与 15 是 192×144），可以用 ffmpeg 转换（Windows 的下载包里附带了 `ffmpeg.exe`）。
 
 ```sh
 # 把照片转成 96×72 的 PPM

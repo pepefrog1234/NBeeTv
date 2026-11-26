@@ -61,7 +61,8 @@ bool read_exact(SDL_IOStream* stream, void* buffer, std::size_t size);
 /// 把 size 個位元組全部寫進管線；對方不收了就回傳 false。
 bool write_exact(SDL_IOStream* stream, const void* buffer, std::size_t size);
 
-/// 找一個程式放在哪裡（Windows 會補上 .exe）：依序找 extra_dirs、執行檔自己的目錄、PATH。找不到回傳空字串。
+/// 找一個程式放在哪裡（Windows 會補上 .exe）：依序找執行檔自己的目錄、extra_dirs、PATH。找不到回傳空字串。
+/// 自己的目錄最先：下載包裡附的程式（Windows 的包附了 ffmpeg）比電腦上另外裝的優先，用的就是和 app 一起檢查過的那一個。
 std::string find_program(const std::string& name, const std::vector<std::string>& extra_dirs = {});
 
 /// 以行程編號結束一個不是我們的 Process 物件的行程（看門的程序用）。

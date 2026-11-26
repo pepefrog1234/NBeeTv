@@ -208,3 +208,20 @@ file(CONFIGURE OUTPUT "${NBTV_THIRD_PARTY_NOTICES}" @ONLY CONTENT "${NBTV_THIRD_
 
 install(TARGETS nbtv-gui RUNTIME DESTINATION "${NBTV_INSTALL_BINDIR}")
 install(FILES "${NBTV_THIRD_PARTY_NOTICES}" DESTINATION "${NBTV_INSTALL_DOCDIR}")
+
+# ---- 下載包附上 ffmpeg（另外的程式，不連進執行檔）：指向放著 ffmpeg 執行檔與 FFMPEG-LICENSE.txt 的目錄，安裝時放在 nbtv-gui 旁邊。
+# nbtv-gui 先找自己旁邊的 ffmpeg，使用者就不必另外安裝。Windows 的下載包用的是 CI 從原始碼建置的那一個（見 ffmpeg/build-windows.sh）。
+set(NBTV_DESKTOP_BUNDLED_FFMPEG "" CACHE PATH "Directory with an ffmpeg executable and FFMPEG-LICENSE.txt to install next to nbtv-gui")
+if(NBTV_DESKTOP_BUNDLED_FFMPEG)
+  file(TO_CMAKE_PATH "${NBTV_DESKTOP_BUNDLED_FFMPEG}" NBTV_FFMPEG_DIR)
+  set(NBTV_FFMPEG_FILES "${NBTV_FFMPEG_DIR}/ffmpeg${CMAKE_EXECUTABLE_SUFFIX}" "${NBTV_FFMPEG_DIR}/FFMPEG-LICENSE.txt")
+  foreach(NBTV_FFMPEG_FILE IN LISTS NBTV_FFMPEG_FILES)
+    if(NOT EXISTS "${NBTV_FFMPEG_FILE}")
+      message(FATAL_ERROR "NBTV_DESKTOP_BUNDLED_FFMPEG: ${NBTV_FFMPEG_FILE} does not exist")
+    endif()
+  endforeach()
+  list(GET NBTV_FFMPEG_FILES 0 NBTV_FFMPEG_EXECUTABLE)
+  install(PROGRAMS "${NBTV_FFMPEG_EXECUTABLE}" DESTINATION "${NBTV_INSTALL_BINDIR}")
+  install(FILES "${NBTV_FFMPEG_DIR}/FFMPEG-LICENSE.txt" DESTINATION "${NBTV_INSTALL_DOCDIR}")
+  message(STATUS "nbtv-gui: the package will include ${NBTV_FFMPEG_EXECUTABLE}")
+endif()

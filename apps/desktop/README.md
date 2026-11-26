@@ -33,10 +33,31 @@
 
 | 功能 | 需要 | 沒有裝的時候 |
 | --- | --- | --- |
-| 用影片檔當發射來源、把收到的畫面存成影片 | [ffmpeg](https://ffmpeg.org)（在 `PATH` 裡，或和 `nbtv-gui` 放在一起；有 `ffprobe` 更好） | 圖片檔（JPEG、PNG、BMP、GIF）與圖片序列照樣能當來源；存影片的按鈕不能按 |
+| 用影片檔當發射來源、把收到的畫面存成影片 | [ffmpeg](https://ffmpeg.org)：**Windows 的下載包已經附了**（`ffmpeg.exe`，見[下面](#windows-的下載包附的-ffmpeg)），不必另外安裝；Linux 要另外安裝（例如 `sudo apt install ffmpeg`） | 圖片檔（JPEG、PNG、BMP、GIF）與圖片序列照樣能當來源；存影片的按鈕不能按 |
 | 用電台的 CAT 指令控制 PTT，或列出電台型號 | [Hamlib](https://github.com/Hamlib/Hamlib) 的 `rigctld`、`rigctl`（Windows 裝官方的安裝程式；Linux 例如 `sudo apt install libhamlib-utils`） | 另外三種 PTT（不控制、序列埠的 RTS／DTR、連到已經開著的 rigctld）不受影響 |
 
-這個程式自己不帶影片的解碼器，也不帶 Hamlib。
+這個程式自己不帶影片的解碼器（影片交給另外的 ffmpeg 程式），也不帶 Hamlib。
+
+### Windows 的下載包附的 ffmpeg
+
+Windows 的下載包裡，`nbtv-gui.exe` 旁邊有一個 `ffmpeg.exe`：影片檔當發射來源、把收到的畫面存成影片都靠它，所以解開就能用。
+它是 CI 從 [FFmpeg](https://ffmpeg.org) 官方的原始碼建置的 FFmpeg 9.1（怎麼建置的見[建置](#建置)），只放 app 用得到的格式
+（[`ffmpeg/components.txt`](ffmpeg/components.txt)），全部靜態連結，不需要別的 DLL：x86_64 的約 14 MB、arm64 的約 9 MB，壓進下載包約 5 與 4 MB。
+
+- **讀得了的影片**：.mp4、.mov、.m4v、.3gp、.mkv、.webm、.avi、.wmv、.flv、.ts、.m2ts、.mts、.mpg、.vob、.mxf、.dv、.ogv；
+  H.264、H.265（含 iPhone 的 HDR 影片那種 10 位元的）、VP8、VP9、AV1、MPEG-4 Part 2（DivX、Xvid）、MPEG-1、MPEG-2、Windows Media Video、
+  Motion JPEG、ProRes、DNxHD、CineForm、DV 與幾種無損的格式。手機直拍的影片照檔案裡記的方向轉正。不讀聲音（app 本來就不用）。
+- **存影片**用 x264 編成 H.264 的 .mp4。
+- **找 ffmpeg 的順序**：先找 `nbtv-gui` 自己旁邊的，再找 `PATH` 裡的；`nbtv-gui --version` 會印出用的是哪一個。
+  要用別的 ffmpeg（例如功能齊全的版本），把這個 `ffmpeg.exe` 換掉；刪掉它就改用 `PATH` 裡的。
+  影片多長、畫面多大先問和那個 ffmpeg 放在同一個資料夾的 `ffprobe`（下載包裡沒有附），沒有的話問 ffmpeg 本身。
+- **授權**：因為含有 x264，這個 `ffmpeg.exe` 以 GPL 2.0 以後的版本發佈。它不是 NBeeTv 的一部分，也沒有連進 `nbtv-gui.exe`，是另外啟動的程式。
+  授權條文、版本與建置的設定在同一個資料夾的 `FFMPEG-LICENSE.txt`；全部的原始碼（FFmpeg、x264、dav1d、zlib 的原始碼包與建置腳本）
+  在每一版的 [Releases](https://github.com/pepefrog1234/NBeeTv/releases) 裡和下載包放在一起：`NBeeTv-<版本>-windows-ffmpeg-source.tar`。
+- 它只放了 app 用得到的東西，拿來做別的轉檔多半不行（不處理聲音，寫得出來的只有 H.264 的 .mp4 與 PPM 等幾種）。
+  說明裡「把照片轉成 PPM」的用法可以：`.\ffmpeg.exe -i photo.jpg -vf scale=96:72 -pix_fmt rgb24 photo.ppm`。
+
+Linux 的下載包不附 ffmpeg：各個發行版都有，裝系統的那一個就好。
 
 ### 命令列的參數
 
@@ -77,8 +98,8 @@ Windows 上這是視窗程式，從檔案總管啟動時沒有地方印字；`--
 - **存成影片時印上訊雜比的選項**在按了「儲存影片」之後跳出來的一小塊裡，在那裡按「儲存…」才開存檔的對話框
   （macOS 版把它放在系統的存檔對話框裡；這裡的存檔對話框也是系統的，但沒有辦法往裡面加東西）。勾不勾一樣會記住，預設不印。
   字用系統的等寬粗體字型、由 stb_truetype 畫，筆畫和 macOS 版略有不同；找不到字型時影片照存，底列會寫沒有印上。
-- **影片靠使用者電腦上的 ffmpeg**：播放時開一個 ffmpeg 把畫面照實際的速度送過來（每秒 10 格，先縮小到 512 點以內），
-  暫停就把它結束、記住位置。macOS 版用的是系統的 AVFoundation。
+- **影片交給另外的 ffmpeg 程式**（Windows 的下載包附了一個，Linux 用系統裝的）：播放時開一個 ffmpeg 把畫面照實際的速度送過來
+  （每秒 10 格，先縮小到 512 點以內，一律轉成 8 位元的 RGB），暫停就把它結束、記住位置。macOS 版用的是系統的 AVFoundation。
 - **介面的語言可以在設定裡選**（macOS 版只跟著系統）。預設跟著系統的語言。
 - **設定是蓋在主視窗上的對話框**，不是另一個視窗；選單也是 app 自己畫的。沒有選單列與鍵盤快速鍵（Esc 可以關掉選單與設定）。
 - **畫布的字**用系統的粗體字型、由 stb_truetype 畫，所以同一句字的筆畫和 macOS 版、和別台電腦會有一點不同（排法與字級的規則相同）。
@@ -130,6 +151,13 @@ cmake --build build-desktop --config Release --target nbtv-gui
 - **Windows**：Visual Studio 2022 以上（MSVC）。要讓使用者不必裝 Visual C++ 的可轉散發套件，設定時加 `-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`。
 - **macOS** 上也編得起來（開發時就是在那裡試的），但發佈給 macOS 的是 [apps/macos](../macos/README.md) 那一個。
 - 已經裝了 SDL 3.2 以上、不想再編一次：`-DNBTV_DESKTOP_SYSTEM_SDL3=ON`。
+- **附上 ffmpeg**：設定時加 `-DNBTV_DESKTOP_BUNDLED_FFMPEG=<目錄>`（裡面要有 `ffmpeg` 執行檔與 `FFMPEG-LICENSE.txt`），安裝時就把它們放在 `nbtv-gui` 旁邊。
+  Windows 的下載包用的那一個是 [`ffmpeg/build-windows.sh`](ffmpeg/build-windows.sh) 做的：在 Linux 上（macOS 上用 Docker 的 Linux 容器）
+  從官方的原始碼交叉編譯（llvm-mingw），`ffmpeg/build-windows.sh x86_64 <輸出目錄>`（arm64 是 `aarch64`），輸出目錄裡另外有原始碼的那一份。
+  FFmpeg、x264、dav1d、zlib 與 llvm-mingw 都固定版本並核對 SHA-256：要升級就改腳本開頭的版本與 SHA-256（原始碼包先核對發佈者的簽章，
+  腳本的說明裡有三把金鑰的指紋）。做出來的 ffmpeg 用 [`ffmpeg/check.sh`](ffmpeg/check.sh) 檢查：[`ffmpeg/samples/`](ffmpeg/samples)
+  裡九支不同格式的小影片照 app 播放時的參數各解一格、把照片轉成 PPM、照 app 存影片的方式編一段 .mp4 再讀回來。
+  CI 只在 `build-windows.sh` 或 `components.txt` 改了的時候重新建置 ffmpeg，平常用快取。
 
 GitHub 上的下載包就是 [`.github/workflows/build.yml`](../../.github/workflows/build.yml) 照這個方式在各個平台上建出來的，`nbtv-gui` 和命令列工具放在同一包。
 
@@ -162,6 +190,8 @@ GitHub 上的下載包就是 [`.github/workflows/build.yml`](../../.github/workf
 執行緒的安排和 macOS 版相同：介面的狀態（`App`）只在主執行緒上讀寫；解調在自己的一條執行緒上（不在音訊的回呼裡、也不在主執行緒上），
 影像編碼、PTT、縮圖、開檔各有一條；做完的結果排回主執行緒。主迴圈每一圈呼叫一次 `App::tick()`，發射的排程、定時發射都在裡面照時間做。
 視窗被拖著移動、改大小的時候 Windows 與 macOS 會把主執行緒卡在系統自己的迴圈裡，這段時間由 SDL 的事件監看照樣推進（發射中的排程不能停）。
+
+[`ffmpeg/`](ffmpeg)：Windows 的下載包附的 ffmpeg（建置腳本、裡面放了什麼、檢查與檢查用的影片），見[建置](#建置)。
 
 用 CAT 指令按下的 PTT 不會因為序列埠關了就放開，所以按下時另外啟動一個看門的程序（就是 `nbtv-gui` 自己，加上 `--ptt-watchdog`）：
 app 不管怎麼結束（當掉、被強制結束），它都會替我們對 rigctld 送「T 0」、把 rigctld 結束。
@@ -213,6 +243,8 @@ app 不管怎麼結束（當掉、被強制結束），它都會替我們對 rig
 CI（[`build.yml`](../../.github/workflows/build.yml)）在 Windows 與 Linux 的 x86_64、arm64 四種機器上各自建置，然後對著「下載包解開之後」的那一份：
 跑完上面的自我測試（含假音訊驅動的那一項）、把六張版面與給 FM 用的大畫面三張、五種語言各算成一張圖（留在那一次執行的 Artifacts，`screens-<平台>`）、
 真的開視窗幾秒鐘（示範資料兩次：一般的與 192×144 的；照平常的方式啟動一次；Linux 的機器沒有螢幕，用 xvfb）。Linux 另外檢查執行檔直接相依的只有 glibc。
+Windows 另外檢查下載包附的 `ffmpeg.exe`：是那種處理器的、`nbtv-gui --version` 說用的就是它，再用 [`ffmpeg/check.sh`](ffmpeg/check.sh) 讀九支不同格式的影片、存一段影片；
+自我測試裡影片檔來源與存影片的項目也不准略過。
 
 開發時另外用開著 AddressSanitizer 與 UndefinedBehaviorSanitizer 的版本把整套自我測試跑過（最近一次是 2026-11-26，38 項），沒有報告任何問題。
 
@@ -237,7 +269,7 @@ CI（[`build.yml`](../../.github/workflows/build.yml)）在 Windows 與 Linux �
 - 四種機器上建得起來，下載包解開就能執行，找得到自己旁邊的權重檔；
 - 收發的整個流程、PTT 的順序、各種出錯時的收尾（都用模擬的輸出與只做紀錄的 PTT）；
 - 經過 SDL 的音訊串流收音與送出（假的音訊驅動）；
-- 影片檔來源與存影片（Linux：ffmpeg；Windows：CI 的機器上有裝到 ffmpeg 的時候）；
+- 影片檔來源與存影片（Linux：系統的 ffmpeg；Windows：下載包附的 `ffmpeg.exe`，見下面 2026-11-27 那一段）；
 - 用 Hamlib 的假電台走完 CAT 的 PTT，包含看門的程序（Linux、macOS；Windows 沒有）；
 - 介面在三種視窗大小、五種語言下畫得出來，每個按鈕有作用。
 - 圖片序列與存成影片時印上訊雜比（2026-11-26 加的）。推上 GitHub 之後 CI 在四種機器上都跑過：Linux 的 x86_64、arm64 是 33 項全部通過；
@@ -256,6 +288,18 @@ CI（[`build.yml`](../../.github/workflows/build.yml)）在 Windows 與 Linux �
     這個程式讀進來的結果（`--read-image`）和 ImageIO 自己轉正的結果八種都一致（平均差 0.5／255，和別的方向比差 21 以上）。
     讀 EXIF 的那一段（輸入是使用者選的檔案，內容不可信）另外用 libFuzzer 加上 AddressSanitizer、UndefinedBehaviorSanitizer
     餵了 8400 萬筆隨機變造的輸入，沒有當掉，也沒有讀到資料以外的地方。
+
+Windows 的下載包附 ffmpeg 是 2026-11-27 加的（0.2.1）。下面是在開發的那台電腦上做的；在 Windows 上執行的部分交給 CI 的兩種
+Windows 機器（上面「檢查」那一段），這台電腦上沒有執行過：
+
+- 兩種 Windows 的 `ffmpeg.exe` 在 Docker 裡的 Ubuntu 24.04 上照 CI 的方式建置：是那種處理器的執行檔，只用到 Windows 本身就有的 DLL
+  （KERNEL32、SHELL32、bcrypt 與 UCRT）。同樣的路徑下建置兩次，結果每個位元組都一樣；只靠發佈的那一份原始碼
+  （不裝 git、不連到 VideoLAN）也重建得出來。
+- 照同一份 `components.txt` 在 macOS 上另外建了一個 ffmpeg：`check.sh` 全部通過（九支不同格式的影片、照片轉 PPM、存影片再讀回）；
+  把它和 `nbtv-gui` 裝在一起（`NBTV_DESKTOP_BUNDLED_FFMPEG`），`--version` 說用的是旁邊那一個（不是 Homebrew 的），
+  整套自我測試 39 項全部通過、沒有略過。旁邊沒有 ffprobe，所以影片多長、多大是問 ffmpeg 本身得到的。
+- 這時也發現並修好：10 位元的影片（iPhone 的 HDR 影片、ProRes）以前開不起來，因為 ffmpeg 送來的是每個顏色 16 位元的 PPM；
+  現在播放時一律要 8 位元的 RGB。
 
 給 FM 用的大畫面（模式 15 與 5、6、7，192×144）是 2026-11-26 補上的，補上的時候還沒有推上 GitHub，所以下面都是在開發的那台電腦上做的；
 CI 的四種機器（尤其是 Windows 與 MSVC）要等推上去才會跑到：
