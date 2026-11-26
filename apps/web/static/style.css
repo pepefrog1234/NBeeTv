@@ -21,6 +21,14 @@
   --sans: -apple-system, BlinkMacSystemFont, "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", "Segoe UI", Roboto, sans-serif;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
 }
+/* 簡體中文與日文各用自己的字型：同一個漢字在三種語言裡的寫法不一樣（<html lang> 由 i18n.js 設定）。
+   西班牙文與英文用的是上面那一組裡的拉丁字型，不必另外指定。 */
+:root:lang(zh-Hans) {
+  --sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans SC", "Noto Sans CJK SC", "Microsoft YaHei", "Segoe UI", Roboto, sans-serif;
+}
+:root:lang(ja) {
+  --sans: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Noto Sans CJK JP", "Yu Gothic UI", Meiryo, "Segoe UI", Roboto, sans-serif;
+}
 
 * { box-sizing: border-box; }
 
@@ -64,14 +72,16 @@ h2:focus { outline: none; }
 .top-nav a { color: var(--secondary); font-size: 0.92rem; text-decoration: none; }
 .top-nav a:hover { color: var(--text); text-decoration: underline; }
 
+/* 語言選單（<select>）：五種語言，名稱用各自的寫法 */
 .lang {
   font: 600 0.8rem var(--sans);
   color: var(--secondary);
   background: var(--button);
   border: 1px solid var(--ring);
   border-radius: 999px;
-  padding: 5px 12px;
+  padding: 5px 8px 5px 12px;
   min-height: 32px;
+  max-width: 9em;
   cursor: pointer;
 }
 .lang:hover { color: var(--text); border-color: var(--tertiary); }

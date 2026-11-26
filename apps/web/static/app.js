@@ -105,7 +105,8 @@
         sitekey: state.config.turnstile.site_key,
         action: state.config.turnstile.action,  // 伺服器查證時會核對這個名稱
         theme: "dark",
-        language: window.NBTV.lang === "en" ? "en" : "zh-tw",
+        // 驗證元件的語言跟著頁面（它用的是地區的寫法）；之後再換頁面的語言時，已經畫出來的元件不會跟著換
+        language: { "zh-Hant": "zh-tw", "zh-Hans": "zh-cn", ja: "ja", es: "es", en: "en" }[window.NBTV.lang] || "auto",
         callback: (token) => { state.token = token; state.turnstile = "ready"; render(); },
         "expired-callback": () => { state.token = null; render(); },
         "error-callback": () => { state.token = null; state.turnstile = "error"; render(); return true; },

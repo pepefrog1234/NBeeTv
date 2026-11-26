@@ -277,7 +277,7 @@ cd apps/web && .venv/bin/python -m unittest discover -s tests -t .
 | `nbtvweb/issue.py`、`signing.py`、`cardfile.py`、`store.py` | 發卡、憑證與簽章、卡片檔的格式、保存 |
 | `nbtvweb/provenance.py` | C2PA：把 manifest 嵌進卡片、讀回來檢查 |
 | `nbtvweb/turnstile.py`、`ratelimit.py`、`models.py` | Turnstile 查證、用量限制、欄位檢查 |
-| `static/` | 頁面（繁體中文與英文，右上角切換） |
+| `static/` | 頁面。五種語言：繁體中文、簡體中文、日文、西班牙文、英文（美式），右上角的選單切換；沒選過的訪客照瀏覽器的語言。文字都在 `static/i18n.js`，加一種語言就是在那裡加一份字串表 |
 | `verify_card.py` | 離線查驗的獨立工具 |
 | `deploy/` | Cloudflare Tunnel 與 launchd 的設定範本 |
 
