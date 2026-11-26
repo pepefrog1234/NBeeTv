@@ -20,6 +20,8 @@
 #include "frame_map.hpp"
 #include "learned_codec.hpp"
 #include "learned_frame.hpp"
+#include "learned_kernels.hpp"
+#include "parallel.hpp"
 #include "link_util.hpp"
 #include "modes.hpp"
 #include "receiver.hpp"
@@ -298,7 +300,8 @@ void test_against_pytorch(const LearnedCodec& codec, const std::vector<std::uint
     CHECK(worst_level <= 1);
     CHECK(differing <= 6 * static_cast<int>(rgb_bytes) / 500);
     std::printf("  和 PyTorch 比：通道值最大差 %.2e；畫面 %d 個值裡有 %d 個差一階\n", worst_value, 6 * static_cast<int>(rgb_bytes), differing);
-    std::printf("  編碼每張 %.0f ms、解碼每張 %.0f ms（單執行緒）\n", encode_ms / 3.0, decode_ms / 6.0);
+    // 推論會分給幾條執行緒、x86-64 上可能用 AVX2 的寫法（learned_kernels.hpp），一起印出來；別的測試同時在跑的話數字會偏大
+    std::printf("  編碼每張 %.0f ms、解碼每張 %.0f ms（%s，最多 %d 條執行緒）\n", encode_ms / 3.0, decode_ms / 6.0, nn::kernels().name, parallel_threads());
 }
 
 void test_round_trip(const ModelCase& model, const LearnedCodec& codec) {

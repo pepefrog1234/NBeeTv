@@ -381,7 +381,16 @@ std::vector<float> foreign_burst(int id, int payload_symbols, int frames, Rng& r
     for (int i = 0; i < frames; ++i) {
         std::vector<cf> cells(static_cast<std::size_t>(fake.data_cells()));
         for (cf& c : cells) {
-            c = i % 2 == 0 ? cf(rng.bit() ? -0.70710678f : 0.70710678f, rng.bit() ? -0.70710678f : 0.70710678f) : cf(rng.cgauss());
+            if (i % 2 == 0) {
+                // 實部、虛部的亂數分兩行取。寫在同一個式子的兩個引數裡的話，先取哪一個 C++ 沒有規定：Clang 與 arm64 的 GCC 由左到右，
+                // x86-64 的 GCC 與 MSVC 由右到左，做出來的訊號就不一樣，這個測試在不同平台上測的就不是同一件事
+                // （接收機對別的模式的幀偶爾會短暫誤判同步，哪幾組訊號會踩到因此跟著編譯器變）。
+                const float re = rng.bit() ? -0.70710678f : 0.70710678f;
+                const float im = rng.bit() ? -0.70710678f : 0.70710678f;
+                c = cf(re, im);
+            } else {
+                c = cf(rng.cgauss());
+            }
         }
         const auto frame = ofdm_modulate(fake, cells, kDefaultPaprDb);
         signal.insert(signal.end(), frame.begin(), frame.end());

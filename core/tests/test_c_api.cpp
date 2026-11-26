@@ -628,7 +628,12 @@ void test_merging(int mode_id, const char* weights, const char* merge_weights) {
         state ^= state << 17;
         return (static_cast<double>(state >> 11) + 0.5) / 9007199254740992.0;
     };
-    for (float& v : audio) v += static_cast<float>(sigma * std::sqrt(-2.0 * std::log(uniform())) * std::cos(2.0 * kPi * uniform()));
+    for (float& v : audio) {
+        // 兩個亂數分開取：寫在同一個式子裡的話，先算乘號哪一邊 C++ 沒有規定，不同的編譯器做出來的雜訊就不一樣
+        const double u1 = uniform();
+        const double u2 = uniform();
+        v += static_cast<float>(sigma * std::sqrt(-2.0 * std::log(u1)) * std::cos(2.0 * kPi * u2));
+    }
 
     // 同一段音訊收一次，回傳各幀的畫面（沒解出來的是空的）
     const auto receive = [&](nbtv_rx* rx) {

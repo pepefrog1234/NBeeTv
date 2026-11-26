@@ -182,7 +182,13 @@ void Channel::process(std::span<const float> in, std::vector<float>& out) {
     }
 
     if (params_.clock_ppm == 0.0) {
-        for (double v : pending_) out.push_back(static_cast<float>(v + noise_sigma_ * rng_.gauss() + interference()));
+        for (double v : pending_) {
+            // 雜訊與干擾（脈衝雜訊也要用亂數）分開取，先雜訊再干擾：寫在同一個式子裡的話，先算加號哪一邊 C++ 沒有規定，
+            // 不同的編譯器模擬出來的通道就不一樣
+            const double g = rng_.gauss();
+            const double i = interference();
+            out.push_back(static_cast<float>(v + noise_sigma_ * g + i));
+        }
         pending_.clear();
     } else {
         resample_flush(out);
@@ -206,7 +212,9 @@ void Channel::resample_flush(std::vector<float>& out) {
             const double d = center - static_cast<double>(i);
             acc += rs_hist_[static_cast<std::size_t>(i)] * sinc(d) * kaiser(d / kResampleHalf, 8.0);
         }
-        out.push_back(static_cast<float>(acc + noise_sigma_ * rng_.gauss() + interference()));
+        const double g = rng_.gauss();  // 先雜訊再干擾（見 process）
+        const double i = interference();
+        out.push_back(static_cast<float>(acc + noise_sigma_ * g + i));
         rs_next_ += step;
     }
     // 丟掉不再需要的歷史
