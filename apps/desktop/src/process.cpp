@@ -136,12 +136,24 @@ bool write_exact(SDL_IOStream* stream, const void* buffer, std::size_t size) {
     if (stream == nullptr) return false;
     const auto* bytes = static_cast<const char*>(buffer);
     std::size_t done = 0;
+    // 管線滿了（對方還沒讀走）時：對方多半幾十微秒內就讀走了，所以先密集地再試一小段時間；
+    // 過了那一小段還是滿的（對方在忙別的）才改成每毫秒試一次。一律等幾毫秒的話，一次要寫的東西比管線的緩衝大時
+    // （存影片時連著印字那一塊的一格）每一格都要多等，一段影片會慢上好幾倍。
+    bool stalled = false;
+    std::chrono::steady_clock::time_point since;
     while (done < size) {
         const size_t n = SDL_WriteIO(stream, bytes + done, size - done);
         if (n > 0) {
             done += n;
+            stalled = false;
         } else if (SDL_GetIOStatus(stream) == SDL_IO_STATUS_NOT_READY) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            const auto now = std::chrono::steady_clock::now();
+            if (!stalled) {
+                stalled = true;
+                since = now;
+            }
+            if (now - since < std::chrono::microseconds(300)) std::this_thread::yield();
+            else std::this_thread::sleep_for(std::chrono::milliseconds(1));
         } else {
             return false;
         }
@@ -195,6 +207,17 @@ std::string find_program(const std::string& name, const std::vector<std::string>
         if (SDL_GetPathInfo(candidate.c_str(), &info) && info.type == SDL_PATHTYPE_FILE) return candidate;
     }
     return {};
+}
+
+bool has_hidden_attribute(const std::string& path) {
+#if defined(_WIN32)
+    // 執行檔的 manifest 指定了 UTF-8，A 結尾的函式吃的就是 UTF-8 的路徑
+    const DWORD attributes = GetFileAttributesA(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_HIDDEN) != 0;
+#else
+    (void)path;
+    return false;
+#endif
 }
 
 void kill_pid(long pid) {

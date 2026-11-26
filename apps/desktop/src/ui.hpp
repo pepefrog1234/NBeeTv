@@ -40,6 +40,8 @@ public:
     /// 主視窗蓋著一層面板（設定）時不畫它底下的東西以外的浮動選單
     void open_mode_menu() { want_mode_menu_ = true; }
     void open_schedule_menu() { want_schedule_menu_ = true; }
+    /// 按了「儲存影片」之後跳出來的那一小塊（存檔前的選項）
+    void open_save_video_menu() { want_save_video_menu_ = true; }
 
     /// 找到的字型裡有沒有中文、日文（沒有的話只能顯示英文、西班牙文）
     bool has_cjk_fonts() const { return fonts_found_.has_cjk; }
@@ -59,7 +61,10 @@ private:
         float right() const { return x + w; }
         float bottom() const { return y + h; }
     };
-    enum class Icon { settings, download, camera, chevrons, lock, video_file, pause, play, check, clock };
+    enum class Icon {
+        settings, download, camera, chevrons, lock, video_file, pause, play, check, clock,
+        image_file, previous, next,   // 圖片序列用的：圖片檔、上一張、下一張
+    };
 
     float S(float value) const { return value * scale_; }
 
@@ -95,12 +100,15 @@ private:
     void draw_side_panel(const Rect& rect);
     void draw_mode_menu();
     void draw_schedule_menu();
+    void draw_save_video_menu();
     void draw_settings();
     void draw_ptt_warning(const Rect& rect);
     void draw_snr_badge(ImDrawList* dl, float x, float y, double snr_db, float size) const;
 
     // 開檔、存檔
     void choose_video_file();
+    void choose_images();
+    void choose_image_folder();
     void save_image();
     void save_video();
 
@@ -133,8 +141,10 @@ private:
     std::map<std::string, Rect> hits_;
     bool want_mode_menu_ = false;
     bool want_schedule_menu_ = false;
+    bool want_save_video_menu_ = false;
     Rect mode_anchor_;
     Rect schedule_anchor_;
+    Rect save_video_anchor_;
     std::string canvas_buffer_;
     bool hamlib_checked_ = false;
     bool hamlib_installed_ = false;

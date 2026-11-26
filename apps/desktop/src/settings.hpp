@@ -42,12 +42,18 @@ struct Settings {
     bool loop_video = true;
     /// 上次選的影片檔（或圖片）的路徑。下次啟動時自動開啟；定時發射播的就是這個檔案
     std::string video_path;
+    /// 圖片序列：送完最後一張要不要從第一張再來。沒有勾（預設）就是每張送一次，送完自動停止發射
+    bool loop_images = false;
+    /// 圖片序列：上次選的那一批圖片的路徑，照發射的順序。下次啟動時自動帶回來
+    std::vector<std::string> image_paths;
     /// 定時發射：每隔幾分鐘一次，對齊整點（15 就是每小時的 00、15、30、45 分）。開關本身不存：每次開 app 都是關的
     int schedule_interval_minutes = 15;
     /// 定時發射：到了時間正在收別人的畫面時，那一次不發射
     bool schedule_skip_when_busy = true;
     /// 在收到的畫面與縮圖的左上角標出那一張的訊雜比
     bool show_frame_snr = false;
+    /// 把一段畫面存成影片時，在每一張的左上角印上收到它當下的訊雜比（按「儲存影片」時的選項，勾了會記住）
+    bool stamp_video_snr = false;
     /// 畫布：送出去的每一張畫面上要不要印字、印什麼、印在上面還是下面
     bool canvas_enabled = false;
     std::string canvas_text;

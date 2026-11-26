@@ -11,6 +11,8 @@
 // 給自己用的：
 //   nbtv-gui --ptt-watchdog 連接埠 行程   見 ptt.cpp 的 HamlibPTT
 //   nbtv-gui --sleep 秒數                什麼都不做，過幾秒結束（自我測試拿它當「別的行程」）
+//   nbtv-gui --read-image 圖片檔 [輸出.png]  照「圖片序列」讀圖的方式把一張圖讀進來（照記載的方向轉正、縮小），印出大小；
+//                                        有給輸出檔就把讀進來的樣子存成 PNG。用來看某一張真的相片這個程式讀成什麼樣子
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 
@@ -33,6 +35,7 @@
 #include "imgui_impl_sdlrenderer3.h"
 #include "log.hpp"
 #include "net.hpp"
+#include "png.hpp"
 #include "ptt.hpp"
 #include "selftest.hpp"
 #include "snapshot.hpp"
@@ -105,6 +108,8 @@ struct Loop {
     double last_input = 0;
     double last_save = 0;
     long frames = 0;
+    std::vector<std::string> dropped;   // 拖進視窗、還沒處理的檔案（一次拖好幾個時要先收齊）
+    double dropped_at = 0;              // 最近一個是什麼時候收到的
 
     /// 照設定（或系統）的語言設定介面的語言、載入字型、改視窗的標題。
     void apply_language() {
@@ -256,19 +261,27 @@ int run_window(const Options& options) {
         SDL_Event event;
         loop.pumping = true;
         bool got = SDL_WaitEventTimeout(&event, timeout);
+        bool drop_complete = false;
         while (got) {
             ImGui_ImplSDL3_ProcessEvent(&event);
             if (event.type == SDL_EVENT_QUIT) loop.running = false;
             if (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && event.window.windowID == SDL_GetWindowID(loop.window)) loop.running = false;
-            if (event.type == SDL_EVENT_DROP_FILE && event.drop.data != nullptr && app.live) {
-                // 把檔案拖進視窗：當成在「影片檔」那裡選了它（影片或圖片），發射來源也換過去
-                app.set_source_kind(SourceKind::video);
-                app.open_video(event.drop.data, true);
+            // 把檔案拖進視窗：一次拖好幾個的話，系統是一個檔案一個事件接連送來的，最後再說「這一批到此為止」。先收齊
+            if (event.type == SDL_EVENT_DROP_FILE && event.drop.data != nullptr) {
+                loop.dropped.emplace_back(event.drop.data);
+                loop.dropped_at = now;
             }
+            if (event.type == SDL_EVENT_DROP_COMPLETE) drop_complete = true;
             if (event.type != wake_event) loop.last_input = now;
             got = SDL_PollEvent(&event);
         }
         loop.pumping = false;
+        // 拖進來的檔案：影片檔（或一張圖片）當成在「影片檔」那裡選了它，好幾張圖片或資料夾當成圖片序列（見 App::open_dropped）。
+        // 等到「這一批到此為止」才處理；萬一等不到那個事件，過了三分之一秒也照樣處理
+        if (!loop.dropped.empty() && (drop_complete || now - loop.dropped_at > 0.33)) {
+            if (app.live) app.open_dropped(loop.dropped);
+            loop.dropped.clear();
+        }
         if (options.quit_after && now - loop.started > *options.quit_after) loop.running = false;
         loop.step();
     }
@@ -299,6 +312,22 @@ int run_window(const Options& options) {
     return 0;
 }
 
+/// --read-image：照圖片序列讀圖的方式讀一張圖，印出結果；out 不是空的話另外存成 PNG。
+int read_image(const std::string& path, const std::string& out) {
+    const SourceFramePtr frame = ImageSequence::load(path);
+    if (!frame) {
+        log::line("nbtv-gui：讀不進來：" + path + (ImageSequence::is_image(path) ? "" : "（副檔名不是認得的圖片類型；放進資料夾一起選的話會被略過）"));
+        return 1;
+    }
+    log::line("nbtv-gui：" + path + "：原圖轉正之後 " + std::to_string(frame->shown_width()) + "×" + std::to_string(frame->shown_height()) + "，讀進來留著 " +
+              std::to_string(frame->width) + "×" + std::to_string(frame->height) + (ImageSequence::is_image(path) ? "" : "（副檔名不是認得的圖片類型；放進資料夾一起選的話會被略過）"));
+    if (!out.empty() && !write_png(out, frame->rgb.data(), frame->width, frame->height, 3)) {
+        log::line("nbtv-gui：寫不出 " + out);
+        return 1;
+    }
+    return 0;
+}
+
 /// --selftest、--snapshot：不開視窗。SDL 的視訊用「假的」那一個（不需要螢幕），音訊只有在指定用假的音訊驅動時才啟動。
 void init_headless() {
     SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "dummy");
@@ -321,6 +350,7 @@ int main(int argc, char** argv) {
         std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<long>(std::atof(args[1].c_str()) * 1000)));
         return 0;
     }
+    if (args.size() >= 2 && args[0] == "--read-image") return read_image(args[1], args.size() >= 3 ? args[2] : std::string());
 
     Options options;
     for (std::size_t i = 0; i < args.size(); ++i) {

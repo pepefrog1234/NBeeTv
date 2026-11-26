@@ -92,7 +92,7 @@ The Windows and Linux packages contain `nbtv-gui` (`nbtv-gui.exe` on Windows): t
 
 - **Windows**: the executable is not code-signed, so SmartScreen may block it the first time. Once you are sure the file came from this repo, click "More info → Run anyway".
 - **Linux**: needs glibc 2.35 or later (Ubuntu 22.04, Debian 12, Raspberry Pi OS bookworm and newer). The Chinese and Japanese interface text needs system fonts (for example `fonts-noto-cjk`); without them the interface is shown in English.
-- Using a video file as the transmit source, and saving received pictures as a video, need [ffmpeg](https://ffmpeg.org) installed (image files do not); controlling PTT with CAT commands needs [Hamlib](https://github.com/Hamlib/Hamlib).
+- Using a video file as the transmit source, and saving received pictures as a video, need [ffmpeg](https://ffmpeg.org) installed (image files and image sequences do not); controlling PTT with CAT commands needs [Hamlib](https://github.com/Hamlib/Hamlib).
 
 > This app is new. It has thorough automated checks in CI, but **nobody has used it yet on a real Windows or Linux computer connected to a radio**: real sound cards, cameras and serial-port PTT have not been verified on actual hardware. Before relying on it, read "驗證過與還沒驗證的" (what has and has not been verified) in [apps/desktop/README.md](apps/desktop/README.md) (in Traditional Chinese), and please report problems in Issues.
 

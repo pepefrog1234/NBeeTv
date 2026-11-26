@@ -24,6 +24,9 @@ std::unique_ptr<App> make_receiving_app(bool quick = false);
 std::unique_ptr<App> make_transmitting_app(const std::deque<App::ReceivedFrame>& history);
 /// 待機：沒有訊號，只有電台通帶內的雜訊；發射來源選影片檔（work_directory 裡做一段示範影片；沒有 ffmpeg 時改用一張圖片）。
 std::unique_ptr<App> make_idle_app(const std::string& work_directory);
+/// 待機，發射來源選圖片序列：三張測試圖各存成一個圖片檔（放在 work_directory 的 pictures 裡），選那個資料夾，
+/// 下一張要送的是第二張。
+std::unique_ptr<App> make_images_app(const std::string& work_directory);
 
 /// 把六張版面算成 PNG。languages 有不只一種語言時，每種語言各放在 <目錄>/<語言> 裡。回傳結束碼。
 int run(const std::string& directory, const std::vector<std::string>& languages);

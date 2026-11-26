@@ -8,10 +8,12 @@
 #include <ctime>
 #include <functional>
 
+#include "canvas.hpp"
 #include "demo.hpp"
 #include "i18n.hpp"
 #include "log.hpp"
 #include "offscreen.hpp"
+#include "png.hpp"
 
 namespace nbtvgui::snapshot {
 
@@ -259,6 +261,38 @@ std::unique_ptr<App> make_idle_app(const std::string& work_directory) {
     return app;
 }
 
+std::unique_ptr<App> make_images_app(const std::string& work_directory) {
+    Settings settings = demo_settings(SourceKind::images);
+    // 開發用：NBTV_SNAPSHOT_LOOP_IMAGES=1 時勾著「循環播放」
+    settings.loop_images = std::getenv("NBTV_SNAPSHOT_LOOP_IMAGES") != nullptr;
+    auto app = std::make_unique<App>(settings, false);
+    set_demo_devices(*app);
+    if (work_directory.empty()) return app;
+    // 開發用：NBTV_SNAPSHOT_IMAGES 給的是一個資料夾或圖片檔的路徑時，改用那裡的圖片（看這個程式怎麼讀某一批真的圖片，不必開視窗）
+    std::string folder = work_directory + "/pictures";
+    SDL_PathInfo info{};
+    const char* given = std::getenv("NBTV_SNAPSHOT_IMAGES");
+    if (given != nullptr && SDL_GetPathInfo(given, &info)) {
+        folder = given;
+    } else {
+        SDL_CreateDirectory(folder.c_str());
+        int number = 2041;
+        for (const char* name : {"coffee", "rocket", "cat"}) {
+            // 放大十倍，像一般的圖片（960×720）
+            if (const std::optional<Picture> picture = demo::test_image(name)) demo::write_picture_png(*picture, folder + "/IMG_" + std::to_string(number) + ".png", 10);
+            ++number;
+        }
+    }
+    const int count = app->open_images({folder}, false);
+    app->select_image(count > 1 ? 1 : 0);
+    const bool got = app->demo_load_image();
+    app->demo_source_ready = got;
+    const std::optional<std::string> next = app->next_image();
+    say("圖片序列：" + std::to_string(count) + " 張，下一張要送的是「" + (next ? next->substr(next->find_last_of("/\\") + 1) : std::string("—")) + "」，取到畫面：" + (got ? "是" : "否") +
+        (app->source_size ? "，來源 " + std::to_string(app->source_size->first) + "×" + std::to_string(app->source_size->second) : std::string()));
+    return app;
+}
+
 int run(const std::string& directory, const std::vector<std::string>& languages) {
     if (!SDL_CreateDirectory(directory.c_str())) {
         say("無法建立目錄 " + directory + "：" + SDL_GetError());
@@ -273,6 +307,24 @@ int run(const std::string& directory, const std::vector<std::string>& languages)
     const std::unique_ptr<App> receiving = make_receiving_app();
     const std::unique_ptr<App> transmitting = make_transmitting_app(receiving->history);
     const std::unique_ptr<App> idle = make_idle_app(directory);
+    // 開發用，平常不算：
+    //   NBTV_SNAPSHOT_IMAGES=1       多算一張「待機＋圖片序列來源」（extra-images.png）；同時設了 NBTV_SNAPSHOT_EXTRA_SIZE=寬x高 的話，
+    //                               再多算一張那個視窗大小的（看縮到最小時右側欄放不放得下）。
+    //                               值是一個資料夾或圖片檔的路徑時，序列用那裡的圖片，不用內附的測試圖
+    //   NBTV_SNAPSHOT_SAVE_VIDEO=1   多算一張按了「儲存影片」之後、那一小塊選項開著的樣子（extra-save-video.png）
+    //   NBTV_SNAPSHOT_SNR=1          另外把「存成影片時印上訊雜比」的一格存成 video-frame-snr.png（影片裡每一格就是這個樣子，960×720）
+    const bool extra_images = std::getenv("NBTV_SNAPSHOT_IMAGES") != nullptr, extra_save_video = std::getenv("NBTV_SNAPSHOT_SAVE_VIDEO") != nullptr;
+    const std::unique_ptr<App> images = extra_images ? make_images_app(directory) : nullptr;
+    int extra_width = 0, extra_height = 0;
+    if (const char* size = std::getenv("NBTV_SNAPSHOT_EXTRA_SIZE")) std::sscanf(size, "%dx%d", &extra_width, &extra_height);
+    if (std::getenv("NBTV_SNAPSHOT_SNR") != nullptr && !receiving->history.empty()) {
+        const App::ReceivedFrame& newest = receiving->history.front();
+        const std::string label = "SNR " + App::snr_text(newest.snr_db);
+        const std::vector<std::uint8_t> frame = sequence_video::frame_image(*newest.picture, label);
+        if (write_png(directory + "/video-frame-snr.png", frame.data(), sequence_video::kWidth, sequence_video::kHeight, 3)) {
+            say("video-frame-snr.png：影片的一格，左上角印的是「" + label + "」" + (VideoStamp::has_fonts() ? "" : "　注意：找不到字型，沒有印出來"));
+        }
+    }
 
     int failures = 0;
     for (const std::string& language : languages) {
@@ -282,10 +334,10 @@ int run(const std::string& directory, const std::vector<std::string>& languages)
             out += "/" + language;
             SDL_CreateDirectory(out.c_str());
         }
-        const auto render = [&](App& app, const char* name, const std::function<void(UI&)>& prepare) {
-            OffscreenUI screen(app, 1280, 840, 2.0f);
+        const auto render = [&](App& app, const std::string& name, const std::function<void(UI&)>& prepare, int width = 1280, int height = 840) {
+            OffscreenUI screen(app, width, height, 2.0f);
             if (!screen.ok()) {
-                say(std::string(name) + "：沒有算出來（" + screen.error() + "）");
+                say(name + "：沒有算出來（" + screen.error() + "）");
                 ++failures;
                 return;
             }
@@ -308,6 +360,11 @@ int run(const std::string& directory, const std::vector<std::string>& languages)
         idle->set_schedule_armed(true);
         render(*idle, "6-schedule.png", [](UI& ui) { ui.open_schedule_menu(); });
         idle->set_schedule_armed(false);
+        if (images) {
+            render(*images, "extra-images.png", nullptr);
+            if (extra_width > 0 && extra_height > 0) render(*images, "extra-images-" + std::to_string(extra_width) + "x" + std::to_string(extra_height) + ".png", nullptr, extra_width, extra_height);
+        }
+        if (extra_save_video) render(*receiving, "extra-save-video.png", [](UI& ui) { ui.open_save_video_menu(); });
     }
     i18n::use(original_language);
     say(failures == 0 ? "完成：" + directory : "有 " + std::to_string(failures) + " 張沒有算出來");

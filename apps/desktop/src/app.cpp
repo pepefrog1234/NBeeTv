@@ -192,6 +192,7 @@ void App::after(double seconds, std::function<void()> job) { timers_.emplace_bac
 void App::start() {
     if (!live) return;
     refresh_devices();
+    reopen_last_images();   // 先帶回來：下面打開來源時，圖片序列才有東西
     if (std::getenv("NBTV_NO_DEVICES") == nullptr) {
         receive_wanted_ = true;
         start_receiving();
@@ -451,9 +452,23 @@ std::string App::video_file_name(const std::vector<ReceivedFrame>& frames) {
     return "NBTV-" + call + "-" + schedule::stamp_text(frames.empty() ? schedule::now() : frames.front().time) + ".mp4";
 }
 
-// 影片的時間軸：每一張從它收到的時刻開始顯示，到下一張收到為止，所以影片的快慢和當時收到的一樣；
-// 最後一張停留它那個模式一張的長度（至少一秒）。每秒 24 格、960×720（每個像素放大成 10×10，不內插）。
-// 編碼交給 ffmpeg：把 96×72 的畫面一格一格從管線送給它。
+App::VideoTimeline App::video_timeline(const std::vector<ReceivedFrame>& frames, bool stamp_snr) {
+    VideoTimeline timeline;
+    if (frames.empty()) return timeline;
+    for (const ReceivedFrame& frame : frames) {
+        timeline.pictures.push_back({frame.picture, frame.time - frames.front().time, stamp_snr ? "SNR " + snr_text(frame.snr_db) : std::string()});
+    }
+    const ModeInfo* last_mode = modes::find(frames.back().mode_id);
+    timeline.last_hold = std::max(1.0, last_mode != nullptr ? last_mode->frame_seconds : 1.0);
+    return timeline;
+}
+
+// 每秒 24 格、960×720（每個像素放大成 10×10，不內插）。編碼交給 ffmpeg：把 96×72 的畫面一格一格從管線送給它，由它放大。
+//
+// 要印訊雜比的時候，字是這裡自己畫的（見 VideoStamp）：字只蓋住影片左上角的一小塊，所以不把 960×720 的整格畫面送過去
+// （一格 2 MB，管線會慢得多），而是把「印好字的那一小塊」接在 96×72 的畫面右邊一起送——送過去的一格是
+// 「96×72 的畫面 ｜ 那一小塊（已經是影片的大小）」，ffmpeg 把左邊放大成 960×720，再把右邊那一塊原樣貼回左上角。
+// 那一小塊是從 sequence_video::frame_image 切下來的，所以貼上去之後就是那一格該有的樣子。
 void App::export_sequence(const std::vector<ReceivedFrame>& frames, const std::string& path, std::function<void(bool)> completion) {
     if (frames.empty() || exporting_video) return;
     const std::string ffmpeg = FileSource::ffmpeg_path();
@@ -463,13 +478,49 @@ void App::export_sequence(const std::vector<ReceivedFrame>& frames, const std::s
         return;
     }
     exporting_video = true;
-    const ModeInfo* last_mode = modes::find(frames.back().mode_id);
-    const double last_hold = std::max(1.0, last_mode != nullptr ? last_mode->frame_seconds : 1.0);
-    io_worker_->post([this, frames, path, ffmpeg, last_hold, completion] {
-        constexpr double kFps = 24;
+    const VideoTimeline timeline = video_timeline(frames, settings.stamp_video_snr);
+    const bool wanted = settings.stamp_video_snr;
+    io_worker_->post([this, timeline, wanted, path, ffmpeg, completion] {
+        const double fps = sequence_video::kFrameRate;
+        const std::vector<VideoPicture>& pictures = timeline.pictures;
+        // 要印的字佔影片畫面的哪一塊：每一張的字不一樣長，取最寬的。邊界對齊到偶數的像素（影片的色度是兩個像素一格）
+        int left = 0, top = 0, right = 0, bottom = 0;
+        if (wanted) {
+            for (const VideoPicture& picture : pictures) {
+                const VideoStamp::Rect rect = VideoStamp::rect_for(picture.label);
+                if (rect.width <= 0 || rect.height <= 0) continue;
+                if (right == 0) {
+                    left = rect.x;
+                    top = rect.y;
+                }
+                left = std::min(left, rect.x);
+                top = std::min(top, rect.y);
+                right = std::max(right, rect.x + rect.width);
+                bottom = std::max(bottom, rect.y + rect.height);
+            }
+            left -= left % 2;
+            top -= top % 2;
+            right += right % 2;
+            bottom += bottom % 2;
+        }
+        const int patch_width = right - left, patch_height = bottom - top;
+        // 找不到字型（或那一塊放不進畫面）時印不了：影片照存，結果裡說明沒有印
+        const bool stamping = wanted && patch_width > 0 && patch_height > 0 && right <= sequence_video::kWidth && bottom <= sequence_video::kHeight;
+        const int frame_width = kImageWidth + (stamping ? patch_width : 0), frame_height = stamping ? std::max(kImageHeight, patch_height) : kImageHeight;
+
         Process::Options options;
-        options.args = {ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "96x72", "-r", "24", "-i", "pipe:0",
-                        "-vf", "scale=960:720:flags=neighbor", "-pix_fmt", "yuv420p", "-movflags", "+faststart", path};
+        options.args = {ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
+                        "-s", std::to_string(frame_width) + "x" + std::to_string(frame_height), "-r", std::to_string(sequence_video::kFrameRate), "-i", "pipe:0"};
+        const std::string size = std::to_string(sequence_video::kWidth) + ":" + std::to_string(sequence_video::kHeight);
+        if (stamping) {
+            const std::string graph = "[0:v]split[picture][corner];[picture]crop=" + std::to_string(kImageWidth) + ":" + std::to_string(kImageHeight) + ":0:0,scale=" + size +
+                                      ":flags=neighbor[large];[corner]crop=" + std::to_string(patch_width) + ":" + std::to_string(patch_height) + ":" + std::to_string(kImageWidth) +
+                                      ":0[stamp];[large][stamp]overlay=" + std::to_string(left) + ":" + std::to_string(top) + "[out]";
+            options.args.insert(options.args.end(), {"-filter_complex", graph, "-map", "[out]"});
+        } else {
+            options.args.insert(options.args.end(), {"-vf", "scale=" + size + ":flags=neighbor"});
+        }
+        options.args.insert(options.args.end(), {"-pix_fmt", "yuv420p", "-movflags", "+faststart", path});
         options.pipe_stdin = true;
         options.pipe_stderr = true;
         std::string reason;
@@ -477,11 +528,27 @@ void App::export_sequence(const std::vector<ReceivedFrame>& frames, const std::s
         bool ok = process != nullptr;
         long written = 0;
         if (ok) {
+            std::vector<std::uint8_t> packed(static_cast<std::size_t>(frame_width) * static_cast<std::size_t>(frame_height) * 3, 0);
             // 每一張要佔幾格：照它和下一張相隔的時間，四捨五入到整格（至少一格）；累計起來算，誤差才不會一路加上去
-            for (std::size_t i = 0; i < frames.size() && ok; ++i) {
-                const double end = i + 1 < frames.size() ? frames[i + 1].time - frames.front().time : frames[i].time - frames.front().time + last_hold;
-                const long target = std::max<long>(written + 1, std::lround(end * kFps));
-                for (; written < target && ok; ++written) ok = write_exact(process->in(), frames[i].picture->rgb.data(), kRgbBytes);
+            for (std::size_t i = 0; i < pictures.size() && ok; ++i) {
+                if (!pictures[i].picture) continue;
+                const double end = i + 1 < pictures.size() ? pictures[i + 1].start : pictures[i].start + timeline.last_hold;
+                const long target = std::max<long>(written + 1, std::lround(end * fps));
+                const std::uint8_t* data = pictures[i].picture->rgb.data();
+                if (stamping) {
+                    // 左邊是 96×72 的畫面，右邊是影片那一格（印好字的）左上角的那一塊
+                    const std::vector<std::uint8_t> full = sequence_video::frame_image(*pictures[i].picture, pictures[i].label);
+                    for (int y = 0; y < kImageHeight; ++y) {
+                        std::copy_n(data + static_cast<std::size_t>(y) * kImageWidth * 3, kImageWidth * 3, packed.begin() + static_cast<std::ptrdiff_t>(static_cast<std::size_t>(y) * static_cast<std::size_t>(frame_width) * 3));
+                    }
+                    for (int y = 0; y < patch_height; ++y) {
+                        std::copy_n(full.begin() + static_cast<std::ptrdiff_t>((static_cast<std::size_t>(top + y) * sequence_video::kWidth + static_cast<std::size_t>(left)) * 3), patch_width * 3,
+                                    packed.begin() + static_cast<std::ptrdiff_t>((static_cast<std::size_t>(y) * static_cast<std::size_t>(frame_width) + kImageWidth) * 3));
+                    }
+                    data = packed.data();
+                }
+                // 這一張顯示到下一張開始為止：同一格畫面重複送，影片的格率才是固定的每秒 24 格
+                for (; written < target && ok; ++written) ok = write_exact(process->in(), data, stamping ? packed.size() : static_cast<std::size_t>(kRgbBytes));
             }
             process->close_stdin();
             int code = 0;
@@ -491,11 +558,14 @@ void App::export_sequence(const std::vector<ReceivedFrame>& frames, const std::s
             ok = ok && SDL_GetPathInfo(path.c_str(), &info) && info.type == SDL_PATHTYPE_FILE && info.size > 0;
             if (!ok) reason = trim(read_all(process->err()));
         }
-        const int pictures = static_cast<int>(frames.size());
-        const double seconds = static_cast<double>(written) / kFps;
-        post_main([this, ok, reason, path, pictures, seconds, completion] {
+        const int count = static_cast<int>(pictures.size());
+        const double seconds = static_cast<double>(written) / fps;
+        const bool stamped = stamping || !wanted;
+        post_main([this, ok, stamped, reason, path, count, seconds, completion] {
             exporting_video = false;
-            notice = ok ? LF("影片已存成「%@」：%d 張，%@", {base_name(path), pictures, clock_text(seconds)}) : LF("影片存檔失敗：%@", {reason.empty() ? path : reason});
+            if (!ok) notice = LF("影片存檔失敗：%@", {reason.empty() ? path : reason});
+            else if (!stamped) notice = LF("影片已存成「%@」，但找不到字型，沒有印上訊雜比", {base_name(path)});
+            else notice = LF("影片已存成「%@」：%d 張，%@", {base_name(path), count, clock_text(seconds)});
             if (completion) completion(ok);
         });
     });
@@ -542,6 +612,13 @@ void App::restart_source() {
             video_.play();   // 不循環的影片停在原來的位置，按下發射才開始播（見 go_on_air）
         }
         break;
+    case SourceKind::images:
+        camera_.stop();
+        if (!opening_video_) video_.pause();
+        video_playing = false;
+        // 預覽（下一張要送的那一張）由 ui_tick 讀進來（見 refresh_image_preview）
+        if (image_files.empty()) source_message = L("還沒選擇圖片");
+        break;
     }
 }
 
@@ -575,6 +652,7 @@ void App::clear_source_frame() {
     ++latest_version_;
     video_frame_version_ = static_cast<std::uint64_t>(-1);
     preview_version_ = static_cast<std::uint64_t>(-1);
+    image_preview_key_.reset();
     last_source_rgb_.reset();
     source_preview.reset();
     source_size.reset();
@@ -652,6 +730,204 @@ void App::scrub_video(double seconds, bool editing) {
     video_.seek(seconds);
 }
 
+// ---------------------------------------------------------------- 發射來源：圖片序列
+//
+// 使用者選一批圖片（或一個資料夾），照檔名排好（見 ImageSequence::files）。image_index 是「下一張要送的」，
+// 右側欄的預覽就是它。發射時每準備一張畫面就取這一張、位置往後移一張；沒有勾循環播放的話，
+// 最後一張排進輸出佇列之後自動收尾（和影片播完一樣），位置回到第一張。
+// 取走了卻沒有完整送出去的那一張會退回去，下一次發射從它開始，所以不會有哪一張被跳過：
+// 按停止時已經排進去、還沒開始播的（stop_transmit）；送到一半被切掉的、還沒開始送就取消的（end_transmit）。
+// 讀圖在 preview_worker_ 上做。讀不到的檔案從序列裡拿掉，並在底列說明。
+
+int App::open_images(const std::vector<std::string>& selection, bool remember) {
+    std::vector<std::string> files = ImageSequence::files(selection);
+    if (files.empty()) {
+        notice = L("選的項目裡沒有可以讀取的圖片");
+        return 0;
+    }
+    set_images(std::move(files));
+    // 使用者自己選的這一批記下來，下次啟動時自動帶回來（見 reopen_last_images）
+    if (remember) settings.image_paths = image_files;
+    return static_cast<int>(image_files.size());
+}
+
+void App::set_images(std::vector<std::string> files) {
+    image_files = std::move(files);
+    image_index = 0;
+    preview_worker_->post([this] { images_.forget(); });
+    note("圖片序列：" + std::to_string(image_files.size()) + " 張，第一張「" + base_name(image_files.front()) + "」");
+    if (settings.source_kind == SourceKind::images) {
+        source_message.reset();
+        clear_source_frame();
+    }
+}
+
+/// 上次選的那一批圖片還在的話，啟動時自動帶回來（已經不在的檔案略過）。
+void App::reopen_last_images() {
+    if (!image_files.empty()) return;
+    std::vector<std::string> files;
+    for (const std::string& path : settings.image_paths) {
+        SDL_PathInfo info{};
+        if (SDL_GetPathInfo(path.c_str(), &info) && info.type == SDL_PATHTYPE_FILE) files.push_back(path);
+    }
+    if (!files.empty()) set_images(std::move(files));
+}
+
+void App::select_image(int index) {
+    if (image_files.empty()) return;
+    image_index = std::clamp(index, 0, static_cast<int>(image_files.size()) - 1);
+}
+
+std::optional<std::string> App::next_image() const {
+    if (image_index < 0 || image_index >= static_cast<int>(image_files.size())) return std::nullopt;
+    return image_files[static_cast<std::size_t>(image_index)];
+}
+
+void App::open_dropped(const std::vector<std::string>& paths) {
+    if (paths.empty()) return;
+    bool folder = false;
+    std::string first_file;   // 第一個不是資料夾的
+    for (const std::string& path : paths) {
+        SDL_PathInfo info{};
+        if (!SDL_GetPathInfo(path.c_str(), &info)) continue;
+        if (info.type == SDL_PATHTYPE_DIRECTORY) folder = true;
+        else if (first_file.empty()) first_file = path;
+    }
+    // 拖進來的是不是一批圖片：有資料夾、不只一個檔案，或來源已經是圖片序列而拖進來的是圖片
+    const bool sequence = folder || paths.size() > 1 || (settings.source_kind == SourceKind::images && ImageSequence::is_image(paths.front()));
+    if (sequence && !ImageSequence::files(paths).empty()) {
+        set_source_kind(SourceKind::images);
+        open_images(paths, true);
+        return;
+    }
+    if (first_file.empty()) {
+        // 拖進來的只有資料夾，裡面沒有圖片：來源不動，在底列說明
+        notice = L("選的項目裡沒有可以讀取的圖片");
+        return;
+    }
+    // 其餘的當成在「影片檔」那裡選了它（影片或圖片）；拖了好幾個不是圖片的檔案時用第一個
+    set_source_kind(SourceKind::video);
+    open_video(first_file, true);
+}
+
+/// 圖片序列的預覽：「下一張要送的」那一張縮成 96×72、印上畫布的樣子。位置、縮放方式或畫布變了就重算。
+/// 一次只算一張：還在算的時候位置又變了（拖著滑桿），等這一張算完再算最新的那一張，不會越積越多。
+void App::refresh_image_preview() {
+    if (image_preview_loading_) return;
+    const std::optional<std::string> path = next_image();
+    if (!path) return;
+    const std::shared_ptr<const CanvasLayer> canvas = current_canvas();
+    const ImagePreviewKey key{*path, settings.scale_mode, canvas_version_};
+    if (image_preview_key_ && key == *image_preview_key_) return;
+    image_preview_loading_ = true;
+    const int epoch = source_epoch_;
+    // 順便把再下一張也先讀好：發射中輪到它的時候不必等（幾千萬像素的相片要讀一陣子）
+    const std::string ahead = image_files[static_cast<std::size_t>(image_index + 1) % image_files.size()];
+    preview_worker_->post([this, key, canvas, epoch, ahead] {
+        const SourceFramePtr frame = images_.picture(key.path);
+        std::optional<Picture> scaled;
+        PicturePtr shown;
+        if (frame) {
+            scaled = scale_frame(*frame, key.scale);
+            shown = std::make_shared<Picture>(canvas ? canvas->apply(*scaled) : *scaled);
+        }
+        post_main([this, key, epoch, frame, scaled, shown] {
+            image_preview_loading_ = false;
+            if (epoch != source_epoch_) return;   // 這段時間裡換了來源，或換了一批圖片
+            if (!frame) {
+                remove_unreadable_images({key.path});   // 下一次 ui_tick 改算接替它的那一張
+                return;
+            }
+            image_preview_key_ = key;
+            last_source_rgb_ = scaled;
+            source_preview = shown;
+            source_size = std::make_pair(frame->shown_width(), frame->shown_height());
+        });
+        if (ahead != key.path) images_.picture(ahead);
+    });
+}
+
+/// 讀不到的圖片（檔案不見了、壞了）從序列裡拿掉，並在底列說明。
+/// 位置留在原來那一張上；原來那一張就是被拿掉的，那就是它後面的那一張（後面沒有了就回到第一張）。
+void App::remove_unreadable_images(const std::vector<std::string>& unreadable) {
+    std::vector<std::string> gone;
+    for (const std::string& path : unreadable) {
+        if (std::find(image_files.begin(), image_files.end(), path) != image_files.end() && std::find(gone.begin(), gone.end(), path) == gone.end()) gone.push_back(path);
+    }
+    if (gone.empty()) return;
+    const auto is_gone = [&gone](const std::string& path) { return std::find(gone.begin(), gone.end(), path) != gone.end(); };
+    int kept_before = 0;
+    for (int i = 0; i < image_index && i < static_cast<int>(image_files.size()); ++i) {
+        if (!is_gone(image_files[static_cast<std::size_t>(i)])) ++kept_before;
+    }
+    image_files.erase(std::remove_if(image_files.begin(), image_files.end(), is_gone), image_files.end());
+    image_index = kept_before < static_cast<int>(image_files.size()) ? kept_before : 0;
+    if (gone.size() == 1) notice = LF("無法讀取圖片「%@」，已從序列中拿掉", {base_name(gone.front())});
+    else notice = LF("有 %d 張圖片無法讀取，已從序列中拿掉", {static_cast<int>(gone.size())});
+    note("圖片序列：拿掉讀不到的 " + std::to_string(gone.size()) + " 張（" + base_name(gone.front()) + (gone.size() > 1 ? "…" : "") + "），剩 " + std::to_string(image_files.size()) + " 張");
+    if (image_files.empty() && settings.source_kind == SourceKind::images) {
+        clear_source_frame();
+        source_message = L("選的圖片都無法讀取");
+    }
+}
+
+/// 圖片序列：讀「下一張要送的」那一張，縮成 96×72。讀不到的從序列裡拿掉，改讀它後面那一張
+/// （勾了循環播放的話，找到最後一張還沒有，再從第一張找）。都讀不到時 rgb 是空的、last 是 true。
+/// 位置在這一格確定要用的時候才往後移（見 accept）：取了之後才發現這次發射已經取消的話，這一張就不算取走。
+void App::capture_next_image(std::function<void(SourceCapture)> completion) {
+    std::vector<std::string> candidates;
+    if (!image_files.empty()) {
+        const std::ptrdiff_t start = std::clamp<std::ptrdiff_t>(image_index, 0, static_cast<std::ptrdiff_t>(image_files.size()) - 1);
+        candidates.assign(image_files.begin() + start, image_files.end());
+        if (settings.loop_images) candidates.insert(candidates.end(), image_files.begin(), image_files.begin() + start);
+    }
+    const ScaleMode mode = settings.scale_mode;
+    preview_worker_->post([this, candidates, mode, completion] {
+        std::vector<std::string> unreadable;
+        SourceCapture capture;
+        for (const std::string& path : candidates) {
+            if (const SourceFramePtr frame = images_.picture(path)) {
+                capture.rgb = scale_frame(*frame, mode);
+                capture.image = path;
+                break;
+            }
+            unreadable.push_back(path);
+        }
+        capture.last = !capture.rgb.has_value();
+        post_main([this, unreadable, capture, completion] {
+            remove_unreadable_images(unreadable);
+            // 後面沒有讀得到的了：這一輪到此為止，位置回到第一張
+            if (!capture.rgb) image_index = 0;
+            completion(capture);
+        });
+    });
+}
+
+/// 取到的這一格確定要拿去編碼了。來源是圖片序列時：位置往後移一張（下一次取到的是下一張），
+/// 並記下這一張還沒排進輸出佇列（見 put_back_image）。
+/// 回傳來源是不是到這一格為止（影片播完了；不循環的圖片序列送到最後一張）：是的話，這一張排進去之後就收尾。
+bool App::accept(const SourceCapture& capture) {
+    if (!capture.image) return capture.last;
+    tx_pending_image_ = capture.image;
+    const auto found = std::find(image_files.begin(), image_files.end(), *capture.image);
+    if (found == image_files.end()) return false;   // 這段時間裡換了一批圖片
+    const std::size_t position = static_cast<std::size_t>(found - image_files.begin());
+    const bool at_end = position + 1 >= image_files.size();
+    image_index = at_end ? 0 : static_cast<int>(position) + 1;
+    return at_end && !settings.loop_images;
+}
+
+/// 圖片序列：取走了卻沒有完整送出去的那一張退回去，下一次取到的就是它。
+void App::put_back_image(const std::optional<std::string>& path) {
+    if (!path) return;
+    const auto found = std::find(image_files.begin(), image_files.end(), *path);
+    if (found == image_files.end()) return;
+    const int index = static_cast<int>(found - image_files.begin());
+    if (index == image_index) return;
+    image_index = index;
+    note("圖片序列：「" + base_name(*path) + "」沒有送完，下一次從它開始");
+}
+
 /// 每 0.1 秒一次：把這段時間累積的結果一起反映到畫面上。
 void App::ui_tick() {
     schedule_tick();   // 定時發射：到時間了嗎
@@ -687,7 +963,8 @@ void App::ui_tick() {
         if (!scrubbing_) video_position = video_.position();
         video_playing = video_.is_playing();
     }
-    refresh_preview();
+    if (settings.source_kind == SourceKind::images) refresh_image_preview();
+    else refresh_preview();
 }
 
 void App::publish_transmit_display() {
@@ -728,8 +1005,15 @@ void App::refresh_preview() {
     });
 }
 
-/// 取來源當下那一格（縮成 96×72，還沒有印上畫布的字）。沒有新的畫面時沿用上一格。
-void App::capture_source_frame(std::function<void(std::optional<Picture>)> completion) {
+/// 取來源當下那一格（縮成 96×72，還沒有印上畫布的字）。鏡頭與影片檔沒有新的畫面時沿用上一格；
+/// 圖片序列取的是「下一張要送的」那一張（見 capture_next_image）。取到之後確定要用，再呼叫 accept。
+void App::capture_source_frame(std::function<void(SourceCapture)> completion) {
+    if (settings.source_kind == SourceKind::images) {
+        capture_next_image(std::move(completion));
+        return;
+    }
+    // 來源的影片已經播完：這次取到的是它的最後一格
+    const bool last = video_finished();
     if (settings.source_kind == SourceKind::video && video_.is_open() && !opening_video_) {
         std::uint64_t version = 0;
         SourceFramePtr frame = video_.current_frame(&version);
@@ -742,9 +1026,11 @@ void App::capture_source_frame(std::function<void(std::optional<Picture>)> compl
     const SourceFramePtr frame = latest_frame_;
     const ScaleMode mode = settings.scale_mode;
     const std::optional<Picture> fallback = last_source_rgb_;
-    preview_worker_->post([this, frame, mode, fallback, completion] {
-        const std::optional<Picture> picture = frame ? std::optional<Picture>(scale_frame(*frame, mode)) : fallback;
-        post_main([completion, picture] { completion(picture); });
+    preview_worker_->post([this, frame, mode, fallback, last, completion] {
+        SourceCapture capture;
+        capture.rgb = frame ? std::optional<Picture>(scale_frame(*frame, mode)) : fallback;
+        capture.last = last;
+        post_main([completion, capture] { completion(capture); });
     });
 }
 
@@ -766,6 +1052,17 @@ bool App::demo_grab_video_frame() {
     source_preview = std::make_shared<Picture>(apply_canvas(scaled));
     source_size = std::make_pair(frame->shown_width(), frame->shown_height());
     video_position = video_.position();
+    return true;
+}
+
+bool App::demo_load_image() {
+    const std::optional<std::string> path = next_image();
+    const SourceFramePtr frame = path ? ImageSequence::load(*path) : nullptr;
+    if (!frame) return false;
+    const Picture scaled = scale_frame(*frame, settings.scale_mode);
+    last_source_rgb_ = scaled;
+    source_preview = std::make_shared<Picture>(apply_canvas(scaled));
+    source_size = std::make_pair(frame->shown_width(), frame->shown_height());
     return true;
 }
 
@@ -827,19 +1124,25 @@ void App::start_transmit(bool from_start) {
     tx_tail_state_ = 0;
     tx_display_.reset();
     tx_last_rgb_.reset();
+    tx_pending_image_.reset();
+    tx_ends_after_first_ = false;
     const std::string callsign = settings.callsign;
     const int mode_id = mode->id;
     note("按下發射：模式 " + std::to_string(mode_id));
     const std::function<void()> encode_first = [this, session, callsign, mode_id] {
         if (session != tx_session_) return;
-        capture_source_frame([this, session, callsign, mode_id](std::optional<Picture> rgb) {
+        capture_source_frame([this, session, callsign, mode_id](SourceCapture capture) {
             if (session != tx_session_) return;
-            if (!rgb) {
+            if (!capture.rgb) {
                 fail_transmit(L("沒有來源畫面可以發射"));
                 return;
             }
-            tx_last_rgb_ = rgb;
-            const Picture picture = apply_canvas(*rgb);   // 畫布的字在這裡印上去；tx_last_rgb_ 留的是沒有印字的
+            // 圖片序列只剩這一張要送（沒有勾循環播放）：它排進去之後就收尾（見 go_on_air）。
+            // 影片不會在第一張就播完（停在結尾的影片，下面已經先回到開頭了）
+            const bool ended = accept(capture);
+            tx_ends_after_first_ = ended && capture.image.has_value();
+            tx_last_rgb_ = capture.rgb;
+            const Picture picture = apply_canvas(*capture.rgb);   // 畫布的字在這裡印上去；tx_last_rgb_ 留的是沒有印字的
             tx_worker_->post([this, session, callsign, mode_id, picture] {
                 // 上一次若有編好卻沒送出去的幀（取消、PTT 失敗），先取消它，再把重取樣濾波器清乾淨
                 CoreTransmitter& transmitter = engine_->transmitter;
@@ -961,6 +1264,8 @@ void App::go_on_air(EncodedFrame first, int session) {
     tx_pulled_at_ = uptime_seconds();
     tx_phase = TxPhase::transmitting;
     if (!enqueue(first)) return;
+    // 圖片序列只剩這一張：不再準備下一張，送完它就收尾
+    if (tx_ends_after_first_) stop_after_queued_frames();
     // 來源是影片檔：開始送音訊的同時讓影片開始播放（已經在播的不動）。
     // 不循環的影片播完之後，再送出它的最後一格就自動停止（見 prepare_next_frame）。
     if (settings.source_kind == SourceKind::video && video_.is_open() && !opening_video_ && !video_is_image && !video_.is_playing()) {
@@ -989,6 +1294,8 @@ bool App::enqueue(const EncodedFrame& frame) {
     on_air.samples = frame.samples;
     on_air.preview = frame.preview;
     on_air.number = tx_next_number_;
+    on_air.image = tx_pending_image_;
+    tx_pending_image_.reset();
     on_air_.push_back(std::move(on_air));
     ++tx_next_number_;
     tx_preparing_ = false;
@@ -1067,16 +1374,26 @@ void App::prepare_next_frame() {
     tx_preparing_ = true;
     const int session = tx_session_;
     const double started = uptime_seconds();
-    // 來源的影片已經播完：這次取到的是它的最後一格，這一張排進去之後就收尾
-    const bool last_picture = video_finished();
-    capture_source_frame([this, session, started, last_picture](std::optional<Picture> captured) {
+    capture_source_frame([this, session, started](SourceCapture capture) {
         if (session != tx_session_) return;
-        // 來源一時沒有畫面（剛切換來源）：重送上一格，不要讓電台空著發射
-        const std::optional<Picture> rgb = captured ? captured : tx_last_rgb_;
-        if (tx_phase != TxPhase::transmitting || !rgb) {
+        if (tx_phase != TxPhase::transmitting) {
             tx_preparing_ = false;
             return;
         }
+        // 圖片序列已經沒有圖片可以送（剩下的都讀不到，底列有說明）：不重送上一張，目前這張送完就收尾
+        if (!capture.rgb && capture.last) {
+            tx_preparing_ = false;
+            stop_after_queued_frames();
+            return;
+        }
+        // 來源一時沒有畫面（剛切換來源）：重送上一格，不要讓電台空著發射
+        const std::optional<Picture> rgb = capture.rgb ? capture.rgb : tx_last_rgb_;
+        if (!rgb) {
+            tx_preparing_ = false;
+            return;
+        }
+        // 來源到這一格為止（影片播完了，這是它的最後一格；不循環的圖片序列送到最後一張）：這一張排進去之後就收尾
+        const bool last_picture = accept(capture);
         tx_last_rgb_ = rgb;
         const Picture picture = apply_canvas(*rgb);   // 發射中改了畫布的字，下一張就照新的印
         tx_worker_->post([this, session, started, last_picture, picture] {
@@ -1093,6 +1410,9 @@ void App::prepare_next_frame() {
                         tx_worker_->post([this] { engine_->transmitter.discard_last(); });
                         note("停止時下一張剛編好：不送");
                     }
+                    // 圖片序列：這一張沒有送出去，退回去（按停止的那一刻已經退過的話，這裡沒有東西可退）
+                    put_back_image(tx_pending_image_);
+                    tx_pending_image_.reset();
                     tx_preparing_ = false;
                 }
             });
@@ -1103,13 +1423,18 @@ void App::prepare_next_frame() {
 /// 停止發射：送完目前這張後放開 PTT、回到接收。
 void App::stop_transmit() {
     switch (tx_phase) {
-    case TxPhase::transmitting:
+    case TxPhase::transmitting: {
         tx_phase = TxPhase::stopping;
         tx_stopping_at_ = uptime_seconds();
         pause_video_with_transmit();   // 之後不會再取新的畫面，影片不必等這一張送完才停
-        drop_queued_frame();
+        const std::optional<OnAirFrame> dropped = drop_queued_frame();
+        // 圖片序列：取走了卻不會送出去的退回去，下一次發射從它開始——已經排進佇列又被拿掉的那一張；
+        // 沒有的話是正在編碼的那一張（兩張都有時，被拿掉的那一張在前面）
+        put_back_image(dropped && dropped->image ? dropped->image : tx_pending_image_);
+        tx_pending_image_.reset();
         if (!tx_preparing_) queue_tail();
         break;
+    }
     case TxPhase::starting:
         // 還沒開始送：直接取消
         fail_transmit(std::nullopt);
@@ -1119,11 +1444,11 @@ void App::stop_transmit() {
     }
 }
 
-/// 來源的影片播完了，它的最後一格也已經排進輸出佇列：和按下停止一樣收尾（送完、補尾巴、放開 PTT、回到接收），
-/// 差別是不拿掉已經排進去的那一張——對方要看得到影片的結尾。
+/// 來源的影片播完了（或圖片序列送到最後一張了），最後那一張也已經排進輸出佇列：和按下停止一樣收尾
+/// （送完、補尾巴、放開 PTT、回到接收），差別是不拿掉已經排進去的那一張——對方要看得到結尾。
 void App::stop_after_queued_frames() {
     if (tx_phase != TxPhase::transmitting) return;
-    note("影片播完：送完最後一張就停止發射");
+    note(std::string(settings.source_kind == SourceKind::images ? "圖片序列送完" : "影片播完") + "：送完最後一張就停止發射");
     tx_phase = TxPhase::stopping;
     tx_stopping_at_ = uptime_seconds();
     if (!tx_preparing_) queue_tail();
@@ -1141,16 +1466,17 @@ void App::pause_video_with_transmit() {
     note("發射停止：影片跟著暫停");
 }
 
-/// 「送完目前這張」就停：下一張如果已經排進輸出佇列、但還沒開始播，把它拿掉。
-void App::drop_queued_frame() {
-    if (!engine_ || on_air_.empty()) return;
-    const OnAirFrame& next = on_air_.back();
-    if (!engine_->output.discard_queued(next.start)) return;
+/// 「送完目前這張」就停：下一張如果已經排進輸出佇列、但還沒開始播，把它拿掉。回傳拿掉的那一張；沒有拿掉任何東西時是空的。
+std::optional<App::OnAirFrame> App::drop_queued_frame() {
+    if (!engine_ || on_air_.empty()) return std::nullopt;
+    if (!engine_->output.discard_queued(on_air_.back().start)) return std::nullopt;
+    OnAirFrame next = std::move(on_air_.back());
+    on_air_.pop_back();
     tx_end_ = next.start;
     tx_next_number_ = next.number;
-    on_air_.pop_back();
     tx_worker_->post([this] { engine_->transmitter.discard_last(); });   // 發射機也回到編它之前的狀態（見 queue_tail）
     note("停止時下一張已經排進佇列但還沒開始播：拿掉");
+    return next;
 }
 
 // 最後補上重取樣濾波器的尾巴與一小段靜音，確定整張都送出去了才放開 PTT。
@@ -1193,6 +1519,18 @@ void App::fail_transmit(const std::optional<std::string>& message) {
 void App::end_transmit(const std::optional<std::string>& failure) {
     // 送到一半出錯才會在「發射中」直接走到這裡（按停止的話，當下就暫停過了；之後使用者自己又按播放的不再管）
     if (tx_phase == TxPhase::transmitting) pause_video_with_transmit();
+    // 圖片序列：沒有完整送出去的第一張退回去，下一次發射從它開始——送到一半被切掉的（立刻停止、輸出裝置出問題）、
+    // 排進去了還沒輪到的，或還沒開始送就取消的那一張。正常送完的話每一張都播完了，沒有東西要退。
+    const std::int64_t played = engine_ ? engine_->output.played_samples() : 0;
+    std::optional<std::string> unfinished = tx_pending_image_;
+    for (const OnAirFrame& frame : on_air_) {
+        if (frame.end > played && frame.image) {
+            unfinished = frame.image;
+            break;
+        }
+    }
+    put_back_image(unfinished);
+    tx_pending_image_.reset();
     ++tx_session_;
     tx_preparing_ = false;
     tx_last_rgb_.reset();
@@ -1294,7 +1632,7 @@ void App::fire_schedule(const std::string& label) {
     schedule_cut_short_ = false;
     schedule_restore_source_.reset();
     if (settings.source_kind != SourceKind::video) {
-        // 來源是鏡頭：這一次改用影片檔，結束後換回去（finish_scheduled_run）
+        // 來源是鏡頭（或圖片序列）：這一次改用影片檔，結束後換回去（finish_scheduled_run）
         schedule_restore_source_ = settings.source_kind;
         settings.source_kind = SourceKind::video;
         source_message.reset();
@@ -1372,6 +1710,8 @@ std::string App::schedule_summary() const {
 bool App::video_plays_once() const {
     return settings.source_kind == SourceKind::video && video_name.has_value() && !video_is_image && (!settings.loop_video || scheduled_run);
 }
+
+bool App::images_play_once() const { return settings.source_kind == SourceKind::images && !image_files.empty() && !settings.loop_images; }
 
 std::string App::clock_text(double seconds) {
     const int total = static_cast<int>(std::max(seconds, 0.0));

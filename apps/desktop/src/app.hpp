@@ -95,6 +95,10 @@ public:
     double video_duration = 0;
     double video_position = 0;
     bool video_playing = false;
+    /// 圖片序列：要送的圖片檔（路徑），照發射的順序。空的就是還沒選。要換一批請用 open_images
+    std::vector<std::string> image_files;
+    /// 圖片序列：下一張要送的是第幾張（0 起算）。右側欄的預覽就是這一張。要改請用 select_image
+    int image_index = 0;
 
     // ---- 定時發射
     bool schedule_armed = false;                       // 不存進設定：每次開 app 都是關的
@@ -161,7 +165,22 @@ public:
     static std::vector<ReceivedFrame> sequence(std::uint64_t id, const std::deque<ReceivedFrame>& history);
     std::vector<ReceivedFrame> displayed_sequence() const;
     static std::string video_file_name(const std::vector<ReceivedFrame>& frames);
-    /// 把主畫面顯示的那一張所在的一段存成影片檔（.mp4，靠 ffmpeg）。completion 在主執行緒上呼叫（測試用）。
+    /// 影片裡的一張畫面：從影片的第幾秒開始顯示，顯示到下一張開始為止。label 不是空的話，印在這一張的左上角（「SNR 12.3 dB」）。
+    struct VideoPicture {
+        PicturePtr picture;
+        double start = 0;
+        std::string label;
+    };
+    struct VideoTimeline {
+        std::vector<VideoPicture> pictures;
+        double last_hold = 0;   // 最後一張停留幾秒
+    };
+    /// 影片的時間軸：每一張從它收到的時刻開始顯示，到下一張收到為止，所以影片的快慢和當時收到的一樣；
+    /// 最後一張停留它那個模式一張的長度（至少一秒）。
+    /// stamp_snr：每一張的左上角印上收到它當下的訊雜比（寫法和主畫面上疊的標示一樣：「SNR 12.3 dB」）。
+    static VideoTimeline video_timeline(const std::vector<ReceivedFrame>& frames, bool stamp_snr = false);
+    /// 把一段畫面存成影片檔（.mp4，靠 ffmpeg）。completion 在主執行緒上呼叫（測試用）。
+    /// 要不要在每一張的左上角印上訊雜比，照設定（settings.stamp_video_snr，按「儲存影片」時的那個選項）。
     void export_sequence(const std::vector<ReceivedFrame>& frames, const std::string& path, std::function<void(bool)> completion = {});
 
     // ---- 發射來源
@@ -173,6 +192,16 @@ public:
     void open_video(const std::string& path, bool remember, std::optional<bool> autoplay = std::nullopt, std::function<void(bool)> completion = {});
     void toggle_video_playback();
     void scrub_video(double seconds, bool editing);
+    /// 圖片序列：換一批圖片。選到的資料夾換成它裡面的圖片，照檔名排好，從第一張開始。回傳有幾張；
+    /// 一張圖片都沒有的話維持原來那一批，在底列說明。remember：記下來，下次啟動時自動帶回來。
+    int open_images(const std::vector<std::string>& selection, bool remember);
+    /// 圖片序列：改「下一張要送的」是第幾張（0 起算；超出範圍就停在第一張或最後一張）。
+    void select_image(int index);
+    /// 下一張要送的那個圖片檔；還沒選圖片時是空的。
+    std::optional<std::string> next_image() const;
+    /// 拖進視窗的檔案：一個影片檔（或一張圖片）當成在「影片檔」那裡選了它；好幾張圖片、資料夾，
+    /// 或來源已經是圖片序列時拖進來的圖片，當成選了一批圖片序列。發射來源也換過去。
+    void open_dropped(const std::vector<std::string>& paths);
     void set_canvas_enabled(bool on);
     /// 把畫布的字印到一張來源畫面上（畫布沒開就原樣回傳）。
     Picture apply_canvas(const Picture& picture);
@@ -195,6 +224,8 @@ public:
     std::uint64_t demo_video_frame_version() const;
     /// 把影片目前那一格縮成預覽（live 是 false 時 ui_tick 不跑，示範圖要自己取）。還沒有任何一格時回傳 false。
     bool demo_grab_video_frame();
+    /// 把「下一張要送的」那一張圖片直接讀進來當預覽（同樣是給示範圖用的）。讀到了回傳 true。
+    bool demo_load_image();
     /// 測試用：把一張畫面直接當成來源目前的那一格（不經過鏡頭或檔案）。
     void debug_set_source_frame(SourceFramePtr frame);
 
@@ -211,6 +242,8 @@ public:
     bool is_on_air() const { return tx_phase == TxPhase::transmitting || tx_phase == TxPhase::stopping; }
     /// 發射來源是只播一次的影片檔（沒有勾循環播放，或這一次是定時發射）
     bool video_plays_once() const;
+    /// 發射來源是沒有勾循環播放的圖片序列：從預覽的那一張送到最後一張，送完自動停止發射。
+    bool images_play_once() const;
     static std::string clock_text(double seconds);         // 「00:23」
     static double level_fraction(double db, double floor = -50);
     static std::string snr_text(double db);                // 「12.3 dB」
@@ -224,6 +257,20 @@ private:
         std::vector<float> samples;
         PicturePtr preview;
         int number = 0;
+        std::optional<std::string> image;   // 來源是圖片序列時，這一張是哪一個圖片檔
+    };
+    /// 取來源的一格的結果（見 capture_source_frame）。
+    struct SourceCapture {
+        std::optional<Picture> rgb;         // 縮成 96×72 的畫面，還沒有印上畫布的字；來源沒有畫面時是空的
+        bool last = false;                  // 來源到此為止：只播一次的影片播完了（這是它的最後一格），或圖片序列已經沒有圖片可以送（這時 rgb 是空的）
+        std::optional<std::string> image;   // 圖片序列：這一格是哪一個圖片檔
+    };
+    /// 圖片序列的預覽是照什麼算出來的：哪一張、哪一種縮放方式、哪一版的畫布。和現在該有的不同就重算（見 refresh_image_preview）
+    struct ImagePreviewKey {
+        std::string path;
+        ScaleMode scale = ScaleMode::fill;
+        int canvas = 0;
+        bool operator==(const ImagePreviewKey& other) const { return path == other.path && scale == other.scale && canvas == other.canvas; }
     };
     struct TransmitDisplay {
         int number = 0;
@@ -248,7 +295,15 @@ private:
     void ui_tick();
     void publish_transmit_display();
     void refresh_preview();
-    void capture_source_frame(std::function<void(std::optional<Picture>)> completion);
+    void capture_source_frame(std::function<void(SourceCapture)> completion);
+
+    void set_images(std::vector<std::string> files);
+    void reopen_last_images();
+    void refresh_image_preview();
+    void remove_unreadable_images(const std::vector<std::string>& unreadable);
+    void capture_next_image(std::function<void(SourceCapture)> completion);
+    bool accept(const SourceCapture& capture);
+    void put_back_image(const std::optional<std::string>& path);
 
     void wait_for_video_frame(int session, std::uint64_t since, int attempts, std::function<void()> then);
     bool video_finished() const;
@@ -259,7 +314,7 @@ private:
     void prepare_next_frame();
     void stop_after_queued_frames();
     void pause_video_with_transmit();
-    void drop_queued_frame();
+    std::optional<OnAirFrame> drop_queued_frame();
     void queue_tail();
     void finish_transmit();
     void fail_transmit(const std::optional<std::string>& message);
@@ -277,6 +332,9 @@ private:
     std::unique_ptr<Engine> engine_;
     CameraSource camera_;
     FileSource video_;
+    ImageSequence images_;   // 只在 preview_worker_ 上使用
+    std::optional<ImagePreviewKey> image_preview_key_;
+    bool image_preview_loading_ = false;
     std::uint64_t next_frame_id_ = 1;
 
     // 來源目前的那一格
@@ -319,6 +377,8 @@ private:
     bool tx_preparing_ = false;
     int tx_tail_state_ = 0;         // 0：還沒排尾巴，1：正在取，2：已排入
     std::optional<Picture> tx_last_rgb_;   // 這次發射最近送出的那一格；來源一時沒有畫面時重送它
+    std::optional<std::string> tx_pending_image_;   // 圖片序列：已經取走、正在編碼，還沒排進輸出佇列的那一張（見 put_back_image）
+    bool tx_ends_after_first_ = false;              // 圖片序列只剩一張要送：第一張排進去之後就收尾（見 go_on_air）
     std::int64_t tx_pulled_frames_ = -1;
     double tx_pulled_at_ = 0;
     double tx_stopping_at_ = 0;

@@ -1,19 +1,22 @@
-// 發射來源：鏡頭（SDL3 的相機 API）與檔案（影片或圖片），以及把來源的一格縮成 96×72。對應 macOS 版的 VideoSources.swift。
+// 發射來源：鏡頭（SDL3 的相機 API）、檔案（影片或圖片）與圖片序列，以及把來源的一格縮成 96×72。
+// 對應 macOS 版的 VideoSources.swift 與 ImageSequence.swift。
 //
 // 影片檔靠使用者電腦上的 ffmpeg 解碼（這個程式自己不帶影片的解碼器）：播放時開一個 ffmpeg 把畫面從管線送過來，
 // 這裡照實際的速度一格一格換上去；暫停就把它結束、記住位置，再播放或移動位置時從那個位置重新開一個。
-// 圖片（JPEG、PNG、BMP、GIF）自己讀，不需要 ffmpeg。
+// 圖片（JPEG、PNG、BMP、GIF）自己讀，不需要 ffmpeg；JPEG 照檔案裡記載的方向（EXIF）轉正。
 #pragma once
 
 #include <SDL3/SDL.h>
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "core_bridge.hpp"
@@ -21,7 +24,11 @@
 
 namespace nbtvgui {
 
-enum class SourceKind { camera, video };
+enum class SourceKind {
+    camera,
+    video,
+    images,   // 圖片序列：選好的一批圖片，一張一張送
+};
 enum class ScaleMode {
     fill,   // 填滿：等比例放大到蓋滿 4:3，裁掉多出來的部分
     fit,    // 完整：整張都留著，空出來的地方補黑
@@ -45,7 +52,47 @@ using SourceFramePtr = std::shared_ptr<const SourceFrame>;
 Picture scale_frame(const SourceFrame& frame, ScaleMode mode);
 
 /// 讀一張圖片檔（JPEG、PNG、BMP、GIF…）。讀不了回傳空的。
+/// 手機直拍的相片存的是橫的像素加上「要轉 90 度」的記號（EXIF 的方向）：JPEG 照那個記號轉正。
+/// 有很多格的檔案（GIF 動畫）只取第一格。
 SourceFramePtr load_image_file(const std::string& path);
+
+/// JPEG 檔的位元組裡記載的顯示方向（EXIF 的 1–8）；沒有記載、看不懂，或不是 JPEG 時是 1（不必轉）。
+int jpeg_orientation(const std::uint8_t* bytes, std::size_t size);
+/// 照記載的方向把畫面轉正（orientation 是 EXIF 的 1–8；5–8 轉了 90 度，寬高會對調）。
+std::shared_ptr<SourceFrame> oriented(std::shared_ptr<SourceFrame> frame, int orientation);
+
+/// 發射來源「圖片序列」：使用者選的一批圖片檔，照檔名排好，發射時一張一張送出去。
+/// 這裡只管檔案：哪些是圖片、怎麼排、把一張圖讀進來（照記載的方向轉正、縮到夠用的大小）。
+/// 送到第幾張、什麼時候換下一張由 App 決定（見 app.cpp「發射來源：圖片序列」那一段）。對應 macOS 版的 ImageSequence.swift。
+class ImageSequence {
+public:
+    /// 讀得進來的圖片的副檔名（小寫，不含點）：jpg、jpeg、png、bmp、gif…
+    static const std::vector<std::string>& extensions();
+    /// 這個檔案是不是讀得進來的圖片。只看副檔名，不開檔。
+    static bool is_image(const std::string& path);
+    /// 檔名的順序：數字照大小排（2.jpg 在 10.jpg 前面），不分大小寫。a 排在 b 前面時回傳 true。
+    static bool natural_less(const std::string& a, const std::string& b);
+    /// 使用者選的東西 → 要送的圖片檔，照發射的順序排好。
+    /// 選到的資料夾換成它裡面的圖片（只看那一層，不往子資料夾裡找；隱藏的檔案不算）；不是圖片的檔案略過；同一個檔案只算一次。
+    /// 在開檔的對話框裡先點哪一張、後點哪一張不影響順序（對話框本來就不保證照點的順序給）。
+    static std::vector<std::string> files(const std::vector<std::string>& selection);
+
+    /// 讀進來的圖，短邊至少留這麼多像素：送出去的畫面長邊（96）的四倍，最後縮成 96×72 時品質不受影響。
+    static constexpr int kShortSidePixels = 4 * (kImageWidth > kImageHeight ? kImageWidth : kImageHeight);
+    /// 把一張圖讀進來：照記載的方向轉正、縮到夠用的大小（幾千萬像素的相片不必整張留著）。
+    /// 讀不到（檔案不見了、壞了、其實不是圖片）回傳空的。原圖轉正之後的大小在 shown_width()、shown_height()。
+    static SourceFramePtr load(const std::string& path);
+
+    /// 同 load，但最近讀過的幾張（預覽的那一張、它的下一張，再多留一張）直接給。
+    /// 只在一條執行緒上使用（App 的 preview_worker_），所以不必上鎖。
+    SourceFramePtr picture(const std::string& path);
+    /// 換了一批圖片：之前讀進來的都丟掉（同一個檔名可能已經是不同的內容）。
+    void forget() { recent_.clear(); }
+
+private:
+    static constexpr std::size_t kKeep = 3;
+    std::vector<std::pair<std::string, SourceFramePtr>> recent_;   // 最新的在最後
+};
 
 struct CameraInfo {
     std::string name;

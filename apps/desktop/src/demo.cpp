@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <complex>
+#include <cstdio>
 #include <cstring>
 #include <thread>
 
@@ -219,6 +220,38 @@ bool write_picture_png(const Picture& picture, const std::string& path, int zoom
         }
     }
     return write_png(path, pixels.data(), width, height, 3);
+}
+
+bool write_picture_jpeg(const Picture& picture, const std::string& path, int zoom, int orientation, bool little_endian, bool after_jfif) {
+    const int width = kImageWidth * zoom, height = kImageHeight * zoom;
+    std::vector<std::uint8_t> pixels(static_cast<std::size_t>(width) * height * 3);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const std::uint8_t* source = picture.rgb.data() + (static_cast<std::size_t>(y / zoom) * kImageWidth + static_cast<std::size_t>(x / zoom)) * 3;
+            std::memcpy(pixels.data() + (static_cast<std::size_t>(y) * width + x) * 3, source, 3);
+        }
+    }
+    std::vector<std::uint8_t> bytes = encode_jpeg(pixels.data(), width, height, 95);
+    if (bytes.size() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8) return false;
+    if (orientation >= 1 && orientation <= 8) {
+        // EXIF 那一段（APP1）：「Exif」、TIFF 的檔頭、只有一項的目錄——0x0112（方向），16 位元的整數一個
+        const std::uint8_t value = static_cast<std::uint8_t>(orientation);
+        std::vector<std::uint8_t> exif = {0xFF, 0xE1, 0x00, 0x22, 'E', 'x', 'i', 'f', 0, 0};
+        const std::vector<std::uint8_t> tiff = little_endian
+            ? std::vector<std::uint8_t>{'I', 'I', 0x2A, 0x00, 0x08, 0, 0, 0, 0x01, 0x00, 0x12, 0x01, 0x03, 0x00, 0x01, 0, 0, 0, value, 0, 0, 0, 0, 0, 0, 0}
+            : std::vector<std::uint8_t>{'M', 'M', 0x00, 0x2A, 0, 0, 0, 0x08, 0x00, 0x01, 0x01, 0x12, 0x00, 0x03, 0, 0, 0, 0x01, 0, value, 0, 0, 0, 0, 0, 0};
+        exif.insert(exif.end(), tiff.begin(), tiff.end());
+        // 放在最前面（緊接在檔頭的兩個位元組後面）；after_jfif 時放在第一段（stb 寫的 JFIF 那一段）後面
+        std::size_t at = 2;
+        if (after_jfif && bytes.size() > 6 && bytes[2] == 0xFF && bytes[3] == 0xE0) at = 4 + ((static_cast<std::size_t>(bytes[4]) << 8) | bytes[5]);
+        if (at > bytes.size()) return false;
+        bytes.insert(bytes.begin() + static_cast<std::ptrdiff_t>(at), exif.begin(), exif.end());
+    }
+    std::FILE* file = std::fopen(path.c_str(), "wb");
+    if (file == nullptr) return false;
+    const bool ok = std::fwrite(bytes.data(), 1, bytes.size(), file) == bytes.size();
+    std::fclose(file);
+    return ok;
 }
 
 bool make_video(const std::string& path, const Picture& picture, int seconds, int fps, int width, int height) {

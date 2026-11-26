@@ -44,15 +44,28 @@ constexpr ImU32 kMenuSelected = rgb(0x2B323B);
 ImTextureRef tex(SDL_Texture* texture) { return ImTextureRef(static_cast<ImTextureID>(reinterpret_cast<std::uintptr_t>(texture))); }
 
 /// 把使用者按到的事（開檔、存檔的對話框選好了）轉回主執行緒：SDL 的對話框可能在別的執行緒上回報。
+/// done_many 有給的話是可以選很多個的對話框：選到的全部交給它；不然只把第一個交給 done。
 struct DialogRequest {
     std::function<void(const std::string&)> done;
+    std::function<void(const std::vector<std::string>&)> done_many;
 };
 
 void SDLCALL dialog_callback(void* userdata, const char* const* files, int) {
     std::unique_ptr<DialogRequest> request(static_cast<DialogRequest*>(userdata));
     if (files == nullptr || files[0] == nullptr) return;   // 出錯或按了取消
+    if (request->done_many) {
+        std::vector<std::string> paths;
+        for (const char* const* file = files; *file != nullptr; ++file) paths.emplace_back(*file);
+        on_main([done = request->done_many, paths] { done(paths); });
+        return;
+    }
     const std::string path = files[0];
     on_main([done = request->done, path] { done(path); });
+}
+
+std::string file_name(const std::string& path) {
+    const std::size_t slash = path.find_last_of("/\\");
+    return slash == std::string::npos ? path : path.substr(slash + 1);
 }
 
 }  // namespace
@@ -135,6 +148,7 @@ void UI::load_fonts() {
     if (mono_bold_ == nullptr) mono_bold_ = mono_;
     io.FontDefault = regular_;
     CanvasLayer::set_fonts(fonts_found_.bold);
+    VideoStamp::set_fonts(fonts_found_.mono_bold);
 }
 
 // ---------------------------------------------------------------- 元件
@@ -252,8 +266,9 @@ float UI::paragraph(ImDrawList* dl, ImFont* font, float size, float x, float y, 
 
 // 版面稿裡的線條圖示，照 macOS 版 Theme.swift 的路徑重畫。(x, y, w, h) 是顯示的範圍。
 void UI::icon(ImDrawList* dl, Icon kind, float x, float y, float w, float h, std::uint32_t color, float line_width) const {
-    const float box_w = kind == Icon::chevrons ? 12.0f : (kind == Icon::pause || kind == Icon::play) ? 12.0f : 16.0f;
-    const float box_h = kind == Icon::chevrons ? 14.0f : (kind == Icon::pause || kind == Icon::play) ? 12.0f : 16.0f;
+    const bool small = kind == Icon::pause || kind == Icon::play || kind == Icon::previous || kind == Icon::next;
+    const float box_w = kind == Icon::chevrons ? 12.0f : small ? 12.0f : 16.0f;
+    const float box_h = kind == Icon::chevrons ? 14.0f : small ? 12.0f : 16.0f;
     const float scale = std::min(w / box_w, h / box_h);
     const float ox = x + (w - box_w * scale) / 2, oy = y + (h - box_h * scale) / 2;
     const auto p = [&](float px, float py) { return ImVec2(ox + px * scale, oy + py * scale); };
@@ -310,6 +325,17 @@ void UI::icon(ImDrawList* dl, Icon kind, float x, float y, float w, float h, std
         dl->AddCircle(p(8, 8), 6 * scale, color, 0, t);
         poly({p(8, 4.8f), p(8, 8), p(10.3f, 9.5f)}, false);
         break;
+    case Icon::image_file:   // 照影片檔那一個的外框畫的：框裡是太陽和山的輪廓
+        dl->AddRect(p(2, 2.5f), p(14, 13.5f), color, 1.5f * scale, t);
+        dl->AddCircle(p(5.8f, 6.1f), 1.1f * scale, color, 0, t);
+        poly({p(2.6f, 11.4f), p(6.3f, 8.6f), p(8.6f, 10.4f), p(10.6f, 8.8f), p(13.4f, 11.2f)}, false);
+        break;
+    case Icon::previous:
+        poly({p(7.5f, 2.5f), p(4, 6), p(7.5f, 9.5f)}, false);
+        break;
+    case Icon::next:
+        poly({p(4.5f, 2.5f), p(8, 6), p(4.5f, 9.5f)}, false);
+        break;
     }
 }
 
@@ -359,7 +385,7 @@ bool UI::button(const char* id, const Rect& rect, const std::string& label, bool
     return clicked && enabled;
 }
 
-/// 分段選擇（鏡頭／影片檔、填滿／完整、上／下）。回傳選到第幾段。
+/// 分段選擇（鏡頭／影片檔／圖片序列、填滿／完整、上／下）。回傳選到第幾段。
 int UI::segmented(const char* id, const Rect& rect, const std::vector<std::string>& labels, int selected, bool enabled) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(ImVec2(rect.x, rect.y), ImVec2(rect.right(), rect.bottom()), kWell, S(7));
@@ -376,8 +402,12 @@ int UI::segmented(const char* id, const Rect& rect, const std::vector<std::strin
         const bool active = i == selected;
         if (active) dl->AddRectFilled(ImVec2(cell.x, cell.y), ImVec2(cell.right(), cell.bottom()), rgb(0x3A424C), S(5.5f));
         ImFont* font = active ? bold_ : regular_;
-        const float w = text_width(font, 12.5f, labels[static_cast<std::size_t>(i)]);
-        text(dl, font, 12.5f, cell.x + (cell.w - w) / 2, cell.y + (cell.h - S(12.5f)) / 2 - S(1.5f), active ? kText : kSecondary, labels[static_cast<std::size_t>(i)]);
+        // 選項多、名稱又長的時候（別的語言）字略縮，不要蓋到隔壁那一格；最多縮到八成
+        float size = 12.5f;
+        const float room = cell.w - S(8), natural = text_width(bold_, size, labels[static_cast<std::size_t>(i)]);
+        if (natural > room && natural > 0) size = std::max(10.0f, size * room / natural);
+        const float w = text_width(font, size, labels[static_cast<std::size_t>(i)]);
+        text(dl, font, size, cell.x + (cell.w - w) / 2, cell.y + (cell.h - S(size)) / 2 - S(1.5f), active ? kText : kSecondary, labels[static_cast<std::size_t>(i)]);
     }
     ImGui::PopID();
     return result;
@@ -591,6 +621,7 @@ void UI::draw(float width, float height) {
 
     draw_mode_menu();
     draw_schedule_menu();
+    draw_save_video_menu();
     draw_settings();
     ImGui::End();
 }
@@ -775,7 +806,9 @@ void UI::draw_picture_panel(const Rect& rect) {
     const Rect image_button{rect.right() - S(12) - image_w, caption_y + (caption - S(30)) / 2, image_w, S(30)};
     const Rect video_button{image_button.x - S(8) - video_w, image_button.y, video_w, S(30)};
     const bool can_save_video = sequence.size() >= 2 && !app_.exporting_video && FileSource::ffmpeg_available();
-    if (button("##savevideo", video_button, save_video_label, can_save_video, &video, count)) save_video();
+    // 按了先跳出一小塊選項（要不要印上訊雜比），在那裡按「儲存…」才開存檔的對話框（見 draw_save_video_menu）
+    save_video_anchor_ = video_button;
+    if (button("##savevideo", video_button, save_video_label, can_save_video, &video, count)) want_save_video_menu_ = true;
     if (app_.exporting_video) tooltip(L("正在存影片檔"));
     else if (sequence.size() < 2) tooltip(LF("這一張前後沒有連續收到的畫面：同一個呼號、空檔不到 %d 秒的才能串成影片", {static_cast<int>(App::kSequenceGapSeconds)}));
     else if (!FileSource::ffmpeg_available()) tooltip(L("要存成影片，這台電腦要先裝 ffmpeg"));
@@ -950,6 +983,7 @@ void UI::draw_side_panel(const Rect& rect) {
     const bool busy = app_.tx_phase != App::TxPhase::idle;
     Settings& settings = app_.settings;
     const bool is_video = settings.source_kind == SourceKind::video && app_.video_name && !app_.video_is_image;
+    const bool is_images = settings.source_kind == SourceKind::images && !app_.image_files.empty();
 
     // 先把會折行的兩段字準備好：它們有多高，決定預覽可以多大
     const ModeInfo* mode = app_.tx_mode();
@@ -958,21 +992,27 @@ void UI::draw_side_panel(const Rect& rect) {
     const float summary_h = paragraph_height(regular_, 12, summary, width);
     std::string hint;
     if (app_.tx_phase == App::TxPhase::stopping) hint = L("正在送完這張；再按一次立刻停止（這張不完整）");
-    else if (busy) hint = app_.scheduled_run ? L("定時發射：影片播完會自動停止，也可以隨時按停止") : app_.video_plays_once() ? L("影片播完會自動停止，也可以隨時按停止") : L("送完目前這張後放開 PTT，自動回到接收");
+    else if (busy && app_.scheduled_run) hint = L("定時發射：影片播完會自動停止，也可以隨時按停止");
+    else if (busy && app_.video_plays_once()) hint = L("影片播完會自動停止，也可以隨時按停止");
+    else if (busy && app_.images_play_once()) hint = L("圖片送完會自動停止，也可以隨時按停止");
+    else if (busy) hint = L("送完目前這張後放開 PTT，自動回到接收");
     else if (settings.callsign.empty()) hint = L("還沒設定呼號，請先到設定裡填寫");
     else if (!app_.can_transmit()) hint = L("等來源有畫面後才能發射");
-    else hint = app_.video_plays_once() ? LF("以 %@ 發射，影片播完自動停止", {settings.callsign}) : LF("以 %@ 發射，停止後自動回到接收", {settings.callsign});
+    else if (app_.video_plays_once()) hint = LF("以 %@ 發射，影片播完自動停止", {settings.callsign});
+    else if (app_.images_play_once()) hint = LF("以 %@ 發射，圖片送完自動停止", {settings.callsign});
+    else hint = LF("以 %@ 發射，停止後自動回到接收", {settings.callsign});
     const float hint_h = paragraph_height(regular_, 11.5f, hint, width);
     // 底下那一塊（輸出音量、發射鈕、說明）與預覽以外的每一列加起來要多高
     const float bottom_block = S(22) + S(14) + S(44) + S(10) + hint_h + S(16);
-    const float below_preview = S(8) + (is_video ? S(34) : 0) + S(26) + S(38) + S(42) + S(14) + S(24) + S(40) + summary_h + S(14);
+    const float below_preview = S(8) + (is_video || is_images ? S(34) : 0) + S(26) + S(38) + S(42) + S(14) + S(24) + S(40) + summary_h + S(14);
     float y = rect.y + S(18);
 
     // ---- 發射來源
     text(dl, bold_, 12, left, y, kSecondary, L("發射來源"));
     y += S(24);
-    const int source = segmented("##source", Rect{left, y, width, S(30)}, {L("鏡頭"), L("影片檔")}, settings.source_kind == SourceKind::camera ? 0 : 1);
-    if (source != (settings.source_kind == SourceKind::camera ? 0 : 1)) app_.set_source_kind(source == 0 ? SourceKind::camera : SourceKind::video);
+    const int current_source = settings.source_kind == SourceKind::camera ? 0 : settings.source_kind == SourceKind::video ? 1 : 2;
+    const int source = segmented("##source", Rect{left, y, width, S(30)}, {L("鏡頭"), L("影片檔"), L("圖片序列")}, current_source);
+    if (source != current_source) app_.set_source_kind(source == 0 ? SourceKind::camera : source == 1 ? SourceKind::video : SourceKind::images);
     y += S(40);
     if (settings.source_kind == SourceKind::camera) {
         Icon camera = Icon::camera;
@@ -997,7 +1037,7 @@ void UI::draw_side_panel(const Rect& rect) {
         }
         ImGui::PopStyleColor(4);
         ImGui::PopStyleVar(2);
-    } else {
+    } else if (settings.source_kind == SourceKind::video) {
         const std::string choose = L("選擇…");
         const float choose_w = text_width(regular_, 12.5f, choose) + S(24);
         const Rect name_box{left, y, width - choose_w - S(8), S(30)};
@@ -1007,6 +1047,50 @@ void UI::draw_side_panel(const Rect& rect) {
         const std::string name = app_.video_name ? *app_.video_name : L("尚未選擇影片檔");
         text(dl, regular_, 12.5f, name_box.x + S(30), name_box.y + S(7), app_.video_name ? kText : kTertiary, fitted(regular_, 12.5f, name, name_box.w - S(40)));
         if (button("##choosevideo", Rect{name_box.right() + S(8), y, choose_w, S(30)}, choose)) choose_video_file();
+    } else {
+        // 圖片序列：框裡寫的是「下一張要送的」那個圖片檔（就是下面預覽的那一張）；「選擇…」換一批圖片
+        const std::string choose = L("選擇…");
+        const float choose_w = text_width(regular_, 12.5f, choose) + S(24);
+        const Rect name_box{left, y, width - choose_w - S(8), S(30)};
+        dl->AddRectFilled(ImVec2(name_box.x, name_box.y), ImVec2(name_box.right(), name_box.bottom()), kWell, S(7));
+        dl->AddRect(ImVec2(name_box.x + 0.5f, name_box.y + 0.5f), ImVec2(name_box.right() - 0.5f, name_box.bottom() - 0.5f), kSeparator, S(7));
+        icon(dl, Icon::image_file, name_box.x + S(9), name_box.y + S(8), S(14), S(14), kSecondary);
+        const std::optional<std::string> next = app_.next_image();
+        const std::string name = next ? file_name(*next) : L("尚未選擇圖片");
+        text(dl, regular_, 12.5f, name_box.x + S(30), name_box.y + S(7), next ? kText : kTertiary, fitted(regular_, 12.5f, name, name_box.w - S(40)));
+        ImGui::SetCursorScreenPos(ImVec2(name_box.x, name_box.y));
+        ImGui::Dummy(ImVec2(name_box.w, name_box.h));
+        tooltip(next ? LF("下一張要送的圖片：%@", {*next}) : L("選擇要依序發射的圖片，或選一個資料夾"));
+        // 系統的開檔對話框一次只能選檔案或選資料夾，所以「選擇…」先問是哪一種
+        const Rect choose_rect{name_box.right() + S(8), y, choose_w, S(30)};
+        if (button("##chooseimages", choose_rect, choose)) ImGui::OpenPopup("##imagesmenu");
+        tooltip(L("選擇要依序發射的圖片（可以多選），或選資料夾：裡面的圖片全部加入。順序照檔名"));
+        const std::string pick_files = L("選擇圖片檔…"), pick_folder = L("選擇資料夾…");
+        const float menu_w = std::max(text_width(regular_, 12.5f, pick_files), text_width(regular_, 12.5f, pick_folder)) + S(28);
+        ImGui::SetNextWindowPos(ImVec2(choose_rect.right() - menu_w - S(12), y + S(34)));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(6), S(6)));
+        ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, S(8));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(S(6), S(5)));
+        ImGui::PushStyleColor(ImGuiCol_PopupBg, kMenu);
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, kMenuSelected);
+        ImGui::PushStyleColor(ImGuiCol_Header, kMenuSelected);
+        ImGui::PushStyleColor(ImGuiCol_Text, kText);
+        if (ImGui::BeginPopup("##imagesmenu")) {
+            close_popup_on_escape();
+            ImGui::PushFont(regular_, 12.5f * scale_);
+            const auto item = [&](const char* id, const std::string& label) {
+                const bool chosen = ImGui::Selectable(label.c_str(), false, ImGuiSelectableFlags_None, ImVec2(menu_w, 0));
+                const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+                note_hit(id, Rect{a.x, a.y, b.x - a.x, b.y - a.y});
+                return chosen;
+            };
+            if (item("##imagesmenu/files", pick_files)) choose_images();
+            if (item("##imagesmenu/folder", pick_folder)) choose_image_folder();
+            ImGui::PopFont();
+            ImGui::EndPopup();
+        }
+        ImGui::PopStyleColor(4);
+        ImGui::PopStyleVar(3);
     }
     y += S(40);
 
@@ -1046,6 +1130,37 @@ void UI::draw_side_panel(const Rect& rect) {
         text(dl, mono_, 11.5f, rect.right() - S(16) - time_w, y + S(6), kSecondary, time);
         y += S(34);
     }
+    // ---- 圖片序列的位置：上一張、下一張、拖到第幾張，以及「第幾張 / 共幾張」。指的都是「下一張要送的」那一張
+    if (is_images) {
+        const int count = static_cast<int>(app_.image_files.size()), index = app_.image_index;
+        const auto step = [&](const char* id, Icon kind, float x, bool enabled, const std::string& title, int target) {
+            const Rect box{x, y, S(26), S(26)};
+            note_hit(id, box);
+            ImGui::SetCursorScreenPos(ImVec2(box.x, box.y));
+            ImGui::BeginDisabled(!enabled);
+            const bool clicked = ImGui::InvisibleButton(id, ImVec2(box.w, box.h));
+            const bool hovered = ImGui::IsItemHovered();
+            ImGui::EndDisabled();
+            tooltip(title);
+            dl->AddRectFilled(ImVec2(box.x, box.y), ImVec2(box.right(), box.bottom()), enabled ? (hovered ? kButtonHover : kButton) : kDisabledFill, S(6));
+            dl->AddRect(ImVec2(box.x + 0.5f, box.y + 0.5f), ImVec2(box.right() - 0.5f, box.bottom() - 0.5f), enabled ? kButtonRing : kSeparator, S(6));
+            icon(dl, kind, box.x + S(7.5f), box.y + S(7.5f), S(11), S(11), enabled ? kText : kTertiary, 1.6f);
+            if (clicked && enabled) app_.select_image(target);
+        };
+        step("##previmage", Icon::previous, left, index > 0, L("上一張圖片"), index - 1);
+        step("##nextimage", Icon::next, left + S(30), index < count - 1, L("下一張圖片"), index + 1);
+        const std::string place = std::to_string(index + 1) + " / " + std::to_string(count);
+        const float place_w = text_width(mono_, 11.5f, place);
+        if (count > 1) {
+            double position = index + 1;
+            const float bar_x = left + S(56) + S(12);
+            const Rect bar{bar_x, y, rect.right() - S(16) - place_w - S(10) - bar_x, S(26)};
+            if (slider("##imageposition", bar, position, 1, count, kRx)) app_.select_image(static_cast<int>(std::lround(position)) - 1);
+            tooltip(L("下一張要送第幾張"));
+        }
+        text(dl, mono_, 11.5f, rect.right() - S(16) - place_w, y + S(6), kSecondary, place);
+        y += S(34);
+    }
     const std::string size_note = app_.source_size ? LF("來源 %d×%d → 送出 96×72", {app_.source_size->first, app_.source_size->second}) : L("來源 — → 送出 96×72");
     text(dl, regular_, 11.5f, left, y, kTertiary, fitted(regular_, 11.5f, size_note, width));
     y += S(26);
@@ -1057,6 +1172,10 @@ void UI::draw_side_panel(const Rect& rect) {
     if (is_video) {
         if (checkbox("##loop", left, y + S(5), fitted(regular_, 12.5f, L("循環播放"), scale_rect.x - left - S(34)), settings.loop_video)) settings.loop_video = !settings.loop_video;
         tooltip(L("沒有勾：按下發射才開始播放，播完自動停止發射。勾了：影片循環播放，要自己按停止。兩種都是每送一張取當下那一格"));
+    } else if (is_images) {
+        // 圖片序列的「循環播放」和影片檔的是分開的兩個設定
+        if (checkbox("##loopimages", left, y + S(5), fitted(regular_, 12.5f, L("循環播放"), scale_rect.x - left - S(34)), settings.loop_images)) settings.loop_images = !settings.loop_images;
+        tooltip(L("沒有勾：從預覽的這一張送到最後一張，每張送一次，送完自動停止發射。勾了：送完最後一張再從第一張開始，要自己按停止"));
     } else {
         text(dl, regular_, 12.5f, left, y + S(6), kSecondary, fitted(regular_, 12.5f, L("縮放方式"), scale_rect.x - left - S(8)));
     }
@@ -1267,6 +1386,44 @@ void UI::draw_schedule_menu() {
         }
         ImGui::SetCursorScreenPos(origin);
         ImGui::Dummy(ImVec2(inner, y - origin.y));
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar(3);
+}
+
+/// 按了「儲存影片」跳出來的一小塊：存檔之前的選項「在每一張的左上角印上訊雜比」，按「儲存…」才開系統的存檔對話框。
+/// macOS 版把這個選項放在系統的存檔對話框裡；這裡的存檔對話框也是系統畫的，但 SDL 沒有辦法往裡面加東西，所以放在它前面一步。
+/// 勾不勾當下就記進設定，下一次存影片時沿用。
+void UI::draw_save_video_menu() {
+    if (want_save_video_menu_) {
+        ImGui::OpenPopup("##savevideomenu");
+        want_save_video_menu_ = false;
+    }
+    Settings& settings = app_.settings;
+    const std::string option = L("在每一張的左上角印上訊雜比"), go = L("儲存…");
+    const float go_w = text_width(regular_, 12.5f, go) + S(32);
+    const float inner = std::max(S(15) + S(8) + text_width(regular_, 12.5f, option), go_w), w = inner + S(28);
+    ImGui::SetNextWindowPos(ImVec2(std::max(S(8), save_video_anchor_.right() - w), save_video_anchor_.bottom() + S(6)));
+    ImGui::SetNextWindowSize(ImVec2(w, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(14), S(14)));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, S(11));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, kMenu);
+    ImGui::PushStyleColor(ImGuiCol_Border, kButtonRing);
+    if (ImGui::BeginPopup("##savevideomenu")) {
+        close_popup_on_escape();
+        const ImVec2 origin = ImGui::GetCursorScreenPos();
+        if (checkbox("##stampsnr", origin.x, origin.y, option, settings.stamp_video_snr)) settings.stamp_video_snr = !settings.stamp_video_snr;
+        // 這段時間裡那一段可能變了（又收到新的畫面、正在存上一個）：存不了的時候按鈕是灰的
+        const bool can_save = app_.displayed_sequence().size() >= 2 && !app_.exporting_video && FileSource::ffmpeg_available();
+        const Rect go_rect{origin.x + inner - go_w, origin.y + S(18) + S(12), go_w, S(30)};
+        if (button("##savevideogo", go_rect, go, can_save)) {
+            ImGui::CloseCurrentPopup();
+            save_video();
+        }
+        ImGui::SetCursorScreenPos(origin);
+        ImGui::Dummy(ImVec2(inner, S(18) + S(12) + S(30)));
         ImGui::EndPopup();
     }
     ImGui::PopStyleColor(2);
@@ -1537,8 +1694,29 @@ void UI::choose_video_file() {
         {"Video / image", "mp4;mov;m4v;mkv;avi;webm;mpg;mpeg;wmv;flv;ts;jpg;jpeg;png;bmp;gif"},
         {"All files", "*"},
     };
-    auto* request = new DialogRequest{[this](const std::string& path) { app_.open_video(path, true); }};
+    auto* request = new DialogRequest{[this](const std::string& path) { app_.open_video(path, true); }, {}};
     SDL_ShowOpenFileDialog(dialog_callback, request, window_, filters, 2, nullptr, false);
+}
+
+/// 圖片序列：選圖片檔，可以一次選很多張。順序照檔名，和選的先後無關（見 ImageSequence::files）。
+void UI::choose_images() {
+    if (window_ == nullptr) return;
+    // 篩選的清單在對話框開著的這段時間要一直都在：只做一次，之後不再動它
+    static const std::string pattern = [] {
+        std::string joined;
+        for (const std::string& extension : ImageSequence::extensions()) joined += (joined.empty() ? "" : ";") + extension;
+        return joined;
+    }();
+    static const SDL_DialogFileFilter filters[] = {{"Images", pattern.c_str()}, {"All files", "*"}};
+    auto* request = new DialogRequest{{}, [this](const std::vector<std::string>& paths) { app_.open_images(paths, true); }};
+    SDL_ShowOpenFileDialog(dialog_callback, request, window_, filters, 2, nullptr, true);
+}
+
+/// 圖片序列：選一個資料夾，裡面的圖片全部加入（只看那一層）。
+void UI::choose_image_folder() {
+    if (window_ == nullptr) return;
+    auto* request = new DialogRequest{{}, [this](const std::vector<std::string>& paths) { app_.open_images(paths, true); }};
+    SDL_ShowOpenFolderDialog(dialog_callback, request, window_, nullptr, false);
 }
 
 void UI::save_image() {
@@ -1551,7 +1729,7 @@ void UI::save_image() {
         std::string path = chosen;
         if (path.size() < 4 || path.compare(path.size() - 4, 4, ".png") != 0) path += ".png";
         app_.save_displayed_frame(path);
-    }};
+    }, {}};
     SDL_ShowSaveFileDialog(dialog_callback, request, window_, filters, 1, suggested.c_str());
 }
 
@@ -1565,7 +1743,7 @@ void UI::save_video() {
         std::string path = chosen;
         if (path.size() < 4 || path.compare(path.size() - 4, 4, ".mp4") != 0) path += ".mp4";
         app_.export_sequence(frames, path);
-    }};
+    }, {}};
     SDL_ShowSaveFileDialog(dialog_callback, request, window_, filters, 1, suggested.c_str());
 }
 

@@ -92,7 +92,7 @@ Los paquetes de Windows y Linux incluyen `nbtv-gui` (`nbtv-gui.exe` en Windows):
 
 - **Windows**: el ejecutable no tiene firma de código, así que SmartScreen puede bloquearlo la primera vez. Cuando estés seguro de que el archivo viene de este repositorio, pulsa «Más información → Ejecutar de todas formas».
 - **Linux**: requiere glibc 2.35 o posterior (Ubuntu 22.04, Debian 12, Raspberry Pi OS bookworm y posteriores). El texto en chino y japonés de la interfaz necesita fuentes del sistema (por ejemplo `fonts-noto-cjk`); sin ellas, la interfaz se muestra en inglés.
-- Para usar un archivo de video como fuente de transmisión y para guardar como video las imágenes recibidas hay que instalar [ffmpeg](https://ffmpeg.org) (las imágenes no lo necesitan); para controlar el PTT con comandos CAT hay que instalar [Hamlib](https://github.com/Hamlib/Hamlib).
+- Para usar un archivo de video como fuente de transmisión y para guardar como video las imágenes recibidas hay que instalar [ffmpeg](https://ffmpeg.org) (las imágenes y las series de imágenes no lo necesitan); para controlar el PTT con comandos CAT hay que instalar [Hamlib](https://github.com/Hamlib/Hamlib).
 
 > Esta app es nueva. Tiene comprobaciones automáticas completas en CI, pero **todavía nadie la ha usado en una computadora real con Windows o Linux conectada a un equipo de radio**: las tarjetas de sonido, las cámaras y el PTT por puerto serie no se han verificado con hardware de verdad. Antes de confiar en ella, lee «驗證過與還沒驗證的» (lo que se ha verificado y lo que no) en [apps/desktop/README.md](apps/desktop/README.md) (en chino tradicional), y por favor avisa de los problemas en Issues.
 

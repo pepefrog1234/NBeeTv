@@ -14,6 +14,8 @@
 "要用影片檔，這台電腦要先裝 ffmpeg（圖片檔不需要）" = "Para usar archivos de video hay que instalar ffmpeg en esta computadora (las imágenes no lo necesitan)";
 "沒有使用鏡頭的權限" = "No hay permiso para usar la cámara";
 "這台電腦沒有裝 ffmpeg" = "ffmpeg no está instalado en esta computadora";
+"選擇圖片檔…" = "Elegir imágenes…";
+"選擇資料夾…" = "Elegir una carpeta…";
 
 // 主視窗
 "短波 NBTV" = "NBTV en HF";
@@ -22,6 +24,8 @@
 "開著的時候會請系統不要因為閒置而睡眠；重新開啟 app 之後要再打開一次。" = "Mientras está activada, se pide al sistema que no entre en reposo por inactividad; hay que volver a activarla cada vez que se abre la app.";
 "找不到中文、日文的字型，介面改用英文顯示（可以安裝 Noto Sans CJK 這類字型）" = "No se encontró ninguna fuente para chino o japonés; la interfaz se muestra en inglés (se puede instalar una fuente como Noto Sans CJK)";
 "音訊的子系統起不來：%@" = "No se pudo iniciar el subsistema de audio: %@";
+"影片已存成「%@」，但找不到字型，沒有印上訊雜比" = "Video guardado como «%@», pero no se encontró ninguna fuente y no se estampó la SNR";
+"儲存…" = "Guardar…";
 
 // 設定
 "介面的語言" = "Idioma de la interfaz";

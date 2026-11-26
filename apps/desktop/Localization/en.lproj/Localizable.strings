@@ -14,6 +14,8 @@
 "要用影片檔，這台電腦要先裝 ffmpeg（圖片檔不需要）" = "Video files need ffmpeg installed on this computer (image files do not)";
 "沒有使用鏡頭的權限" = "No permission to use the camera";
 "這台電腦沒有裝 ffmpeg" = "ffmpeg is not installed on this computer";
+"選擇圖片檔…" = "Choose image files…";
+"選擇資料夾…" = "Choose a folder…";
 
 // 主視窗
 "短波 NBTV" = "HF NBTV";
@@ -22,6 +24,8 @@
 "開著的時候會請系統不要因為閒置而睡眠；重新開啟 app 之後要再打開一次。" = "While it is on, the system is asked not to sleep when idle; turn it on again each time the app is reopened.";
 "找不到中文、日文的字型，介面改用英文顯示（可以安裝 Noto Sans CJK 這類字型）" = "No Chinese or Japanese font was found, so the interface is shown in English (install a font such as Noto Sans CJK)";
 "音訊的子系統起不來：%@" = "The audio subsystem could not start: %@";
+"影片已存成「%@」，但找不到字型，沒有印上訊雜比" = "Video saved as “%@”, but no font was found, so the SNR was not stamped";
+"儲存…" = "Save…";
 
 // 設定
 "介面的語言" = "Interface language";

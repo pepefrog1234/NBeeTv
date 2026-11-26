@@ -67,4 +67,8 @@ std::string find_program(const std::string& name, const std::vector<std::string>
 /// 以行程編號結束一個不是我們的 Process 物件的行程（看門的程序用）。
 void kill_pid(long pid);
 
+/// 這個檔案在 Windows 上有沒有標成「隱藏」（那裡的隱藏是檔案的屬性，不看檔名）。其他系統一律是 false：
+/// 那邊隱藏的檔案是名稱以點開頭的，由呼叫的人自己看。
+bool has_hidden_attribute(const std::string& path);
+
 }  // namespace nbtvgui

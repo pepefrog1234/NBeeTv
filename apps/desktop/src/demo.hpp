@@ -45,6 +45,12 @@ std::vector<std::array<float, kSpectrumBins>> monitor_rows(const std::vector<flo
 /// 把一張 96×72 的畫面每個像素放大成 zoom×zoom，存成 PNG。
 bool write_picture_png(const Picture& picture, const std::string& path, int zoom = 10);
 
+/// 同上，存成 JPEG。orientation 不是 0 的話，在檔案裡記下顯示的方向（EXIF 的 1–8；手機直拍的相片是 6：
+/// 存的像素是橫的，看的時候要順時針轉 90 度）——像素本身不動。
+/// little_endian、after_jfif：EXIF 那一段的兩種寫法（位元組的順序）與兩種位置（最前面，或排在 JFIF 那一段後面）；
+/// 各家相機與軟體寫的不一樣，讀的時候都要認得。
+bool write_picture_jpeg(const Picture& picture, const std::string& path, int zoom = 10, int orientation = 0, bool little_endian = false, bool after_jfif = false);
+
 /// 用一張圖做一段示範影片（靠 ffmpeg）：畫面慢慢往上移，每一格都不一樣。沒有 ffmpeg 或做不出來回傳 false。
 bool make_video(const std::string& path, const Picture& picture, int seconds = 38, int fps = 5, int width = 1920, int height = 1080);
 

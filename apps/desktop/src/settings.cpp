@@ -60,14 +60,18 @@ std::string Settings::serialized() const {
     put("rigModelName", rig_model_name);
     put("serialBaud", std::to_string(serial_baud));
     put("txModeID", std::to_string(tx_mode_id));
-    put("sourceKind", source_kind == SourceKind::camera ? "camera" : "video");
+    put("sourceKind", source_kind == SourceKind::camera ? "camera" : source_kind == SourceKind::images ? "images" : "video");
     put("scaleMode", scale_mode == ScaleMode::fill ? "fill" : "fit");
     put("cameraName", camera_name);
     put("loopVideo", loop_video ? "1" : "0");
     put("videoPath", video_path);
+    put("loopImages", loop_images ? "1" : "0");
+    // 圖片序列的那一批路徑：一行一個，imagePath1、imagePath2…
+    for (std::size_t i = 0; i < image_paths.size(); ++i) put(("imagePath" + std::to_string(i + 1)).c_str(), image_paths[i]);
     put("scheduleIntervalMinutes", std::to_string(schedule_interval_minutes));
     put("scheduleSkipWhenBusy", schedule_skip_when_busy ? "1" : "0");
     put("showFrameSNR", show_frame_snr ? "1" : "0");
+    put("stampVideoSNR", stamp_video_snr ? "1" : "0");
     put("canvasEnabled", canvas_enabled ? "1" : "0");
     put("canvasText", canvas_text);
     put("canvasPosition", canvas_position == CanvasPosition::top ? "top" : "bottom");
@@ -121,15 +125,24 @@ Settings Settings::load(const std::string& path) {
     s.serial_baud = std::find(hamlib::baud_rates().begin(), hamlib::baud_rates().end(), baud) != hamlib::baud_rates().end() ? baud : 0;
     const int mode = static_cast<int>(number("txModeID", modes::default_id()));
     s.tx_mode_id = modes::find(mode) != nullptr ? mode : modes::default_id();
-    s.source_kind = text("sourceKind", "video") == "camera" ? SourceKind::camera : SourceKind::video;
+    const std::string source = text("sourceKind", "video");
+    s.source_kind = source == "camera" ? SourceKind::camera : source == "images" ? SourceKind::images : SourceKind::video;
     s.scale_mode = text("scaleMode", "fill") == "fit" ? ScaleMode::fit : ScaleMode::fill;
     s.camera_name = text("cameraName", "");
     s.loop_video = flag("loopVideo", true);
     s.video_path = text("videoPath", "");
+    s.loop_images = flag("loopImages", false);
+    // imagePath1、imagePath2…：數到沒有的那一個為止
+    for (std::size_t i = 1;; ++i) {
+        const auto found = values.find("imagePath" + std::to_string(i));
+        if (found == values.end() || found->second.empty()) break;
+        s.image_paths.push_back(found->second);
+    }
     const int interval = static_cast<int>(number("scheduleIntervalMinutes", schedule::kDefaultInterval));
     s.schedule_interval_minutes = std::find(schedule::intervals().begin(), schedule::intervals().end(), interval) != schedule::intervals().end() ? interval : schedule::kDefaultInterval;
     s.schedule_skip_when_busy = flag("scheduleSkipWhenBusy", true);
     s.show_frame_snr = flag("showFrameSNR", false);
+    s.stamp_video_snr = flag("stampVideoSNR", false);
     s.canvas_enabled = flag("canvasEnabled", false);
     s.canvas_text = text("canvasText", "");
     s.canvas_position = text("canvasPosition", "top") == "bottom" ? CanvasPosition::bottom : CanvasPosition::top;

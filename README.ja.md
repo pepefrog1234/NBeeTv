@@ -92,7 +92,7 @@ Windows と Linux のパッケージには `nbtv-gui`（Windows では `nbtv-gui
 
 - **Windows**：実行ファイルにはコード署名がないため、初回の実行時に SmartScreen に止められることがあります。このリポジトリからダウンロードしたファイルであることを確認したうえで、「詳細情報 → 実行」を押してください。
 - **Linux**：glibc 2.35 以降が必要です（Ubuntu 22.04、Debian 12、Raspberry Pi OS bookworm 以降）。日本語や中国語の表示にはシステムのフォント（`fonts-noto-cjk` など）を使い、見つからない場合は英語で表示します。
-- 動画ファイルを送信ソースにする機能と、受信した画像を動画として保存する機能には [ffmpeg](https://ffmpeg.org) のインストールが必要です（画像ファイルには不要です）。CAT コマンドで PTT を制御するには [Hamlib](https://github.com/Hamlib/Hamlib) が必要です。
+- 動画ファイルを送信ソースにする機能と、受信した画像を動画として保存する機能には [ffmpeg](https://ffmpeg.org) のインストールが必要です（画像ファイルや、順番に送る複数の画像には不要です）。CAT コマンドで PTT を制御するには [Hamlib](https://github.com/Hamlib/Hamlib) が必要です。
 
 > このアプリは新しいものです。CI で自動チェックを一通り行っていますが、**実際の Windows や Linux のパソコンを無線機につないで使った人はまだいません**。実物のサウンドデバイス、カメラ、シリアルポートによる PTT は、実機ではまだ確認できていません。使う前に [apps/desktop/README.md](apps/desktop/README.md)（繁体字中国語）の「驗證過與還沒驗證的」（確認できたこと・できていないこと）を読んでください。問題があれば Issues で知らせてください。
 

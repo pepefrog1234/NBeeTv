@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <mutex>
 
 #define STB_TRUETYPE_IMPLEMENTATION
@@ -42,9 +43,14 @@ FontChain& chain() {
     return fonts;
 }
 
-/// 第 index 個字型；讀不了的回傳 nullptr。呼叫時要握著 chain().mutex。
-LoadedFont* font_at(std::size_t index) {
-    FontChain& fonts = chain();
+/// 存成影片時印在左上角的那一塊字用的字型（等寬的粗體），和畫布的分開。
+FontChain& stamp_chain() {
+    static FontChain fonts;
+    return fonts;
+}
+
+/// fonts 的第 index 個字型；讀不了的回傳 nullptr。呼叫時要握著 fonts.mutex。
+LoadedFont* font_at(FontChain& fonts, std::size_t index) {
     if (index >= fonts.files.size()) return nullptr;
     if (fonts.loaded.size() <= index) fonts.loaded.resize(fonts.files.size());
     if (!fonts.loaded[index]) {
@@ -107,12 +113,13 @@ struct Line {
     std::vector<PlacedGlyph> glyphs;
     float min_x = 0, max_x = 0, min_y = 0, max_y = 0;
     bool any = false;
+    float advance = 0;   // 排完之後筆走到哪裡（含最後一個字右邊的空白）
     float width() const { return any ? max_x - min_x : 0; }
     float height() const { return any ? max_y - min_y : 0; }
 };
 
-/// 用 size 這個字級排一行。呼叫時要握著 chain().mutex。
-Line layout(const std::vector<char32_t>& text, float size) {
+/// 用 fonts 裡的字型、size 這個字級排一行。呼叫時要握著 fonts.mutex。
+Line layout(FontChain& fonts, const std::vector<char32_t>& text, float size) {
     Line line;
     float pen = 0;
     LoadedFont* previous_font = nullptr;
@@ -120,8 +127,8 @@ Line layout(const std::vector<char32_t>& text, float size) {
     for (const char32_t code : text) {
         LoadedFont* font = nullptr;
         int glyph = 0;
-        for (std::size_t i = 0; i < chain().files.size(); ++i) {
-            LoadedFont* candidate = font_at(i);
+        for (std::size_t i = 0; i < fonts.files.size(); ++i) {
+            LoadedFont* candidate = font_at(fonts, i);
             if (candidate == nullptr) continue;
             const int found = stbtt_FindGlyphIndex(&candidate->info, static_cast<int>(code));
             if (found != 0) {
@@ -152,8 +159,12 @@ Line layout(const std::vector<char32_t>& text, float size) {
         previous_font = font;
         previous_glyph = glyph;
     }
+    line.advance = pen;
     return line;
 }
+
+/// 畫布的字型排一行。呼叫時要握著 chain().mutex。
+Line layout(const std::vector<char32_t>& text, float size) { return layout(chain(), text, size); }
 
 /// 每一行都放得進 width 的最大字級（從 maximum 起每次縮半點）；用最小的字還放不下時回傳 0。
 float fit(const std::vector<std::vector<char32_t>>& lines, float width, float maximum) {
@@ -228,7 +239,7 @@ void CanvasLayer::set_fonts(const std::vector<FontFile>& fonts) {
 bool CanvasLayer::has_fonts() {
     std::lock_guard<std::mutex> lock(chain().mutex);
     for (std::size_t i = 0; i < chain().files.size(); ++i) {
-        if (font_at(i) != nullptr) return true;
+        if (font_at(chain(), i) != nullptr) return true;
     }
     return false;
 }
@@ -241,7 +252,7 @@ std::shared_ptr<const CanvasLayer> CanvasLayer::make(const CanvasStyle& style) {
 
     std::lock_guard<std::mutex> lock(chain().mutex);
     bool usable = false;
-    for (std::size_t i = 0; i < chain().files.size() && !usable; ++i) usable = font_at(i) != nullptr;
+    for (std::size_t i = 0; i < chain().files.size() && !usable; ++i) usable = font_at(chain(), i) != nullptr;
     if (!usable) return nullptr;
 
     const float available = static_cast<float>(kImageWidth) - 2 * kSideMargin;
@@ -345,5 +356,160 @@ Picture CanvasLayer::apply(const Picture& picture) const {
     }
     return out;
 }
+
+// ---------------------------------------------------------------- 存成影片時印在左上角的字
+
+namespace {
+
+/// 讀寫都要握著 stamp_chain().mutex。
+bool& stamp_fonts_chosen() {
+    static bool chosen = false;
+    return chosen;
+}
+
+/// 還沒有人指定字型的話，自己去找系統的等寬粗體字。呼叫時要握著 stamp_chain().mutex。
+void ensure_stamp_fonts() {
+    if (stamp_fonts_chosen()) return;
+    stamp_fonts_chosen() = true;
+    stamp_chain().files = find_fonts("en").mono_bold;   // 要印的只有數字與英文字母，照哪一種語言找都一樣
+    stamp_chain().loaded.clear();
+}
+
+/// 排好的那一塊字：字、它佔的位置、基線在哪裡。呼叫時要握著 stamp_chain().mutex。沒有字型時 usable 是 false。
+struct StampLayout {
+    bool usable = false;
+    Line line;
+    VideoStamp::Rect rect;
+    int baseline = 0;   // 基線在畫面的第幾列
+};
+
+StampLayout layout_stamp(const std::string& text) {
+    StampLayout result;
+    FontChain& fonts = stamp_chain();
+    ensure_stamp_fonts();
+    LoadedFont* first = nullptr;
+    for (std::size_t i = 0; i < fonts.files.size() && first == nullptr; ++i) first = font_at(fonts, i);
+    if (first == nullptr) return result;
+    std::vector<char32_t> codes = decode(text);
+    // 負號用的是數學的減號（U+2212）；手上的字型都沒有這個字的話，改用一般的連字號，不要印出一個方框
+    for (char32_t& code : codes) {
+        if (code != 0x2212) continue;
+        bool found = false;
+        for (std::size_t i = 0; i < fonts.files.size() && !found; ++i) {
+            LoadedFont* font = font_at(fonts, i);
+            found = font != nullptr && stbtt_FindGlyphIndex(&font->info, static_cast<int>(code)) != 0;
+        }
+        if (!found) code = U'-';
+    }
+    if (codes.empty()) return result;
+    result.line = layout(fonts, codes, VideoStamp::kFontSize);
+    // 方塊的高度照字型的上緣與下緣（不是這幾個字實際有墨的範圍）：不管印的是哪幾個數字，方塊都一樣高
+    int ascent = 0, descent = 0, gap = 0;
+    stbtt_GetFontVMetrics(&first->info, &ascent, &descent, &gap);
+    const float scale = stbtt_ScaleForMappingEmToPixels(&first->info, VideoStamp::kFontSize);
+    const float up = static_cast<float>(ascent) * scale, down = static_cast<float>(-descent) * scale;
+    result.rect.x = VideoStamp::kMargin;
+    result.rect.y = VideoStamp::kMargin;
+    result.rect.width = static_cast<int>(std::ceil(result.line.advance)) + 2 * VideoStamp::kPaddingX;
+    result.rect.height = static_cast<int>(std::ceil(up + down)) + 2 * VideoStamp::kPaddingY;
+    // 基線放在整數的像素上，橫的筆畫才不會糊成兩列
+    result.baseline = result.rect.y + result.rect.height - VideoStamp::kPaddingY - static_cast<int>(std::lround(down));
+    result.usable = true;
+    return result;
+}
+
+}  // namespace
+
+void VideoStamp::set_fonts(const std::vector<FontFile>& fonts) {
+    std::lock_guard<std::mutex> lock(stamp_chain().mutex);
+    stamp_fonts_chosen() = true;
+    stamp_chain().files = fonts;
+    stamp_chain().loaded.clear();
+}
+
+bool VideoStamp::has_fonts() {
+    std::lock_guard<std::mutex> lock(stamp_chain().mutex);
+    ensure_stamp_fonts();
+    for (std::size_t i = 0; i < stamp_chain().files.size(); ++i) {
+        if (font_at(stamp_chain(), i) != nullptr) return true;
+    }
+    return false;
+}
+
+VideoStamp::Rect VideoStamp::rect_for(const std::string& text) {
+    std::lock_guard<std::mutex> lock(stamp_chain().mutex);
+    const StampLayout stamp = layout_stamp(text);
+    return stamp.usable ? stamp.rect : Rect{};
+}
+
+bool VideoStamp::draw(const std::string& text, std::uint8_t* rgb, int width, int height) {
+    std::lock_guard<std::mutex> lock(stamp_chain().mutex);
+    const StampLayout stamp = layout_stamp(text);
+    const Rect& box = stamp.rect;
+    if (!stamp.usable || rgb == nullptr || box.x + box.width > width || box.y + box.height > height) return false;
+
+    // 1. 半透明的黑底圓角方塊：四個角落照「離圓心多遠」算蓋住多少，邊緣才是平滑的
+    for (int y = 0; y < box.height; ++y) {
+        for (int x = 0; x < box.width; ++x) {
+            // 這個像素的中心到方塊「往內縮一個圓角半徑」之後的那個長方形有多遠
+            const float px = static_cast<float>(x) + 0.5f, py = static_cast<float>(y) + 0.5f;
+            const float dx = std::max({kCornerRadius - px, px - (static_cast<float>(box.width) - kCornerRadius), 0.0f});
+            const float dy = std::max({kCornerRadius - py, py - (static_cast<float>(box.height) - kCornerRadius), 0.0f});
+            const float cover = std::clamp(kCornerRadius + 0.5f - std::sqrt(dx * dx + dy * dy), 0.0f, 1.0f);
+            if (cover <= 0) continue;
+            const float keep = 1.0f - kOpacity * cover;
+            std::uint8_t* pixel = rgb + (static_cast<std::size_t>(box.y + y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(box.x + x)) * 3;
+            for (int c = 0; c < 3; ++c) pixel[c] = static_cast<std::uint8_t>(std::lround(static_cast<float>(pixel[c]) * keep));
+        }
+    }
+
+    // 2. 白色的字
+    const float origin = static_cast<float>(box.x + kPaddingX);
+    std::vector<std::uint8_t> bitmap;
+    for (const PlacedGlyph& placed : stamp.line.glyphs) {
+        const float pen = origin + placed.x;
+        const float shift = pen - std::floor(pen);
+        int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+        stbtt_GetGlyphBitmapBoxSubpixel(&placed.font->info, placed.glyph, placed.scale, placed.scale, shift, 0, &x0, &y0, &x1, &y1);
+        const int w = x1 - x0, h = y1 - y0;
+        if (w <= 0 || h <= 0) continue;
+        bitmap.assign(static_cast<std::size_t>(w) * static_cast<std::size_t>(h), 0);
+        stbtt_MakeGlyphBitmapSubpixel(&placed.font->info, bitmap.data(), w, h, w, placed.scale, placed.scale, shift, 0, placed.glyph);
+        const int left = static_cast<int>(std::floor(pen)) + x0, upper = stamp.baseline + y0;
+        for (int y = 0; y < h; ++y) {
+            const int py = upper + y;
+            if (py < 0 || py >= height) continue;
+            for (int x = 0; x < w; ++x) {
+                const int px = left + x;
+                if (px < 0 || px >= width) continue;
+                const int ink = bitmap[static_cast<std::size_t>(y) * static_cast<std::size_t>(w) + static_cast<std::size_t>(x)];
+                if (ink == 0) continue;
+                std::uint8_t* pixel = rgb + (static_cast<std::size_t>(py) * static_cast<std::size_t>(width) + static_cast<std::size_t>(px)) * 3;
+                for (int c = 0; c < 3; ++c) pixel[c] = static_cast<std::uint8_t>(pixel[c] + ((255 - pixel[c]) * ink + 127) / 255);
+            }
+        }
+    }
+    return true;
+}
+
+namespace sequence_video {
+
+std::vector<std::uint8_t> frame_image(const Picture& picture, const std::string& label) {
+    std::vector<std::uint8_t> frame(static_cast<std::size_t>(kWidth) * kHeight * 3);
+    // 一個像素變成 kScale×kScale 的一格：先做好一列，再原樣抄 kScale 次
+    const std::size_t row_bytes = static_cast<std::size_t>(kWidth) * 3;
+    for (int y = 0; y < kImageHeight; ++y) {
+        std::uint8_t* row = frame.data() + static_cast<std::size_t>(y) * kScale * row_bytes;
+        const std::uint8_t* source = picture.rgb.data() + static_cast<std::size_t>(y) * kImageWidth * 3;
+        for (int x = 0; x < kImageWidth; ++x) {
+            for (int k = 0; k < kScale; ++k) std::memcpy(row + (static_cast<std::size_t>(x) * kScale + static_cast<std::size_t>(k)) * 3, source + static_cast<std::size_t>(x) * 3, 3);
+        }
+        for (int k = 1; k < kScale; ++k) std::memcpy(row + static_cast<std::size_t>(k) * row_bytes, row, row_bytes);
+    }
+    if (!label.empty()) VideoStamp::draw(label, frame.data(), kWidth, kHeight);
+    return frame;
+}
+
+}  // namespace sequence_video
 
 }  // namespace nbtvgui

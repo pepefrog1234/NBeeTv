@@ -92,7 +92,7 @@ Windows 与 Linux 的下载包里有 `nbtv-gui`（Windows 是 `nbtv-gui.exe`）�
 
 - **Windows**：可执行文件没有代码签名，第一次运行时 SmartScreen 可能会拦下来；确认文件是从这个 repo 下载的之后，点“更多信息 → 仍要运行”。
 - **Linux**：需要 glibc 2.35 及以上（Ubuntu 22.04、Debian 12、Raspberry Pi OS bookworm 及之后的版本）。界面的中文、日文要靠系统的字体（例如 `fonts-noto-cjk`），找不到的话会改用英文显示。
-- 用视频文件作为发射来源、把收到的画面保存成视频，需要另外安装 [ffmpeg](https://ffmpeg.org)（图片文件不需要）；用 CAT 指令控制 PTT 需要另外安装 [Hamlib](https://github.com/Hamlib/Hamlib)。
+- 用视频文件作为发射来源、把收到的画面保存成视频，需要另外安装 [ffmpeg](https://ffmpeg.org)（图片文件与图片序列不需要）；用 CAT 指令控制 PTT 需要另外安装 [Hamlib](https://github.com/Hamlib/Hamlib)。
 
 > 这个 app 是新的：它在 CI 上有完整的自动检查，但**还没有人在真正的 Windows、Linux 电脑上接着电台用过**——真实的声卡、摄像头、串口的 PTT 都还没有实机验证。使用之前请先看 [apps/desktop/README.md](apps/desktop/README.md)（繁体中文）里的“驗證過與還沒驗證的”（验证过与还没验证的），遇到问题欢迎到 Issues 反馈。
 
