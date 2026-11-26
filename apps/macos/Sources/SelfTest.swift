@@ -618,11 +618,31 @@ enum SelfTest {
         var opened: Bool?
         model.openVideo(url) { opened = $0 }
         guard Demo.wait(timeout: 10, until: { opened != nil }), opened == true, Demo.wait(timeout: 10, until: { model.canTransmit }),
-              Demo.wait(timeout: 5, until: { bytes(of: model.sourcePreview)?.count == large.rgbBytes }), let preview = bytes(of: model.sourcePreview) else {
+              Demo.wait(timeout: 5, until: { bytes(of: model.sourcePreview)?.count == large.rgbBytes }) else {
             report(name, false, problems.isEmpty ? "選了模式 15，預覽卻一直不是 192×144（或影片開不起來）" : problems.joined(separator: "；"))
             return
         }
         if model.txPictureSize != large { problems.append("送出的大小是 \(model.txPictureSize.text)") }
+        // 循環播放的影片一開就在播（這支影片的畫面上下移動），預覽一直在變。先停住：按下發射時第一張取的是那一刻的那一格，
+        // 影片在那之後才接著播（見 goOnAir），所以送出去的第一張就是停住時預覽的那一格。不停住的話，從記下預覽到取第一張之間
+        // 影片會往下走，電腦慢的時候走得多，比的就不是同一格了（CI 的 Intel Mac 上差到 29.6）。
+        _ = Demo.wait(timeout: 2, until: { model.videoPlaying })
+        if model.videoPlaying { model.toggleVideoPlayback() }
+        // 停住之後預覽還可能再換一次（來源在動時每秒最多更新 5 次）：等它連續 0.5 秒沒有變
+        var still = bytes(of: model.sourcePreview)
+        var stillSince = Date()
+        _ = Demo.wait(timeout: 5) {
+            let now = bytes(of: model.sourcePreview)
+            if now != still {
+                still = now
+                stillSince = Date()
+            }
+            return Date().timeIntervalSince(stillSince) >= 0.5
+        }
+        guard !model.videoPlaying, let preview = still, preview.count == large.rgbBytes else {
+            report(name, false, (problems + ["影片停不住，或停住之後預覽不是 192×144"]).joined(separator: "；"))
+            return
+        }
         // 畫布開著：預覽上的字是照 192×144 印的
         model.setCanvasEnabled(true)
         if !Demo.wait(timeout: 5, until: { bytes(of: model.sourcePreview) != preview }) { problems.append("打開畫布之後預覽沒有變") }
