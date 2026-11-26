@@ -23,7 +23,7 @@ inline constexpr int kSampleRate = 48000;                   // 外殼與核心�
 inline constexpr double kBandLowHz = 352.0;                 // 訊號頻帶
 inline constexpr double kBandHighHz = 2648.0;
 
-/// 畫面的大小（像素）。由模式決定：模式 11–14 是 96×72，模式 5–7 與 15（給 FM 用的大畫面）是 192×144。
+/// 畫面的大小（像素）。由模式決定：模式 3 與 11–14 是 96×72，模式 4–7 與 15（給 FM 用的大畫面）是 192×144。
 struct PictureSize {
     int width = kImageWidth;
     int height = kImageHeight;
@@ -71,7 +71,7 @@ struct LoadedMerge {
 };
 class Models {
 public:
-    /// 第一次呼叫時載入（七份模型共約一百五十 MB，要一秒上下）。
+    /// 第一次呼叫時載入（九份模型共約兩百四十 MB，要一秒上下）。
     static const Models& shared();
 
     const std::vector<LoadedModel>& models() const { return models_; }
@@ -96,16 +96,22 @@ struct ModeInfo {
     int payload_symbols = 0;
     int learned_values = 0;   // 一張畫面變成幾個實數
     int learned_width = 0;    // 模型第一層的通道數
-    PictureSize picture;      // 畫面的大小：96×72；模式 5–7 與 15 是 192×144
-    bool scattered_pilots = true;   // 酬載裡有沒有散佈導頻；沒有的是給 FM 用的幀（模式 5–7），同樣的時間多送 2 成的資料
+    PictureSize picture;      // 畫面的大小：96×72；模式 4–7 與 15 是 192×144
+    bool scattered_pilots = true;   // 酬載裡有沒有散佈導頻；沒有的是給 FM 用的幀（模式 3–7），同樣的時間多送 2 成的資料
     std::string model_name;   // 用的模型的名稱，例如「261123-1」
     bool large_model = false; // 用的是加寬的大型網路（運算量約四倍）
 
-    /// 畫面比標準的 96×72 大：給 VHF／UHF 的 FM 語音通道用的模式（模式 15，以及沒有導頻的模式 5–7）。
+    /// 畫面比標準的 96×72 大：給 VHF／UHF 的 FM 語音通道用的模式（模式 15，以及沒有導頻的模式 4–7）。
     /// 它的模型只照訊號好的情形訓練，訊號弱、有衰落時比其他模式差，不適合短波。
     bool large_picture() const { return picture != kStandardPicture; }
-    /// 幀裡沒有導頻（模式 5–7）。這種幀只能用在訊號穩定、沒有頻偏的 FM 語音通道。
+    /// 幀裡沒有導頻（模式 3–7）。這種幀只能用在訊號穩定、沒有頻偏的 FM 語音通道。
     bool pilot_free() const { return !scattered_pilots; }
+    /// 發射時「對方看到的畫面」要不要另外解（不接在編碼後面）。編碼和預覽的解碼原本是一口氣做完的；
+    /// 加寬的模型配上大畫面（模式 4）只用一條執行緒時編一張約 0.4 秒、解一張約 0.7 秒（M4 Max），接在一起比一幀還長。
+    /// 核心會把推論分給幾條執行緒，快的電腦上不成問題（那台是 0.08 與 0.13 秒）；核心少、比較慢的電腦上發射就會接不上。
+    /// 這裡用模型的大小估「只用一條執行緒」解一張的時間（一般的模型、96×72 約 0.054 秒；寬一倍或畫面大一倍各是四倍），
+    /// 超過半幀就分開：編碼的那條執行緒只做編碼，預覽晚一點才出來（見 App::schedule_transmit_preview）。
+    bool preview_apart() const;
 
     std::string name() const;          // 「模式 11」
     std::string quality() const;       // 快速／粗略／中等／細緻，依每幀的長短
@@ -121,15 +127,16 @@ namespace modes {
 /// 有模型的模式，依核心模式表的順序。少了哪一份權重檔，那個模式就不在裡面（選單不列、也不能發射）。
 const std::vector<ModeInfo>& all();
 /// 選單的順序：依每幀的長短由快到慢；一樣長的，模型小的在前（模式編號是 14、12、11、13）。
-/// 大畫面的模式是另外一類，排在後面：先是有導頻的（15），再是沒有導頻的（5、6、7，由快到慢）。
-/// 選單裡各自成一組，見 menu_groups。
+/// 給 FM 用的模式是另外一類，排在後面：畫面 96×72、沒有導頻的（3）；大畫面有導頻的（15）；
+/// 大畫面沒有導頻的（4、5、6、7，由快到慢）。選單裡各自成一組，見 menu_groups。
 std::vector<ModeInfo> menu_order();
-/// 模式選單的三組，各組裡照 menu_order 的順序；每個模式剛好在其中一組。空的那一組選單不畫。
+/// 模式選單的四組，各組裡照 menu_order 的順序；每個模式剛好在其中一組。空的那一組選單不畫。
 /// 分組只看模式表裡的兩樣（畫面的大小、有沒有導頻），不看模式編號：核心的模式表多了模式，會自己落在該在的那一組。
 struct MenuGroups {
-    std::vector<ModeInfo> standard;     // 畫面是標準的 96×72
+    std::vector<ModeInfo> standard;     // 畫面是標準的 96×72、幀裡有導頻（模式 11 到 14）
+    std::vector<ModeInfo> quick;        // 畫面 96×72、幀裡沒有導頻：給 FM 用的快速模式（模式 3）
     std::vector<ModeInfo> large;        // 大畫面、幀裡有導頻（模式 15）
-    std::vector<ModeInfo> pilot_free;   // 大畫面、幀裡沒有導頻（模式 5、6、7）
+    std::vector<ModeInfo> pilot_free;   // 大畫面、幀裡沒有導頻（模式 4、5、6、7）
 };
 MenuGroups menu_groups();
 /// 核心的模式表裡有、但這裡沒有模型（所以不在 all() 裡）的模式編號。權重檔都在的話是空的。
@@ -150,7 +157,7 @@ struct DecodedFrame {
     int sequence = -1;
     double snr_db = 0;
     double offset_hz = 0;
-    PicturePtr picture;          // 有畫面時才有；大小跟著那一幀的模式（96×72，模式 5–7 與 15 是 192×144）
+    PicturePtr picture;          // 有畫面時才有；大小跟著那一幀的模式（96×72，模式 4–7 與 15 是 192×144）
 };
 
 class CoreReceiver {
@@ -178,10 +185,16 @@ private:
 /// 發射端做好的一幀。
 struct EncodedFrame {
     std::vector<float> samples;  // 48 kHz
-    PicturePtr preview;          // 沒有雜訊時對方看到的畫面，和送進去的那一張一樣大
+    PicturePtr preview;          // 沒有雜訊時對方看到的畫面，和送進去的那一張一樣大；預覽另外解的時候是空的
     int mode_id = 0;
     int sequence = 0;
+    std::vector<float> values;   // 預覽另外解的時候：這張畫面的通道值，交給 preview_from_values
 };
+
+/// 沒有雜訊時對方看到的畫面：把一張畫面的通道值（EncodedFrame::values）用那個模式的模型解回來。
+/// 和發射機編碼時順便給的預覽是同一個結果；分開來是為了放到別的執行緒上做（見 ModeInfo::preview_apart）。
+/// 模型載入之後不會被改動，所以可以和發射、接收同時進行。個數對不上、沒有那個模式的模型回傳空的。
+PicturePtr preview_from_values(const std::vector<float>& values, int mode_id);
 
 class CoreTransmitter {
 public:
@@ -198,7 +211,9 @@ public:
     PictureSize picture_size() const { return picture_size_; }
     /// 把一張畫面做成一幀音訊。畫面要是目前這個模式的大小（picture_size）。
     /// 失敗（大小不對、目前的模式沒有模型）回傳空的。
-    std::optional<EncodedFrame> encode(const Picture& picture);
+    /// preview_apart：不在這裡解預覽，改給這張畫面的通道值，之後由 preview_from_values 在別的執行緒上解
+    /// （模型大、幀又短的模式用，見 ModeInfo::preview_apart）。
+    std::optional<EncodedFrame> encode(const Picture& picture, bool preview_apart = false);
     /// 取消最近編好、但決定不送的那一幀：發射機回到編它之前的狀態。沒有可以取消的幀時回傳 false。
     bool discard_last();
     /// 發射結束時取出重取樣濾波器裡剩下的尾巴。

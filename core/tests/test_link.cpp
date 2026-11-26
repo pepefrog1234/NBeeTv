@@ -389,14 +389,14 @@ std::vector<float> foreign_burst(int id, int payload_symbols, int frames, Rng& r
     return signal;
 }
 
-// 別的模式的幀：S1 用的是模式表裡沒有的編號（0–4、8–10：草案裡的數位與類比模式用過，已經移除）。
+// 別的模式的幀：S1 用的是模式表裡沒有的編號（0–2、8–10：草案裡的數位與類比模式用過，已經移除）。
 // S0 與導頻和我們的一模一樣，只有 S1 不同。接收機要認得出那不是自己的模式：不同步、不回報任何幀，
 // 也不能因此漏掉緊接著來的、自己認得的發射。
 void test_foreign_modes() {
     const Mode& ours = *find_mode(12);
     const std::vector<float>& own = burst(ours, 2, "N0CALL");
     int runs = 0, bad = 0;
-    for (int id : {0, 1, 4, 9, 10}) {
+    for (int id : {0, 1, 2, 9, 10}) {
         CHECK(find_mode(id) == nullptr);
         for (int payload_symbols : {100, 37}) {
             for (double snr : {99.0, 12.0, 3.0}) {  // 99：不加雜訊
@@ -609,7 +609,7 @@ void test_follow() {
 
 }  // namespace
 
-// ───── 沒有散佈導頻的幀（模式 5、6、7；給 FM 語音通道用）─────
+// ───── 沒有散佈導頻的幀（模式 3 到 7；給 FM 語音通道用）─────
 // FM 解調出來的音訊訊雜比高、沒有頻偏、通道在一幀之內不變；會變的是兩邊音效卡的取樣時脈，以及訊號忽強忽弱時的雜訊。
 
 // 白雜訊 12–30 dB：每一幀都要收到、標頭要對，量到的訊雜比接近設定值。
@@ -645,12 +645,61 @@ void test_free_awgn() {
         CHECK(mean_psnr(r.frames, rgb) > mean_psnr(pilots.frames, rgb) + 0.3);
         std::printf("  模式 %d AWGN 20 dB：%d/2、PSNR %.2f dB（模式 15：%.2f dB）\n", id, r.decoded, mean_psnr(r.frames, rgb), mean_psnr(pilots.frames, rgb));
     }
+    // 模式 3：同一種幀裡最快的，和模式 14 一樣長（25 個符號）、畫面一樣大（96×72）。省下導頻多放 2 個通道，
+    // 模型又只照 FM 的訊雜比訓練：每一幀都要收到，20 dB 以上畫質要比模式 14 好。
+    const Mode& m3 = *find_mode(3);
+    const Mode& m14 = *find_mode(14);
+    const auto small = test_images::load("cat", m3.image_width, m3.image_height);
+    for (double snr : {30.0, 20.0, 12.0}) {
+        sim::ChannelParams p;
+        p.snr_db = snr;
+        p.seed = 73;
+        const LinkResult fast = run_link(m3, 3, small, p, 5000);
+        const LinkResult pilots = run_link(m14, 3, small, p, 5000);
+        CHECK_EQ(fast.decoded, 3);
+        CHECK_EQ(pilots.decoded, 3);
+        double measured = 0;
+        for (const RxFrame& f : fast.frames) measured += f.snr_db / static_cast<double>(fast.frames.size());
+        CHECK_NEAR(measured, snr, 1.5);
+        const double a = mean_psnr(fast.frames, small), b = mean_psnr(pilots.frames, small);
+        if (snr >= 20.0) CHECK(a > b + 0.3);
+        std::printf("  模式 3 AWGN %.0f dB：%d/3、量到 %.1f dB、PSNR %.2f dB（模式 14：%d/3、%.2f dB）\n", snr, fast.decoded, measured, a, pilots.decoded, b);
+    }
+    // 模式 4：192×144、每張 1 秒出頭。一張畫面送的值不到模式 5 的四成，畫質比它低，但每一幀都要收到，
+    // 而且要比「模式 3 的 96×72 畫面放大成 192×144」好——這就是多花三分之一秒換到的。
+    const Mode& m4 = *find_mode(4);
+    for (double snr : {30.0, 12.0}) {
+        sim::ChannelParams p;
+        p.snr_db = snr;
+        p.seed = 74;
+        const LinkResult large = run_link(m4, 3, rgb, p, 5000);
+        const LinkResult fast = run_link(m3, 3, small, p, 5000);
+        CHECK_EQ(large.decoded, 3);
+        CHECK_EQ(fast.decoded, 3);
+        double measured = 0;
+        for (const RxFrame& f : large.frames) measured += f.snr_db / static_cast<double>(large.frames.size());
+        CHECK_NEAR(measured, snr, 1.5);
+        double enlarged = 0.0;   // 模式 3 收到的畫面每個像素重複兩次，和 192×144 的原圖比
+        for (const RxFrame& f : fast.frames) {
+            std::vector<std::uint8_t> big(rgb.size());
+            for (int y = 0; y < m4.image_height; ++y)
+                for (int x = 0; x < m4.image_width; ++x)
+                    for (int c = 0; c < 3; ++c)
+                        big[static_cast<std::size_t>(3 * (y * m4.image_width + x) + c)] =
+                            f.rgb[static_cast<std::size_t>(3 * ((y / 2) * m3.image_width + x / 2) + c)];
+            enlarged += test_images::psnr(big, rgb) / static_cast<double>(fast.frames.size());
+        }
+        const double a = mean_psnr(large.frames, rgb);
+        CHECK(a > enlarged + 0.3);
+        std::printf("  模式 4 AWGN %.0f dB：%d/3、量到 %.1f dB、PSNR %.2f dB（模式 3 的畫面放大：%.2f dB）\n", snr, large.decoded, measured, a, enlarged);
+    }
 }
 
-// 取樣時脈誤差 ±100、±200 ppm：最長的幀（模式 7，4.43 秒）在 200 ppm 下，定時在一幀之內會漂 10 個取樣。
+// 取樣時脈誤差 ±100、±200 ppm：最長的幀（模式 7，4.43 秒）在 200 ppm 下，定時在一幀之內會漂 10 個取樣；
+// 最短的幀（模式 3，0.667 秒）頭尾兩個參考符號只隔 23 個符號，漂移估得最不準。
 // 每一幀都要收到，畫質和沒有誤差時相當。
 void test_free_clock_offset() {
-    for (int id : {5, 7}) {
+    for (int id : {3, 5, 7}) {
         const Mode& m = *find_mode(id);
         const auto rgb = test_images::load("coffee", m.image_width, m.image_height);
         sim::ChannelParams p;
@@ -750,6 +799,12 @@ void test_free_bursts() {
         {12, 2, 7, 1, 0, 25.0, {300, 6000}},
         {5, 2, 5, 2, 9000, 25.0, {300, 6000, 12000}},      // 第一次發射的最後一幀只送了三成
         {7, 1, 5, 2, 20000, 25.0, {300, 9000}},            // 模式 7 的那一幀送了不到四成就停
+        {3, 3, 3, 2, 0, 25.0, {0, 66, 700, 4859}},         // 最短的幀（模式 3）：結尾的參考符號緊接著下一次發射的前導符號
+        {14, 2, 3, 2, 0, 25.0, {0, 9000}},                 // 一樣長的兩種幀互換：有導頻的模式 14 與沒有導頻的模式 3
+        {3, 2, 14, 2, 0, 25.0, {0, 9000}},
+        {3, 2, 4, 1, 0, 25.0, {300, 6000}},                // 同一種幀、畫面大小不同
+        {4, 1, 5, 1, 0, 25.0, {300, 6000}},
+        {3, 3, 3, 2, 2500, 25.0, {300, 6000}},             // 模式 3 的最後一幀只送了三成
     };
     int runs = 0, bad = 0;
     for (const Case& c : cases) {

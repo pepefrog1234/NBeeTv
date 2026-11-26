@@ -156,7 +156,7 @@ class ListenerFieldTests(unittest.TestCase):
 
 
 class PictureSizeTests(unittest.TestCase):
-    """畫面的大小跟著模式：96×72，模式 5–7 與 15（給 FM 用的大畫面）是 192×144。"""
+    """畫面的大小跟著模式：96×72，模式 4–7 與 15（給 FM 用的大畫面）是 192×144。"""
 
     def test_size_from_length(self):
         self.assertEqual(picture_size(bytes(96 * 72 * 3)), (96, 72))

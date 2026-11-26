@@ -176,6 +176,7 @@ enum SelfTest {
         run("core") { testCoreLoopback(coffee) }
         run("fm") { testLargePicture(coffee, rocket) }
         run("fm-pilotfree") { testPilotFree(coffee) }
+        run("fm-fast") { testFastFM(coffee, rocket) }
         run("merge") { testMergeFrames(coffee) }
         run("flat") { testFlatPictures() }
         run("export") { testExport(coffee) }
@@ -254,14 +255,15 @@ enum SelfTest {
         }
     }
 
-    /// 模式 5、6、7：給 FM 用的大畫面，幀裡沒有導頻（同樣的時間多送 2 成的資料）。
-    ///   * 模式表：三個都是 192×144、沒有導頻，每張 2.29、2.88、4.43 秒；模式 5 和 15 用的是同一個模型
+    /// 模式 4、5、6、7：給 FM 用的大畫面，幀裡沒有導頻（同樣的時間多送 2 成的資料）。
+    ///   * 模式表：四個都是 192×144、沒有導頻，每張 1.01、2.29、2.88、4.43 秒；模式 5 和 15 用的是同一個模型
     ///   * 選單：排在模式 15 後面自成一組，由快到慢；各處的說明寫得出它是哪一種
+    ///     （畫面是 96×72、同樣沒有導頻的模式 3 另成一組，見 testFastFM）
     ///   * 一幀接一幀地送，中間換模式（15 → 5 → 7）：每一幀都要收到，模式與畫面都對
     ///     （核心的收發在「核心收發」那一項每個模式各跑過一次；這裡看的是連續發射中換成另一種幀）
     private static func testPilotFree(_ image: Data) {
-        let name = "FM 無導頻（模式 5、6、7）"
-        let expected: [(id: Int, seconds: Double, tier: String)] = [(5, 2.293, "標準"), (6, 2.880, "較細"), (7, 4.427, "細緻")]
+        let name = "FM 無導頻的大畫面（模式 4 到 7）"
+        let expected: [(id: Int, seconds: Double, tier: String)] = [(4, 1.013, "快速"), (5, 2.293, "標準"), (6, 2.880, "較細"), (7, 4.427, "細緻")]
         var problems: [String] = []
         var details: [String] = []
         let large = PictureSize(width: 192, height: 144)
@@ -278,14 +280,16 @@ enum SelfTest {
             }
             details.append("\(mode.label)：\(mode.secondsText)、\(mode.menuDetail)、模型 \(mode.modelName)")
         }
-        // 有導頻的模式都不能被當成這一類
-        for mode in Modes.all where !expected.contains(where: { $0.id == mode.id }) && mode.pilotFree { problems.append("\(mode.name) 被當成沒有導頻的") }
+        // 有導頻的模式都不能被當成這一類（沒有導頻的另外只有模式 3，它的畫面是 96×72）
+        for mode in Modes.all where !expected.contains(where: { $0.id == mode.id }) && mode.pilotFree && mode.id != 3 {
+            problems.append("\(mode.name) 被當成沒有導頻的")
+        }
         if let five = Modes.find(5), let fifteen = Modes.find(15) {
             if five.modelName != fifteen.modelName || five.learnedValues != fifteen.learnedValues { problems.append("模式 5 和 15 用的不是同一個模型") }
             if five.frameSeconds >= fifteen.frameSeconds { problems.append("模式 5 沒有比模式 15 快") }
         }
-        let tailIDs = Array(Modes.menuOrder.map(\.id).suffix(4))
-        if tailIDs != [15, 5, 6, 7] { problems.append("選單最後四個是模式 \(tailIDs)，應該是 15、5、6、7") }
+        let tailIDs = Array(Modes.menuOrder.map(\.id).suffix(5))
+        if tailIDs != [15, 4, 5, 6, 7] { problems.append("選單最後五個是模式 \(tailIDs)，應該是 15、4、5、6、7") }
 
         // 連續發射中換模式：15（有導頻）→ 5 → 7，各兩幀，中間沒有空檔
         if problems.isEmpty, let picture = Demo.enlarge(image, to: large) {
@@ -308,6 +312,176 @@ enum SelfTest {
             let got = Demo.receive(audio).flatMap(\.frames).filter { $0.decoded && $0.headerOK && $0.callsign == "N0CALL" && $0.rgb?.count == large.rgbBytes }
             if got.map(\.modeID) != sent { problems.append("送的是模式 \(sent)，收到的是 \(got.map(\.modeID))") }
             details.append("連續送模式 15、5、7 各兩幀：收到 \(got.count)/\(sent.count) 張")
+        }
+        report(name, problems.isEmpty, problems.isEmpty ? details.joined(separator: "；") : problems.joined(separator: "；"))
+    }
+
+    /// 模式 3、4：沒有導頻的幀裡快的兩個，用的都是加寬的模型。
+    ///   * 模式表與說明：模式 3 的畫面是 96×72、每張 0.667 秒（和模式 14 一樣長），選單裡自成一組、排在一般的模式後面；
+    ///     模式 4 是 192×144、每張 1.013 秒
+    ///   * 預覽另外解：只有模式 4 要（解一張比半幀還久）。另外解出來的和編碼時順便解的逐位元組相同
+    ///   * 一幀接一幀地送，中間換模式與畫面大小（14 → 3 → 4 → 3）：每一幀都要收到，模式與大小都對
+    ///   * 整個發射流程用模式 4（app 的狀態物件、模擬的音訊輸出照實際的時間取走取樣、記錄用的 PTT）：連續送幾張，
+    ///     輸出佇列中途不能空掉（準備一張要比一幀快：預覽的解碼不能擋住編碼）；發射中看得到 192×144 的預覽，
+    ///     而且就是其中一張解回來的樣子；每一張都解得回來。
+    ///     這台電腦光是編一張就超過一幀的六成時（很慢的電腦、CI 的虛擬機），連續發射本來就可能接不上：
+    ///     那就只看流程走得完、畫面解得回來，不檢查佇列有沒有空掉
+    /// 整項把推論限制成一條執行緒（核心平常會分給幾條執行緒一起算）：等於一台核心少的電腦。
+    /// 開發用的 Mac 上八條執行緒算一張模式 4 只要 0.2 秒，預覽分不分開都接得上，那樣就測不出這一項要看的東西。
+    private static func testFastFM(_ image: Data, _ other: Data) {
+        let name = "FM 無導頻的快速模式（模式 3、4）"
+        guard let three = Modes.find(3), let four = Modes.find(4), let fourteen = Modes.find(14) else {
+            report(name, false, "app 裡沒有模式 3、4 或 14（少了權重檔）")
+            return
+        }
+        NBTV.setInferenceThreads(1)
+        defer { NBTV.setInferenceThreads(0) }   // 0：回到預設
+        var problems: [String] = []
+        var details: [String] = []
+        let large = PictureSize(width: 192, height: 144)
+
+        // 模式表與說明
+        if !three.pilotFree || three.largePicture || three.pictureSize != .standard { problems.append("模式 3 不是 96×72、沒有導頻的") }
+        if abs(three.frameSeconds - 0.667) > 0.001 || three.frameSymbols != fourteen.frameSymbols {
+            problems.append(String(format: "模式 3 每張 %.3f 秒、%d 個符號（模式 14 是 %d 個）", three.frameSeconds, three.frameSymbols, fourteen.frameSymbols))
+        }
+        if three.learnedValues != 1728 || !three.largeModel { problems.append("模式 3 的模型是 \(three.learnedValues) 個值\(three.largeModel ? "" : "、不是加寬的")") }
+        if three.label != "模式 3 · FM 無導頻" || three.menuDetail != "快速" || three.contentText != "大型網路"
+            || !three.summary.contains("沒有導頻") || three.summary.contains("大畫面") || !three.summary.contains(three.modelName) {
+            problems.append("模式 3 的說明是「\(three.label)」「\(three.menuDetail)」「\(three.contentText)」「\(three.summary)」")
+        }
+        if !four.pilotFree || four.pictureSize != large || abs(four.frameSeconds - 1.013) > 0.001 || four.learnedValues != 3024 || !four.largeModel {
+            problems.append(String(format: "模式 4 是 %@、每張 %.3f 秒、%d 個值", four.pictureSize.text, four.frameSeconds, four.learnedValues))
+        }
+        if three.modelName == four.modelName || three.modelName == fourteen.modelName { problems.append("模式 3、4、14 用的模型有重複的") }
+        // 選單：一般的模式（96×72、有導頻）之後就是模式 3，再來才是大畫面的幾個
+        let order = Modes.menuOrder.map(\.id)
+        if let at = order.firstIndex(of: 3) {
+            let before = Modes.menuOrder.prefix(at), after = Modes.menuOrder.suffix(from: at + 1)
+            if before.contains(where: { $0.largePicture || $0.pilotFree }) || after.contains(where: { !$0.largePicture }) {
+                problems.append("選單的順序是 \(order)：模式 3 應該接在一般的模式後面、大畫面的前面")
+            }
+        } else {
+            problems.append("選單裡沒有模式 3")
+        }
+        // 預覽另外解：只有模式 4
+        let apart = Modes.all.filter(\.previewApart).map(\.id)
+        if apart != [4] { problems.append("預覽另外解的模式是 \(apart)，應該只有模式 4") }
+        details.append("\(three.label)：\(three.secondsText)、模型 \(three.modelName)；\(four.label)：\(four.secondsText)、模型 \(four.modelName)")
+
+        // 連續發射中換模式與畫面大小；模式 4 的預覽另外解
+        var encodeSeconds = 0.0   // 這台電腦編一張模式 4 要多久
+        if problems.isEmpty, let big = Demo.enlarge(image, to: large) {
+            let tx = CoreTransmitter(), reference = CoreTransmitter()
+            tx.setCallsign("n0call")
+            reference.setCallsign("n0call")
+            var audio = Demo.silence(seconds: 0.3)
+            var sent: [(id: Int, bytes: Int)] = []
+            for id in [14, 3, 4, 3] {
+                tx.setMode(id)
+                let picture = id == 4 ? big : image
+                let began = Date()
+                guard let frame = tx.encode(rgb: picture, previewApart: id == 4) else {
+                    problems.append("模式 \(id) 編碼失敗")
+                    break
+                }
+                if id == 4 { encodeSeconds = Date().timeIntervalSince(began) }
+                audio += frame.samples
+                sent.append((id, picture.count))
+                if id == 4 {
+                    // 另外解出來的預覽，和另一個發射機編同一張時順便解的要一模一樣
+                    reference.setMode(4)
+                    let together = reference.encode(rgb: big)?.preview
+                    let alone = LearnedModel.preview(values: frame.values, modeID: 4)
+                    if !frame.preview.isEmpty || frame.values.count != four.learnedValues { problems.append("模式 4 編碼時還是解了預覽，或沒有給通道值") }
+                    if alone == nil || alone != together { problems.append("模式 4 另外解的預覽和編碼時順便解的不一樣") }
+                    if LearnedModel.preview(values: Array(frame.values.dropLast()), modeID: 4) != nil || LearnedModel.preview(values: frame.values, modeID: 5) != nil {
+                        problems.append("通道值的個數對不上，還是解出了預覽")
+                    }
+                } else if frame.preview.count != picture.count || !frame.values.isEmpty {
+                    problems.append("模式 \(id) 的預覽是 \(frame.preview.count) 位元組")
+                }
+            }
+            audio += tx.finish() + Demo.silence(seconds: 0.5)
+            let got = Demo.receive(audio).flatMap(\.frames).filter { $0.decoded && $0.headerOK && $0.callsign == "N0CALL" }
+            if got.map(\.modeID) != sent.map(\.id) || got.map({ $0.rgb?.count ?? 0 }) != sent.map(\.bytes) {
+                problems.append("送的是模式 \(sent.map(\.id))，收到的是 \(got.map(\.modeID))（畫面 \(got.map { $0.rgb?.count ?? 0 }) 位元組）")
+            }
+            details.append("連續送模式 14、3、4、3：收到 \(got.count)/\(sent.count) 張，大小都對")
+        }
+
+        // 整個發射流程：模式 4
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("nbtv-selftest-fm4-\(getpid()).mp4")
+        defer { try? FileManager.default.removeItem(at: url) }
+        guard let cg = NBTV.image(fromRGB: Demo.enlarge(other, to: large) ?? other), Demo.makeVideo(at: url, from: cg, seconds: 3, fps: 10) else {
+            report(name, false, "示範影片做不出來")
+            return
+        }
+        setenv("NBTV_NO_DEVICES", "1", 1)   // 狀態物件啟動時不開輸入裝置與鏡頭
+        let settings = AppSettings(store: nil)
+        settings.callsign = "N0CALL"
+        settings.sourceKind = .video
+        settings.loopVideo = true
+        settings.txModeID = 4
+        let ptt = RecordingPTT()
+        settings.debugPTTDriver = { ptt }
+        let model = AppModel(settings: settings, live: true)
+        let sent = SampleCollector()
+        model.debugUseSimulatedOutput { sent.append($0) }
+        var traces: [String] = []
+        let previousTrace = AppModel.trace
+        AppModel.trace = { traces.append($0) }
+        defer { AppModel.trace = previousTrace }
+        model.start()
+        defer { model.shutdown() }
+        var opened: Bool?
+        model.openVideo(url) { opened = $0 }
+        guard Demo.wait(timeout: 10, until: { opened != nil }), opened == true, Demo.wait(timeout: 10, until: { model.canTransmit }),
+              Demo.wait(timeout: 5, until: { bytes(of: model.sourcePreview)?.count == large.rgbBytes }) else {
+            report(name, false, problems.isEmpty ? "選了模式 4，預覽卻一直不是 192×144（或影片開不起來）" : problems.joined(separator: "；"))
+            return
+        }
+        _ = sent.take()
+        // 夠快的電腦送 4 張（每張 1.013 秒）、檢查中途沒有斷；太慢的只送 2 張、只看流程
+        let fastEnough = encodeSeconds < 0.6 * four.frameSeconds
+        let wanted = fastEnough ? 4 : 2
+        model.startTransmit()
+        // 發射中要看得到 192×144 的預覽
+        var onAir: Data?
+        let sentEnough = Demo.wait(timeout: fastEnough ? 40 : 180) {
+            if let preview = bytes(of: model.txPreview), preview.count == large.rgbBytes { onAir = preview }
+            return model.txFramesSent >= wanted || model.txPhase == .idle
+        }
+        if !sentEnough || model.txPhase == .idle { problems.append("模式 4 沒有連續送出 \(wanted) 張" + (model.notice.map { "（\($0)）" } ?? "")) }
+        if onAir == nil { problems.append("模式 4 發射中一直沒有預覽") }
+        model.stopTransmit()
+        _ = Demo.wait(timeout: 15) { model.txPhase == .idle }
+        let frames = Demo.receive(sent.take() + Demo.silence(seconds: 0.5)).flatMap(\.frames).filter { $0.decoded }
+        if frames.count < wanted || frames.contains(where: { $0.modeID != 4 || $0.rgb?.count != large.rgbBytes }) {
+            problems.append("模式 4 送出去的幀解回來 \(frames.count) 張，模式是 \(frames.map(\.modeID))")
+        }
+        // 預覽是某一張「沒有雜訊時對方看到的樣子」：和解回來的其中一張幾乎相同
+        if let onAir, let closest = frames.compactMap({ $0.rgb.map { difference($0, onAir) } }).min() {
+            if closest > 6 { problems.append(String(format: "發射中的預覽和解回來的每一張都差很多（最接近的平均差 %.1f）", closest)) }
+            details.append(String(format: "模式 4 發射：解回來 %d 張，預覽和其中一張平均差 %.1f／255", frames.count, closest))
+        }
+        // 輸出佇列中途沒有空掉、預覽是另外解的
+        let ending = traces.last { $0.hasPrefix("發射結束") } ?? ""
+        let apartCount = traces.filter { $0.contains("的預覽另外解好了") }.count
+        if apartCount == 0 { problems.append("模式 4 的預覽不是另外解的") }
+        let prepare = traces.compactMap { line -> Double? in
+            guard let range = line.range(of: "編碼 "), let end = line.range(of: " 毫秒", range: range.upperBound..<line.endIndex) else { return nil }
+            return Double(line[range.upperBound..<end.lowerBound])
+        }
+        if fastEnough {
+            if !ending.contains("中途空掉 0 次") { problems.append("輸出佇列中途空掉了（\(ending.isEmpty ? "沒有結束的紀錄" : ending)）") }
+            if let slowest = prepare.max() {
+                if slowest > four.frameSeconds * 1000 { problems.append(String(format: "模式 4 編一張花了 %.0f 毫秒，比一幀還久", slowest)) }
+                details.append(String(format: "編碼最久 %.0f 毫秒（一幀 %.0f 毫秒），預覽另外解了 %d 張，輸出佇列沒有空掉", slowest, four.frameSeconds * 1000, apartCount))
+            }
+        } else {
+            details.append(String(format: "這台電腦編一張模式 4 要 %.0f 毫秒（一幀 %.0f 毫秒），太慢：只看流程走得完，沒有檢查輸出佇列有沒有空掉（%@）",
+                                  encodeSeconds * 1000, four.frameSeconds * 1000, ending))
         }
         report(name, problems.isEmpty, problems.isEmpty ? details.joined(separator: "；") : problems.joined(separator: "；"))
     }

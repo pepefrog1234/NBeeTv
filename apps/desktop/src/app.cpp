@@ -245,6 +245,7 @@ struct App::Engine {
 App::App(Settings initial, bool live_) : settings(std::move(initial)), live(live_), clock(schedule::now) {
     tx_mode_id = settings.tx_mode_id;
     tx_worker_ = std::make_unique<Worker>();
+    tx_preview_worker_ = std::make_unique<Worker>();
     ptt_worker_ = std::make_unique<Worker>();
     preview_worker_ = std::make_unique<Worker>();
     io_worker_ = std::make_unique<Worker>();
@@ -267,6 +268,7 @@ App::~App() {
     // 先讓各條執行緒把手上的工作做完再結束：它們的工作會用到下面還沒解構的成員
     io_worker_.reset();
     preview_worker_.reset();
+    tx_preview_worker_.reset();
     tx_worker_.reset();
     ptt_worker_.reset();
     engine_.reset();
@@ -493,7 +495,7 @@ std::string App::export_file_name(const ReceivedFrame& frame) {
 void App::save_displayed_frame(const std::string& path) {
     const ReceivedFrame* frame = displayed_frame();
     if (frame == nullptr || !frame->picture) return;
-    // 和收到的畫面一樣大的 PNG（96×72，模式 5–7 與 15 是 192×144），像素完全相同
+    // 和收到的畫面一樣大的 PNG（96×72，模式 4–7 與 15 是 192×144），像素完全相同
     if (!write_png(path, frame->picture->rgb.data(), frame->picture->width(), frame->picture->height())) notice = LF("存檔失敗：%@", {path});
 }
 
@@ -936,7 +938,7 @@ void App::open_dropped(const std::vector<std::string>& paths) {
     open_video(first_file, true);
 }
 
-/// 圖片序列的預覽：「下一張要送的」那一張縮成送出的大小（96×72，模式 5–7 與 15 是 192×144）、印上畫布的樣子。
+/// 圖片序列的預覽：「下一張要送的」那一張縮成送出的大小（96×72，模式 4–7 與 15 是 192×144）、印上畫布的樣子。
 /// 位置、縮放方式、畫布或送出的大小變了就重算。
 /// 一次只算一張：還在算的時候位置又變了（拖著滑桿），等這一張算完再算最新的那一張，不會越積越多。
 void App::refresh_image_preview() {
@@ -1099,7 +1101,8 @@ void App::publish_transmit_display() {
     if (!is_on_air() || !tx_display_) return;
     if (tx_frame_number != tx_display_->number || !tx_preview) {
         tx_frame_number = tx_display_->number;
-        tx_preview = tx_display_->preview;
+        // 預覽另外解的模式：這一張的預覽可能還沒解好，先留著上一張的，解好了再換（見 decode_next_transmit_preview）
+        if (tx_display_->preview) tx_preview = tx_display_->preview;
     }
     tx_frames_sent = tx_display_->sent;
     tx_frame_progress = tx_display_->progress;
@@ -1107,7 +1110,7 @@ void App::publish_transmit_display() {
 }
 
 /// 來源有新的一格（或縮放方式、畫布、送出的畫面大小改了）時，重算預覽。預覽就是會送出去的樣子：
-/// 和送出的畫面一樣大（96×72，模式 5–7 與 15 是 192×144），畫布的字也印在上面。
+/// 和送出的畫面一樣大（96×72，模式 4–7 與 15 是 192×144），畫布的字也印在上面。
 void App::refresh_preview() {
     const SourceFramePtr frame = latest_frame_;
     const ScaleMode mode = settings.scale_mode;
@@ -1252,6 +1255,7 @@ void App::start_transmit(bool from_start) {
     tx_frame_number = 0;
     tx_frame_progress = 0;
     tx_preview.reset();
+    tx_preview_waiting_.reset();
     on_air_.clear();
     tx_next_number_ = 1;
     tx_preparing_ = true;
@@ -1277,7 +1281,9 @@ void App::start_transmit(bool from_start) {
             tx_ends_after_first_ = ended && capture.image.has_value();
             tx_last_rgb_ = capture.rgb;
             const Picture picture = apply_canvas(*capture.rgb);   // 畫布的字在這裡印上去；tx_last_rgb_ 留的是沒有印字的
-            tx_worker_->post([this, session, callsign, mode_id, picture] {
+            const ModeInfo* sending = modes::find(mode_id);
+            const bool apart = sending != nullptr && sending->preview_apart();
+            tx_worker_->post([this, session, callsign, mode_id, picture, apart] {
                 // 上一次若有編好卻沒送出去的幀（取消、PTT 失敗），先取消它，再把重取樣濾波器清乾淨
                 CoreTransmitter& transmitter = engine_->transmitter;
                 transmitter.discard_last();
@@ -1285,7 +1291,7 @@ void App::start_transmit(bool from_start) {
                 transmitter.set_mode(mode_id);
                 transmitter.set_callsign(callsign);
                 const double began = uptime_seconds();
-                std::optional<EncodedFrame> frame = transmitter.encode(picture);
+                std::optional<EncodedFrame> frame = transmitter.encode(picture, apart);
                 const double spent = uptime_seconds() - began;
                 post_main([this, session, frame, spent] {
                     if (session == tx_session_) tx_prepare_seconds_ = spent;
@@ -1452,9 +1458,45 @@ bool App::enqueue(const EncodedFrame& frame) {
     on_air.image = tx_pending_image_;
     tx_pending_image_.reset();
     on_air_.push_back(std::move(on_air));
+    if (!frame.values.empty()) schedule_transmit_preview(frame.values, frame.mode_id, tx_next_number_);
     ++tx_next_number_;
     tx_preparing_ = false;
     return true;
+}
+
+/// 預覽另外解的那一張（ModeInfo::preview_apart）：排進去解。
+void App::schedule_transmit_preview(std::vector<float> values, int mode_id, int number) {
+    tx_preview_waiting_ = PendingPreview{std::move(values), mode_id, number, tx_session_};
+    if (!tx_preview_busy_) decode_next_transmit_preview();
+}
+
+/// 解等著的那一張，解好了補到它在 on_air_ 裡的那一筆上。它已經在播的話畫面上馬上換；還沒輪到它，輪到時 tx_tick 會帶著。
+void App::decode_next_transmit_preview() {
+    if (!tx_preview_waiting_) return;
+    PendingPreview job = std::move(*tx_preview_waiting_);
+    tx_preview_waiting_.reset();
+    if (job.session != tx_session_) return;   // 那一次發射已經結束
+    tx_preview_busy_ = true;
+    tx_preview_worker_->post([this, job = std::move(job)] {
+        const double began = uptime_seconds();
+        PicturePtr picture = preview_from_values(job.values, job.mode_id);
+        const double spent = uptime_seconds() - began;
+        post_main([this, picture, spent, number = job.number, session = job.session] {
+            tx_preview_busy_ = false;
+            if (session == tx_session_ && picture) {
+                for (OnAirFrame& frame : on_air_) {
+                    if (frame.number == number) frame.preview = picture;
+                }
+                const bool playing = number <= tx_frame_number;
+                if (playing) tx_preview = picture;
+                char text[160];
+                std::snprintf(text, sizeof text, "第 %d 張的預覽另外解好了（%.0f 毫秒）%s", number, spent * 1000.0,
+                              playing ? "，它已經在播" : "，它還沒開始播");
+                note(text);
+            }
+            decode_next_transmit_preview();
+        });
+    });
 }
 
 double App::prepare_lead() const { return std::max(kPrepareLeadSeconds, tx_prepare_seconds_ * 1.5 + 0.25); }
@@ -1553,8 +1595,10 @@ void App::prepare_next_frame() {
         const bool last_picture = accept(capture);
         tx_last_rgb_ = rgb;
         const Picture picture = apply_canvas(*rgb);   // 發射中改了畫布的字，下一張就照新的印
-        tx_worker_->post([this, session, started, last_picture, picture] {
-            std::optional<EncodedFrame> frame = engine_->transmitter.encode(picture);
+        const ModeInfo* sending = modes::find(tx_mode_id);
+        const bool apart = sending != nullptr && sending->preview_apart();
+        tx_worker_->post([this, session, started, last_picture, picture, apart] {
+            std::optional<EncodedFrame> frame = engine_->transmitter.encode(picture, apart);
             post_main([this, session, started, last_picture, frame] {
                 if (session != tx_session_) return;
                 // 下一次要提早多久：以這次從取畫面到編好的時間為準；比上次快的話慢慢降回來
@@ -1699,6 +1743,7 @@ void App::end_transmit(const std::optional<std::string>& failure) {
     tx_mode_id = settings.tx_mode_id;
     on_air_.clear();
     tx_preview.reset();
+    tx_preview_waiting_.reset();
     // 接收在開始送音訊時停掉了（還沒走到那一步就取消的話，接收一直沒停）
     if (engine_ && !engine_->is_receiving()) start_receiving();
     if (scheduled_run) finish_scheduled_run(failure);

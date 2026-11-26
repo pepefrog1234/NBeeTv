@@ -4,7 +4,7 @@ import CNBTV
 import CoreGraphics
 import Foundation
 
-/// 畫面的大小（像素）。由模式決定：模式 11–14 是 96×72，模式 5–7 與 15（給 FM 用的大畫面）是 192×144。
+/// 畫面的大小（像素）。由模式決定：模式 3 與 11–14 是 96×72，模式 4–7 與 15（給 FM 用的大畫面）是 192×144。
 struct PictureSize: Hashable {
     let width: Int
     let height: Int
@@ -21,7 +21,7 @@ struct PictureSize: Hashable {
 }
 
 enum NBTV {
-    static let imageWidth = 96                           // 標準的畫面大小（模式 11–14）
+    static let imageWidth = 96                           // 標準的畫面大小（模式 3 與 11–14）
     static let imageHeight = 72
     static let rgbBytes = imageWidth * imageHeight * 3   // 20736
     static let spectrumBins = 257                        // 0–3000 Hz
@@ -31,6 +31,11 @@ enum NBTV {
     static let bandHighHz = 2648.0
 
     static var version: String { String(cString: nbtv_version_string()) }
+
+    /// 畫面的編解碼（類神經網路的推論）最多同時用幾條執行緒。核心預設是邏輯處理器數、最多 8 條；0 回到預設，1 是完全不分工。
+    /// 整個行程一起生效。app 平常不改它，自我測試用它模擬核心少的電腦。
+    static func setInferenceThreads(_ count: Int) { nbtv_set_inference_threads(Int32(count)) }
+    static var inferenceThreads: Int { Int(nbtv_inference_threads()) }
 
     /// 把輸入整理成可以傳送的呼號（轉大寫、去掉不能用的字元、最多 9 個字元）。
     static func normalizeCallsign(_ text: String) -> String {
@@ -69,9 +74,10 @@ enum NBTV {
 enum LearnedModel {
     /// Resources 裡的權重檔（不含副檔名）。檔名就是模型的名稱：「訓練完成的年月日-當天第幾個完成的」。
     /// 哪一份給哪個模式用由核心決定：模型的實數個數、寬度與畫面大小都和模式的相同就是。
-    /// 依序是模式 11、12、13、14、15 用的；第三、四份是加寬的大型網路（各 46 MB），第五份起的畫面是 192×144。
-    /// 模式 5 和 15 共用第五份（同一個模型，只是模式 5 的幀沒有導頻）；最後兩份是模式 6、7 用的（23、36 個通道）。
-    static let resourceNames = ["261123-1", "261122-3", "261122-4", "261123-4", "261125-3", "261126-2", "261126-1"]
+    /// 依序是模式 11、12、13、14、15 用的；第三、四份是加寬的大型網路（各 46 MB），第五份起的三份畫面是 192×144。
+    /// 模式 5 和 15 共用第五份（同一個模型，只是模式 5 的幀沒有導頻）；接著兩份是模式 6、7 用的（23、36 個通道）。
+    /// 最後兩份是模式 3、4 用的，都是加寬的（各 46 MB）：模式 3 的畫面是 96×72，模式 4 是 192×144。
+    static let resourceNames = ["261123-1", "261122-3", "261122-4", "261123-4", "261125-3", "261126-2", "261126-1", "261126-4", "261126-5"]
 
     /// 載入成功的模型與它的名稱。找不到或損壞的那一份不在裡面：對應的模式不會列在選單裡，收到那種幀也不會有畫面。
     static let loaded: [(name: String, handle: OpaquePointer)] = resourceNames.compactMap { name in
@@ -107,6 +113,17 @@ enum LearnedModel {
     static func idText(values: Int, width: Int, picture: PictureSize = .standard) -> String? {
         handle(values: values, width: width, picture: picture).map { String(format: "%08X", nbtv_model_id($0)) }
     }
+
+    /// 沒有雜訊時對方看到的畫面：把一張畫面的通道值（EncodedFrame.values）用那個模式的模型解回來。
+    /// 和發射機編碼時順便給的預覽是同一個結果；分開來是為了放到別的佇列上做（見 ModeInfo.previewApart）。
+    /// 模型載入之後不會被改動，所以可以和發射、接收同時進行。個數對不上、沒有那個模式的模型回傳 nil。
+    static func preview(values: [Float], modeID: Int) -> Data? {
+        guard let mode = Modes.find(modeID), values.count == mode.learnedValues,
+              let model = handle(values: mode.learnedValues, width: mode.learnedWidth, picture: mode.pictureSize) else { return nil }
+        var rgb = [UInt8](repeating: 0, count: mode.pictureSize.rgbBytes)
+        guard nbtv_model_decode(model, values, Int32(values.count), &rgb) == 0 else { return nil }
+        return Data(rgb)
+    }
 }
 
 /// 接收端「合併最近幾幀」用的權重（核心的 nbtv_merge）：解每一幀之前，畫面沒變的地方把前面幾幀收到的值合進來，
@@ -139,30 +156,40 @@ struct ModeInfo: Identifiable, Hashable {
     let payloadSymbols: Int
     let learnedValues: Int  // 一張畫面變成幾個實數
     let learnedWidth: Int   // 模型第一層的通道數
-    var pictureSize = PictureSize.standard   // 畫面的大小：96×72；模式 5–7 與 15 是 192×144
-    var scatteredPilots = true               // 酬載裡有沒有散佈導頻；沒有的是給 FM 用的幀（模式 5–7），同樣的時間多送 2 成的資料
+    var pictureSize = PictureSize.standard   // 畫面的大小：96×72；模式 4–7 與 15 是 192×144
+    var scatteredPilots = true               // 酬載裡有沒有散佈導頻；沒有的是給 FM 用的幀（模式 3–7），同樣的時間多送 2 成的資料
     var modelName = ""      // 用的模型的名稱（訓練完成的年月日-當天第幾個），例如「261123-1」
     var quality = ""        // 快速／粗略／中等／細緻，依每幀的長短
     var largeModel = false  // 用的是加寬的大型網路（運算量約四倍）
 
-    /// 畫面比標準的 96×72 大：給 VHF／UHF 的 FM 語音通道用的模式（模式 15，以及沒有導頻的模式 5–7）。
+    /// 畫面比標準的 96×72 大：給 VHF／UHF 的 FM 語音通道用的模式（模式 15，以及沒有導頻的模式 4–7）。
     /// 它的模型只照訊號好的情形訓練，訊號弱、有衰落時比其他模式差，不適合短波。
     var largePicture: Bool { pictureSize != .standard }
 
     /// 「模式 11」
     var name: String { L("模式 %d", id) }
 
-    /// 幀裡沒有導頻（模式 5–7）。這種幀只能用在訊號穩定、沒有頻偏的 FM 語音通道。
+    /// 幀裡沒有導頻（模式 3–7）。這種幀只能用在訊號穩定、沒有頻偏的 FM 語音通道。
     var pilotFree: Bool { !scatteredPilots }
 
-    /// 「中等」；大畫面的模式是「FM 大畫面」，其中幀裡沒有導頻的是「FM 無導頻」
-    var detail: String { largePicture ? (pilotFree ? L("FM 無導頻") : L("FM 大畫面")) : quality }
+    /// 「中等」；給 FM 用的模式是「FM 大畫面」，幀裡沒有導頻的（不管畫面大小）是「FM 無導頻」
+    var detail: String { pilotFree ? L("FM 無導頻") : largePicture ? L("FM 大畫面") : quality }
 
     /// 模式選單裡那一列的說明。沒有導頻的幾個模式自成一組（標題已經說了是哪一種幀），這裡只寫畫面的細緻程度：
-    /// 一張畫面送的值愈多愈細（模式 5 和模式 15 一樣多，是「標準」；模式 6 是「較細」；模式 7 是「細緻」）。
+    /// 一張畫面送的值愈多愈細（模式 3、4 最少，是「快速」；模式 5 和模式 15 一樣多，是「標準」；模式 6 是「較細」；模式 7 是「細緻」）。
     var menuDetail: String {
         guard pilotFree else { return detail }
-        return learnedValues <= 8000 ? L("標準") : learnedValues <= 12000 ? L("較細") : L("細緻")
+        return learnedValues <= 4000 ? L("快速") : learnedValues <= 8000 ? L("標準") : learnedValues <= 12000 ? L("較細") : L("細緻")
+    }
+
+    /// 發射時「對方看到的畫面」要不要另外解（不接在編碼後面）。編碼和預覽的解碼原本是一口氣做完的；
+    /// 加寬的模型配上大畫面（模式 4）只用一條執行緒時編一張約 0.4 秒、解一張約 0.7 秒（M4 Max），接在一起比一幀還長。
+    /// 核心會把推論分給幾條執行緒，快的電腦上不成問題（這台是 0.08 與 0.13 秒）；核心少、比較慢的電腦上發射就會接不上。
+    /// 這裡用模型的大小估「只用一條執行緒」解一張的時間（一般的模型、96×72 約 0.054 秒；寬一倍或畫面大一倍各是四倍），
+    /// 超過半幀就分開：編碼的那條佇列只做編碼，預覽晚一點才出來（見 AppModel 的 scheduleTransmitPreview）。
+    var previewApart: Bool {
+        let wide = Double(learnedWidth) / 32.0, large = Double(pictureSize.rgbBytes) / Double(PictureSize.standard.rgbBytes)
+        return 0.054 * wide * wide * large > 0.5 * frameSeconds
     }
 
     /// 「模式 11 · 中等」
@@ -176,7 +203,8 @@ struct ModeInfo: Identifiable, Hashable {
 
     /// 右側欄模式鈕下面的說明
     var summary: String {
-        let text = pilotFree ? L("每張 %@ · %@ 的大畫面，幀裡沒有導頻，只給 FM 用，實驗中", secondsText, pictureSize.text)
+        let text = pilotFree && largePicture ? L("每張 %@ · %@ 的大畫面，幀裡沒有導頻，只給 FM 用，實驗中", secondsText, pictureSize.text)
+            : pilotFree ? L("每張 %@ · 幀裡沒有導頻，只給 FM 用，實驗中", secondsText)
             : largePicture ? L("每張 %@ · %@ 的大畫面，給 FM 用，實驗中", secondsText, pictureSize.text)
             : largeModel ? L("每張 %@ · 大型的類神經網路編碼，實驗中", secondsText) : L("每張 %@ · 類神經網路編碼，實驗中", secondsText)
         return modelName.isEmpty ? text : text + L(" · 模型 %@", modelName)
@@ -211,8 +239,8 @@ enum Modes {
     }()
 
     /// 選單的順序：依每幀的長短由快到慢；一樣長的，模型小的在前（模式編號是 14、12、11、13）。
-    /// 大畫面的模式是另外一類，排在後面：先是有導頻的（15），再是沒有導頻的（5、6、7，由快到慢）；
-    /// 選單裡各自成一組，見 ModeMenuView。
+    /// 給 FM 用的模式是另外一類，排在後面：畫面 96×72、沒有導頻的（3）；大畫面有導頻的（15）；
+    /// 大畫面沒有導頻的（4、5、6、7，由快到慢）。選單裡各自成一組，見 ModeMenuView。
     static let menuOrder: [ModeInfo] = all.sorted {
         ($0.pictureSize.width, $0.pilotFree ? 1 : 0, $0.payloadSymbols, $0.learnedWidth, $0.id)
             < ($1.pictureSize.width, $1.pilotFree ? 1 : 0, $1.payloadSymbols, $1.learnedWidth, $1.id)
@@ -232,7 +260,7 @@ struct DecodedFrame {
     let sequence: Int
     let snrDb: Double
     let offsetHz: Double
-    let rgb: Data?          // 有畫面時是「寬×高×3」：96×72，模式 5–7 與 15 是 192×144（見 NBTV.pictureSize(ofRGB:)）
+    let rgb: Data?          // 有畫面時是「寬×高×3」：96×72，模式 4–7 與 15 是 192×144（見 NBTV.pictureSize(ofRGB:)）
 }
 
 final class CoreReceiver {
@@ -288,9 +316,10 @@ final class CoreReceiver {
 /// 發射端做好的一幀。
 struct EncodedFrame {
     let samples: [Float]   // 48 kHz
-    let preview: Data      // 沒有雜訊時對方看到的畫面，和送進去的那一張一樣大
+    let preview: Data      // 沒有雜訊時對方看到的畫面，和送進去的那一張一樣大；預覽另外解的時候是空的
     let modeID: Int
     let sequence: Int
+    var values: [Float] = []   // 預覽另外解的時候：這張畫面的通道值，交給 LearnedModel.preview(values:modeID:)
 }
 
 final class CoreTransmitter {
@@ -318,12 +347,25 @@ final class CoreTransmitter {
 
     /// 把一張畫面做成一幀音訊。畫面要是目前這個模式的大小（pictureSize）。
     /// 失敗（大小不對、目前的模式沒有模型）回傳 nil。
-    func encode(rgb: Data) -> EncodedFrame? {
+    /// previewApart：不在這裡解預覽，改給這張畫面的通道值，之後由 LearnedModel.preview(values:modeID:) 在別的佇列上解
+    /// （模型大、幀又短的模式用，見 ModeInfo.previewApart）。
+    func encode(rgb: Data, previewApart: Bool = false) -> EncodedFrame? {
         guard rgb.count == pictureSize.rgbBytes else { return nil }
         let count = frameSamples
         var samples = [Float](repeating: 0, count: count)
-        var preview = [UInt8](repeating: 0, count: pictureSize.rgbBytes)
         var info = nbtv_tx_frame_info()
+        if previewApart {
+            let written = rgb.withUnsafeBytes { src in
+                nbtv_tx_encode_image(handle, src.bindMemory(to: UInt8.self).baseAddress, &samples, Int32(count), nil, &info)
+            }
+            guard Int(written) == count else { return nil }
+            var mode = nbtv_mode_info()
+            guard nbtv_mode_by_id(info.mode_id, &mode) == 0 else { return nil }
+            var values = [Float](repeating: 0, count: Int(mode.learned_values))
+            guard nbtv_tx_last_values(handle, &values, Int32(values.count)) == Int32(values.count) else { return nil }
+            return EncodedFrame(samples: samples, preview: Data(), modeID: Int(info.mode_id), sequence: Int(info.sequence), values: values)
+        }
+        var preview = [UInt8](repeating: 0, count: pictureSize.rgbBytes)
         let written = rgb.withUnsafeBytes { src in
             nbtv_tx_encode_image(handle, src.bindMemory(to: UInt8.self).baseAddress, &samples, Int32(count), &preview, &info)
         }

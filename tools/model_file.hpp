@@ -53,12 +53,14 @@ inline std::string default_model_path(int mode_id) {
                        : mode_id == 5  ? "261125-3"   // 和模式 15 同一個模型，只是幀裡沒有導頻
                        : mode_id == 6  ? "261126-2"
                        : mode_id == 7  ? "261126-1"
+                       : mode_id == 3  ? "261126-4"   // FM 用、沒有導頻的幀裡最快的：96×72，加寬的模型
+                       : mode_id == 4  ? "261126-5"   // 同一種幀的 1 秒大畫面：192×144，加寬的模型
                                        : nullptr;
     return name != nullptr ? model_file_path(name) : std::string();
 }
 
 // 接收端合併最近幾幀用的權重檔（core/src/learned_merge.hpp），每個模式的模型各配一份；沒有的模式回傳空字串
-// （192×144 大畫面的模式 5–7 與 15 沒有）。
+// （給 FM 用的模式 3–7 與 15 沒有）。
 inline std::string default_merge_path(int mode_id) {
     const char* name = mode_id == 11 ? "261124-10" : mode_id == 12 ? "261124-8" : mode_id == 13 ? "261124-9" : mode_id == 14 ? "261124-7" : nullptr;
     return name != nullptr ? model_file_path(name) : std::string();

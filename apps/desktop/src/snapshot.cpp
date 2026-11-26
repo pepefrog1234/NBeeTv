@@ -222,7 +222,7 @@ std::unique_ptr<App> make_transmitting_app(const std::deque<App::ReceivedFrame>&
 }
 
 std::unique_ptr<App> make_fm_app(int tx_mode_id, bool quick) {
-    // 哪幾個模式照核心的模式表分的組來挑，不寫死編號：有導頻的大畫面（現在是模式 15）、沒有導頻的大畫面（模式 5、6、7）
+    // 哪幾個模式照核心的模式表分的組來挑，不寫死編號：有導頻的大畫面（現在是模式 15）、沒有導頻的大畫面（模式 4 到 7）
     const modes::MenuGroups groups = modes::menu_groups();
     if (groups.large.empty() || groups.pilot_free.empty()) return nullptr;
     const ModeInfo with_pilots = groups.large.front(), pilot_free = groups.pilot_free.front();

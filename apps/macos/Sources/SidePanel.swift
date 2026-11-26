@@ -179,7 +179,7 @@ struct SidePanel: View {
     }
 
     private var sourceCaption: String {
-        // 送出的大小跟著發射模式：96×72，模式 5–7 與 15 是 192×144
+        // 送出的大小跟著發射模式：96×72，模式 4–7 與 15 是 192×144
         let sent = model.txPictureSize.text
         guard let size = model.sourceSize, model.sourcePreview != nil else { return L("來源 — → 送出 %@", sent) }
         return L("來源 %d×%d → 送出 %@", Int(size.width), Int(size.height), sent)

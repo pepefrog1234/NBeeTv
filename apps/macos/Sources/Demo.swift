@@ -14,7 +14,7 @@ enum Demo {
         return parsePPM(data)
     }
 
-    /// 一張 96×72 的畫面每個像素重複整數倍，放大成 size（模式 5–7 與 15 的 192×144 是兩倍）。已經是那個大小就原樣回傳；
+    /// 一張 96×72 的畫面每個像素重複整數倍，放大成 size（模式 4–7 與 15 的 192×144 是兩倍）。已經是那個大小就原樣回傳；
     /// 不是 96×72 的整數倍時回傳 nil。核心的測試（core/tests/test_images.hpp）也是這樣放大測試圖的。
     static func enlarge(_ rgb: Data, to size: PictureSize) -> Data? {
         if rgb.count == size.rgbBytes { return rgb }

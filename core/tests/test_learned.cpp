@@ -67,6 +67,11 @@ const ModelCase kCases[] = {
     {6, "261126-2", 0x62F8C6B0u, {28.333, 30.458, 30.140}, 28.106, 28.3, 0.0, 25.4, 0.0, 0.0},
     // 模式 7：36 個通道。量到的：收發鏈 29.9 dB，衰落谷底 28.6 dB
     {7, "261126-1", 0xB33D1DA6u, {30.381, 32.535, 32.239}, 29.907, 29.9, 0.0, 26.9, 0.0, 0.0},
+    // 模式 3、4：同一種幀裡快的兩個，用的是加寬的模型（也只照 10 dB 以上訓練）。
+    // 模式 3：畫面 96×72、16 個通道，每張 0.667 秒。量到的：收發鏈（白雜訊 10 dB）23.8 dB，衰落谷底 23.5 dB
+    {3, "261126-4", 0x93C57342u, {24.685, 26.200, 25.538}, 23.932, 23.8, 0.0, 21.8, 0.0, 0.0},
+    // 模式 4：畫面 192×144、7 個通道，每張 1.013 秒。量到的：收發鏈 24.6 dB，衰落谷底 24.0 dB
+    {4, "261126-5", 0xC2978833u, {25.099, 27.132, 26.414}, 24.714, 24.6, 0.0, 22.3, 0.0, 0.0},
 };
 
 std::vector<std::uint8_t> read_file(const std::string& path) {
@@ -415,28 +420,64 @@ void test_frame(const ModelCase& model, const LearnedCodec& codec) {
     // 打散的目的：一片衰落（這裡是 12 個載波 × 四成的符號，佔一成）抹掉的值，要平均分到畫面的每個位置，
     // 不能集中在某幾個位置上。照原來的順序放的話（模式 11），最慘的位置會少掉 28% 的通道、有些位置完全不受影響。
     {
-        const std::vector<CellPos> positions = data_cell_positions(mode.payload_symbols);
+        const std::vector<CellPos> positions = data_cell_positions(mode);   // 這個模式的幀的排法（有沒有散佈導頻不一樣）
         const int first_symbol = mode.payload_symbols / 5, last_symbol = first_symbol + 2 * mode.payload_symbols / 5;
-        const int places = (mode.image_height / 8) * (mode.image_width / 8);        // 潛在張量的格子：108 個位置，大畫面是 432 個
-        const double channels = static_cast<double>(mode.learned_values) / places;  // 每個位置有幾個通道：72、24、14，大畫面是 18
-        std::vector<int> lost(static_cast<std::size_t>(places), 0);
+        const int places = (mode.image_height / 8) * (mode.image_width / 8);  // 潛在張量的格子：108 個位置，大畫面是 432 個
+        const int channels = mode.learned_values / places;                    // 每個位置有幾個通道：72、24、16、14，大畫面是 36 到 7
+        std::vector<int> lost(static_cast<std::size_t>(places), 0);    // 打散之後，每個位置少掉幾個通道
+        std::vector<int> plain(static_cast<std::size_t>(places), 0);   // 對照：照原來的順序放（編碼器的輸出是 [通道][列][行]）
         int total = 0;
         for (int k = 0; k < mode.learned_values; ++k) {
             const CellPos& at = positions[static_cast<std::size_t>(mode.interleaved_position(kHeaderCells + k / 2))];
             const int carrier = at.bin - kFirstBin;
             if (carrier < 30 || carrier >= 42 || at.symbol < first_symbol || at.symbol >= last_symbol) continue;
-            ++lost[static_cast<std::size_t>(order[static_cast<std::size_t>(k)] % places)];  // 編碼器的輸出是 [通道][列][行]
+            ++lost[static_cast<std::size_t>(order[static_cast<std::size_t>(k)] % places)];
+            ++plain[static_cast<std::size_t>(k % places)];
             ++total;
         }
+        // 抹掉的比例就是那一片佔酬載的比例（幀短的時候四成的符號湊不到整數，略少於一成）
         const double mean = static_cast<double>(total) / mode.learned_values;
+        const double share = 12.0 / kCarriers * (last_symbol - first_symbol) / mode.payload_symbols;
+        CHECK_NEAR(mean, share, 0.02);
         CHECK_NEAR(mean, 0.10, 0.02);
-        // 每個位置的通道裡各抽一成：和平均的差距在三個標準差多一點之內（72 個通道是 ±0.11，24 個是 ±0.19）。
-        // 大畫面有 432 個位置、每個位置只有 18 個通道，最大的那一個自然離平均比較遠，多留一個標準差。
-        const double spread = (places > 108 ? 4.1 : 3.1) * std::sqrt(mean * (1.0 - mean) / channels);
-        const double most = *std::max_element(lost.begin(), lost.end()) / channels, least = *std::min_element(lost.begin(), lost.end()) / channels;
-        std::printf("  一片衰落抹掉 %.1f%% 的值：各個位置少掉的通道在 %.1f%% 到 %.1f%% 之間\n", 100.0 * mean, 100.0 * least, 100.0 * most);
-        CHECK(most < mean + spread);
-        CHECK(least > mean - spread);
+        // 打散得夠亂的話，一個位置少掉的通道數是二項分布（每個通道各有 mean 的機率被抹掉）。兩項檢查：
+        // 一、各個位置之間的離散程度（變異數 ÷ 二項分布的變異數）接近 1。位置愈多這個比值愈準：容許四個標準差。
+        //     模式 11 不打散的話是 7.5（格點交錯的間隔和 108 個位置剛好對上，一整片的值落在少數幾個位置）；
+        //     別的模式不打散反而比亂數均勻（0.2 到 0.7），但那是碰巧，換一片衰落的形狀就不一定，所以一律打散。
+        // 二、最慘與最好的位置不超出二項分布的尾巴：這麼多個位置裡平均不到 0.01 個會到的數目，就算是集中了。
+        //     通道少的模式（模式 4 只有 7 個）一個位置少掉三四個通道是常有的事，所以這裡用二項分布算，不用常態近似。
+        const auto dispersion = [&](const std::vector<int>& counts) {
+            double sum = 0.0, squares = 0.0;
+            for (int c : counts) {
+                sum += c;
+                squares += static_cast<double>(c) * c;
+            }
+            const double m = sum / places;
+            return (squares / places - m * m) / (channels * mean * (1.0 - mean));
+        };
+        std::vector<double> pmf(static_cast<std::size_t>(channels) + 1);   // 二項分布：少掉 k 個通道的機率
+        pmf[0] = std::pow(1.0 - mean, channels);
+        for (int k = 1; k <= channels; ++k) {
+            pmf[static_cast<std::size_t>(k)] = pmf[static_cast<std::size_t>(k) - 1] * (channels - k + 1) / k * mean / (1.0 - mean);
+        }
+        int upper = channels + 1, lower = -1;   // 少掉 upper 個以上、或 lower 個以下，就算是集中了
+        for (double tail = 0.0; upper > 0 && places * (tail + pmf[static_cast<std::size_t>(upper) - 1]) < 0.01; --upper) {
+            tail += pmf[static_cast<std::size_t>(upper) - 1];
+        }
+        for (double tail = 0.0; lower < channels && places * (tail + pmf[static_cast<std::size_t>(lower) + 1]) < 0.01; ++lower) {
+            tail += pmf[static_cast<std::size_t>(lower) + 1];
+        }
+        const int most = *std::max_element(lost.begin(), lost.end()), least = *std::min_element(lost.begin(), lost.end());
+        const int plain_most = *std::max_element(plain.begin(), plain.end());
+        const double spread = dispersion(lost), plain_spread = dispersion(plain);
+        std::printf("  一片衰落抹掉 %.1f%% 的值：各個位置少掉 %d 到 %d 個通道（共 %d 個；二項分布容許 %d 到 %d），離散程度 %.2f；"
+                    "不打散的話最多少掉 %d 個、離散程度 %.1f\n",
+                    100.0 * mean, least, most, channels, lower + 1, upper - 1, spread, plain_most, plain_spread);
+        CHECK(most < upper);
+        CHECK(least > lower);
+        CHECK_NEAR(spread, 1.0, 4.0 * std::sqrt(2.0 / (places - 1)));
+        // 這兩項檢查分得出「沒有打散」：模式 11、13 的幀照原來的順序放，兩項都過不了
+        if (mode.payload_symbols == 100 && places == 108) CHECK(plain_spread > 3.0 && plain_most >= upper);
     }
 
     // 各格點的雜訊一樣大時，接收端的處理不起作用，結果和直接解碼相同
@@ -958,7 +999,7 @@ int main() {
         models.push_back(codec);
         files.push_back(std::move(file));
     }
-    if (models.size() == std::size(kCases)) {  // 依 kCases 的順序：模式 11、12、13、14、15，然後是 5、6、7
+    if (models.size() == std::size(kCases)) {  // 依 kCases 的順序：模式 11、12、13、14、15，然後是 5、6、7、3、4
         test_two_models(models, files);
         test_two_widths(models[0], models[2]);
         test_two_sizes(models[0], models[4]);

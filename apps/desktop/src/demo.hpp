@@ -15,7 +15,7 @@
 namespace nbtvgui::demo {
 
 /// 內附的測試圖（96×72）：coffee、rocket、cat（core/tests/data 裡的那三張，建置時編進執行檔）。
-/// size 比 96×72 大時每個像素原樣重複放大（模式 5–7 與 15 的 192×144 是兩倍）；核心的測試（core/tests/test_images.hpp）
+/// size 比 96×72 大時每個像素原樣重複放大（模式 4–7 與 15 的 192×144 是兩倍）；核心的測試（core/tests/test_images.hpp）
 /// 也是這樣放大測試圖的。
 std::optional<Picture> test_image(const std::string& name, PictureSize size = kStandardPicture);
 

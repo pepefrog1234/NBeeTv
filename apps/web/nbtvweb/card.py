@@ -170,7 +170,7 @@ class CardContent:
     modes: str = ""
     frames: int = 0
     snr: str = ""
-    picture: bytes = b""       # 正中那一幀的 RGB：96×72，模式 5–7 與 15 是 192×144
+    picture: bytes = b""       # 正中那一幀的 RGB：96×72，模式 4–7 與 15 是 192×144
     picture_caption: str = ""
     strip: list[bytes] = field(default_factory=list)
 
@@ -305,7 +305,7 @@ def _fit(fonts: Fonts, role: str, text: str, width: float, size: int, smallest: 
 
 
 def _picture(rgb: bytes, scale: int) -> Image.Image:
-    """一張畫面畫成 96×72 的 scale 倍。畫面本身比較大（模式 5–7 與 15 的 192×144）時也畫成同樣的大小，版面不必跟著變：
+    """一張畫面畫成 96×72 的 scale 倍。畫面本身比較大（模式 4–7 與 15 的 192×144）時也畫成同樣的大小，版面不必跟著變：
     剛好是整數倍就一格一格放大（不內插），否則重新取樣。"""
     width, height = picture_size(rgb)
     image = Image.frombytes("RGB", (width, height), rgb)

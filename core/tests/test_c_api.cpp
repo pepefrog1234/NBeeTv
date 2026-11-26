@@ -73,7 +73,7 @@ void loopback(int rate, int mode_id, const char* weights, const char* image_name
     nbtv_tx* tx = nbtv_tx_create(rate);
     CHECK(tx != nullptr);
     CHECK_EQ(nbtv_tx_mode(tx), 11);  // 預設是模式表的第一個
-    for (int gone : {0, 1, 2, 4, 8, 9, 10, 16}) CHECK_EQ(nbtv_tx_set_mode(tx, gone), -1);  // 沒有定義，或已經移除的編號
+    for (int gone : {0, 1, 2, 8, 9, 10, 16}) CHECK_EQ(nbtv_tx_set_mode(tx, gone), -1);  // 沒有定義，或已經移除的編號
     CHECK_EQ(nbtv_tx_mode(tx), 11);
     CHECK_EQ(nbtv_tx_set_mode(tx, mode_id), 0);
     CHECK_EQ(nbtv_tx_mode(tx), mode_id);
@@ -86,7 +86,11 @@ void loopback(int rate, int mode_id, const char* weights, const char* image_name
     std::vector<std::uint8_t> preview(rgb_bytes);
     std::vector<float> frame(static_cast<std::size_t>(frame_samples));
     nbtv_tx_frame_info info{};
+    // 還沒編過：沒有通道值可以取
+    std::vector<float> values(static_cast<std::size_t>(mode.learned_values));
+    CHECK_EQ(nbtv_tx_last_values(tx, values.data(), mode.learned_values), -1);
     CHECK_EQ(nbtv_tx_encode_image(tx, rgb.data(), frame.data(), frame_samples - 1, nullptr, nullptr), -1);  // 容量不足
+    CHECK_EQ(nbtv_tx_last_values(tx, values.data(), mode.learned_values), -1);                             // 失敗的那一次也沒有
     CHECK_EQ(nbtv_tx_encode_image(tx, nullptr, frame.data(), frame_samples, nullptr, nullptr), -1);
     CHECK_EQ(nbtv_tx_encode_image(tx, rgb.data(), nullptr, frame_samples, nullptr, nullptr), -1);
     for (int i = 0; i < 2; ++i) {
@@ -105,6 +109,21 @@ void loopback(int rate, int mode_id, const char* weights, const char* image_name
     CHECK(peak <= 1.0f && peak > 0.5f);
     // 預覽是編碼後直接解回來的畫面
     CHECK(test_images::psnr(preview, rgb) > min_psnr);
+    // 分開做也一樣：取出通道值，另外交給模型解，逐位元組相同（外殼把解碼放到別的執行緒上時走的是這條路）
+    CHECK_EQ(nbtv_tx_last_values(tx, values.data(), mode.learned_values - 1), -1);  // 容量不足
+    CHECK_EQ(nbtv_tx_last_values(tx, nullptr, mode.learned_values), -1);
+    CHECK_EQ(nbtv_tx_last_values(nullptr, values.data(), mode.learned_values), -1);
+    CHECK_EQ(nbtv_tx_last_values(tx, values.data(), mode.learned_values), mode.learned_values);
+    double power = 0.0;
+    for (float v : values) power += static_cast<double>(v) * v;
+    CHECK_NEAR(power / mode.learned_values, 0.5, 1e-4);
+    std::vector<std::uint8_t> apart(rgb_bytes, 0);
+    CHECK_EQ(nbtv_model_decode(model, values.data(), mode.learned_values, apart.data()), 0);
+    CHECK(apart == preview);
+    CHECK_EQ(nbtv_model_decode(model, values.data(), mode.learned_values - 1, apart.data()), -1);  // 個數不對
+    CHECK_EQ(nbtv_model_decode(nullptr, values.data(), mode.learned_values, apart.data()), -1);
+    CHECK_EQ(nbtv_model_decode(model, nullptr, mode.learned_values, apart.data()), -1);
+    CHECK_EQ(nbtv_model_decode(model, values.data(), mode.learned_values, nullptr), -1);
 
     nbtv_rx* rx = nbtv_rx_create(rate);
     nbtv_spectrum* sp = nbtv_spectrum_create(rate);
@@ -385,8 +404,14 @@ void test_discard_last() {
         CHECK_EQ(nbtv_tx_encode_image(tx, b.data(), second.data(), n, nullptr, &info), n);
         CHECK_EQ(info.sequence, 1);
         CHECK(first == expect);
+        std::vector<float> values(2592);  // 模式 12 的一張畫面
+        std::vector<std::uint8_t> seen(a.size());
+        CHECK_EQ(nbtv_tx_last_values(tx, values.data(), 2592), 2592);  // 第二幀（火箭）的通道值
+        CHECK_EQ(nbtv_model_decode(model, values.data(), 2592, seen.data()), 0);
+        CHECK(test_images::psnr(seen, b) > 24.8 && test_images::psnr(seen, a) < 15.0);
         CHECK_EQ(nbtv_tx_discard_last(tx), 0);
         CHECK_EQ(nbtv_tx_discard_last(tx), -1);  // 只能取消一次
+        CHECK_EQ(nbtv_tx_last_values(tx, values.data(), 2592), -1);  // 取消的那一幀，通道值也不再給
         const int tail_n = nbtv_tx_finish(tx, tail.data(), 256);
         CHECK_EQ(tail_n, ref_n);
         CHECK(std::equal(tail.begin(), tail.begin() + tail_n, ref_tail.begin()));
@@ -398,6 +423,9 @@ void test_discard_last() {
         // 被取消的那一幀的序號會再用一次；重新編出來的和原本那一幀一模一樣（濾波器也回到原來的狀態）
         CHECK_EQ(nbtv_tx_encode_image(tx, a.data(), first.data(), n, nullptr, &info), n);
         CHECK_EQ(info.sequence, 1);
+        CHECK_EQ(nbtv_tx_last_values(tx, values.data(), 2592), 2592);  // 重新編了一張（咖啡）：給的是這一張的
+        CHECK_EQ(nbtv_model_decode(model, values.data(), 2592, seen.data()), 0);
+        CHECK(test_images::psnr(seen, a) > 23.5);
         std::vector<float> again(first.size());
         CHECK_EQ(nbtv_tx_encode_image(tx, b.data(), again.data(), n, nullptr, &info), n);
         CHECK_EQ(info.sequence, 2);
@@ -917,6 +945,9 @@ int main() {
     loopback(48000, 13, "261122-4", "coffee", 29.2);
     loopback(12000, 14, "261123-4", "rocket", 23.7);
     loopback(48000, 15, "261125-3", "rocket", 29.0);  // FM 用的大畫面：192×144
+    loopback(48000, 5, "261125-3", "cat", 28.4);      // 沒有導頻的幀（和模式 15 同一個模型）
+    loopback(12000, 3, "261126-4", "rocket", 25.9);   // 同一種幀裡最快的：96×72，加寬的模型
+    loopback(48000, 4, "261126-5", "coffee", 24.8);   // 同一種幀的 1 秒大畫面，加寬的模型
     test_model_handling(11, "261123-1", 28.3);
     test_model_handling(12, "261122-3", 23.5);
     test_model_handling(13, "261122-4", 29.4);

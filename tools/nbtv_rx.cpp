@@ -1,4 +1,4 @@
-// nbtv-rx：解 WAV 檔裡的訊號，把收到的畫面存成 PPM（大小跟著模式：模式 11–14 是 96×72，模式 5–7 與 15 是 192×144）。
+// nbtv-rx：解 WAV 檔裡的訊號，把收到的畫面存成 PPM（大小跟著模式：模式 3 與 11–14 是 96×72，模式 4–7 與 15 是 192×144）。
 #include <cmath>
 #include <cstdio>
 #include <memory>

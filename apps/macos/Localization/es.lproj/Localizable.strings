@@ -98,7 +98,10 @@
 "較細" = "Más fina";
 "每張 %@ · %@ 的大畫面，幀裡沒有導頻，只給 FM 用，實驗中" = "%@ por imagen · imagen grande de %@, trama sin pilotos, solo para FM, experimental";
 "FM 大畫面，幀裡沒有導頻（實驗中）" = "Imagen grande para FM, trama sin pilotos (experimental)";
-"畫面 %@。同樣的時間多送 2 成的資料；只給訊號穩定的 FM 用，不適合短波" = "Imagen de %@. Lleva un 20 % más de datos en el mismo tiempo; solo para FM con señal estable, no apta para HF";
+"畫面 %@。同樣的時間多送 2 成的資料；只給訊號穩定的 FM 用，不適合短波" = "Imagen de %@. Lleva un 20 %% más de datos en el mismo tiempo; solo para FM con señal estable, no apta para HF";
+"每張 %@ · 幀裡沒有導頻，只給 FM 用，實驗中" = "%@ por imagen · trama sin pilotos, solo para FM, experimental";
+"FM 語音通道用的快速模式，幀裡沒有導頻（實驗中）" = "Modo rápido para FM, trama sin pilotos (experimental)";
+"畫面 %@。和最快的模式一樣快、比較清楚；只給訊號穩定的 FM 用，不適合短波" = "Imagen de %@. Tan rápido como el modo más rápido y más nítido; solo para FM con señal estable, no apto para HF";
 "快速" = "Rápido";
 "粗略" = "Básico";
 "中等" = "Medio";

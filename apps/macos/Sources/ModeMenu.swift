@@ -1,5 +1,5 @@
-// 發射模式選單：app 裡有權重檔的模式（模式 11 到 14），由快到慢；給 FM 用的大畫面另外排在後面，
-// 分成兩組：幀裡有導頻的（模式 15）與沒有導頻的（模式 5、6、7）。
+// 發射模式選單：app 裡有權重檔的模式（模式 11 到 14），由快到慢；給 FM 用的模式另外排在後面，分成三組：
+// 畫面 96×72、幀裡沒有導頻的（模式 3）；大畫面、幀裡有導頻的（模式 15）；大畫面、沒有導頻的（模式 4 到 7）。
 // 每一列的資料都取自核心的模式表。
 import SwiftUI
 
@@ -27,11 +27,18 @@ struct ModeMenuView: View {
             if Modes.menuOrder.isEmpty {
                 group(L("沒有可以用的模式"), L("app 裡找不到模型的權重檔"))
             } else {
-                let standard = Modes.menuOrder.filter { !$0.largePicture }
-                let large = Modes.menuOrder.filter { $0.largePicture && !$0.pilotFree }, free = Modes.menuOrder.filter(\.pilotFree)
+                let standard = Modes.menuOrder.filter { !$0.largePicture && !$0.pilotFree }
+                let quick = Modes.menuOrder.filter { !$0.largePicture && $0.pilotFree }
+                let large = Modes.menuOrder.filter { $0.largePicture && !$0.pilotFree }
+                let free = Modes.menuOrder.filter { $0.largePicture && $0.pilotFree }
                 if !standard.isEmpty {
                     group(L("類神經網路編碼（實驗中）"), L("訊號愈弱畫面愈糊，不會整張收不到；兩邊要用同一份權重"))
                     ForEach(standard) { row($0) }
+                }
+                if let picture = quick.first?.pictureSize {
+                    group(L("FM 語音通道用的快速模式，幀裡沒有導頻（實驗中）"),
+                          L("畫面 %@。和最快的模式一樣快、比較清楚；只給訊號穩定的 FM 用，不適合短波", picture.text))
+                    ForEach(quick) { row($0) }
                 }
                 if let picture = large.first?.pictureSize {
                     group(L("FM 語音通道用的大畫面（實驗中）"),

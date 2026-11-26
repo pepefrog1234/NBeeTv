@@ -515,7 +515,7 @@ SDL_Texture* UI::texture_for(const PicturePtr& picture) {
     if (!picture || renderer_ == nullptr) return nullptr;
     auto found = textures_.find(picture.get());
     if (found == textures_.end()) {
-        // 貼圖和畫面一樣大（96×72；模式 5–7 與 15 的是 192×144）
+        // 貼圖和畫面一樣大（96×72；模式 4–7 與 15 的是 192×144）
         if (picture->width() <= 0 || picture->height() <= 0 || picture->rgb.size() < static_cast<std::size_t>(picture->size.rgb_bytes())) return nullptr;
         SDL_Texture* texture = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STATIC, picture->width(), picture->height());
         if (texture == nullptr) return nullptr;
@@ -1172,7 +1172,7 @@ void UI::draw_side_panel(const Rect& rect) {
         text(dl, mono_, 11.5f, rect.right() - S(16) - place_w, y + S(6), kSecondary, place);
         y += S(34);
     }
-    // 送出的大小跟著發射模式：96×72，模式 5–7 與 15 是 192×144
+    // 送出的大小跟著發射模式：96×72，模式 4–7 與 15 是 192×144
     const std::string sent_size = app_.tx_picture_size().text();
     const std::string size_note = app_.source_size ? LF("來源 %d×%d → 送出 %@", {app_.source_size->first, app_.source_size->second, sent_size}) : LF("來源 — → 送出 %@", {sent_size});
     text(dl, regular_, 11.5f, left, y, kTertiary, fitted(regular_, 11.5f, size_note, width));
@@ -1262,7 +1262,8 @@ void UI::draw_mode_menu() {
         ImGui::OpenPopup("##modemenu");
         want_mode_menu_ = false;
     }
-    // 三組：標準畫面的、給 FM 用的大畫面、大畫面而且幀裡沒有導頻的。哪個模式在哪一組看核心的模式表，不看編號
+    // 四組：標準畫面的、給 FM 用的快速模式（標準畫面、幀裡沒有導頻）、給 FM 用的大畫面、大畫面而且幀裡沒有導頻的。
+    // 哪個模式在哪一組看核心的模式表，不看編號
     const modes::MenuGroups groups = modes::menu_groups();
     struct Section {
         std::string title, note;
@@ -1271,6 +1272,10 @@ void UI::draw_mode_menu() {
     std::vector<Section> sections;
     if (!groups.standard.empty()) sections.push_back({L("類神經網路編碼（實驗中）"), L("訊號愈弱畫面愈糊，不會整張收不到；兩邊要用同一份權重"), &groups.standard});
     // 說明裡的畫面大小取自那一組的第一個模式
+    if (!groups.quick.empty()) {
+        sections.push_back({L("FM 語音通道用的快速模式，幀裡沒有導頻（實驗中）"),
+                            LF("畫面 %@。和最快的模式一樣快、比較清楚；只給訊號穩定的 FM 用，不適合短波", {groups.quick.front().picture.text()}), &groups.quick});
+    }
     if (!groups.large.empty()) {
         sections.push_back({L("FM 語音通道用的大畫面（實驗中）"),
                             LF("畫面 %@，比較清楚。給 VHF／UHF 的 FM 用：訊號弱時比上面的模式差，不適合短波", {groups.large.front().picture.text()}), &groups.large});

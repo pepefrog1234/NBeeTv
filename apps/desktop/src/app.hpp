@@ -165,7 +165,7 @@ public:
     bool is_displayed(const ReceivedFrame& frame) const;
     /// 一張收到的畫面存檔時預設的檔名
     static std::string export_file_name(const ReceivedFrame& frame);
-    /// 把主畫面顯示的那一張存成 PNG：和收到的畫面一樣大（96×72，模式 5–7 與 15 是 192×144），像素完全相同。
+    /// 把主畫面顯示的那一張存成 PNG：和收到的畫面一樣大（96×72，模式 4–7 與 15 是 192×144），像素完全相同。
     void save_displayed_frame(const std::string& path);
     /// 那一張畫面所在的「一段」：同一個呼號、一張接一張，中間的空檔都不到 10 秒。回傳的順序由舊到新。
     static std::vector<ReceivedFrame> sequence(std::uint64_t id, const std::deque<ReceivedFrame>& history);
@@ -209,7 +209,7 @@ public:
     /// 或來源已經是圖片序列時拖進來的圖片，當成選了一批圖片序列。發射來源也換過去。
     void open_dropped(const std::vector<std::string>& paths);
     void set_canvas_enabled(bool on);
-    /// 送出的畫面多大：跟著發射模式（模式 11–14 是 96×72，模式 5–7 與 15 是 192×144）。
+    /// 送出的畫面多大：跟著發射模式（模式 3 與 11–14 是 96×72，模式 4–7 與 15 是 192×144）。
     /// 沒在發射時是設定裡選的模式，發射中是這一次發射用的模式。
     PictureSize tx_picture_size() const;
     /// 把畫布的字印到一張來源畫面上（畫布沒開就原樣回傳）。發射前的每一張與右側欄的預覽都經過這裡。
@@ -275,9 +275,16 @@ private:
         std::int64_t start = 0;
         std::int64_t end = 0;
         std::vector<float> samples;
-        PicturePtr preview;
+        PicturePtr preview;                 // 預覽另外解的模式（ModeInfo::preview_apart）排進來時還沒有，解好了才補上
         int number = 0;
         std::optional<std::string> image;   // 來源是圖片序列時，這一張是哪一個圖片檔
+    };
+    /// 預覽另外解的那一張，等著解（見 schedule_transmit_preview）。
+    struct PendingPreview {
+        std::vector<float> values;
+        int mode_id = 0;
+        int number = 0;
+        int session = 0;
     };
     /// 取來源的一格的結果（見 capture_source_frame）。
     struct SourceCapture {
@@ -332,6 +339,8 @@ private:
     void first_frame_ready(std::optional<EncodedFrame> frame, int session);
     void go_on_air(EncodedFrame first, int session);
     bool enqueue(const EncodedFrame& frame);
+    void schedule_transmit_preview(std::vector<float> values, int mode_id, int number);
+    void decode_next_transmit_preview();
     void tx_tick();
     void prepare_next_frame();
     void stop_after_queued_frames();
@@ -399,6 +408,10 @@ private:
     std::int64_t tx_monitored_ = 0; // 已交給頻譜分析的位置
     int tx_next_number_ = 1;
     bool tx_preparing_ = false;
+    // 預覽另外解（ModeInfo::preview_apart）：一次只解一張。上一張還沒解完又排進新的一張，等著的那一張就換成新的
+    // （電腦慢的時候預覽跳著更新，發射不受影響）。
+    bool tx_preview_busy_ = false;
+    std::optional<PendingPreview> tx_preview_waiting_;
     int tx_tail_state_ = 0;         // 0：還沒排尾巴，1：正在取，2：已排入
     std::optional<Picture> tx_last_rgb_;   // 這次發射最近送出的那一格；來源一時沒有畫面時重送它
     std::optional<std::string> tx_pending_image_;   // 圖片序列：已經取走、正在編碼，還沒排進輸出佇列的那一張（見 put_back_image）
@@ -420,6 +433,7 @@ private:
 
     // 各自一條執行緒；宣告在最後，解構時最先結束（它們的工作會用到上面的成員）
     std::unique_ptr<Worker> tx_worker_;
+    std::unique_ptr<Worker> tx_preview_worker_;   // 預覽另外解的模式（現在是模式 4）：「對方看到的畫面」在這裡解，不擋住編碼
     std::unique_ptr<Worker> ptt_worker_;
     std::unique_ptr<Worker> preview_worker_;
     std::unique_ptr<Worker> io_worker_;

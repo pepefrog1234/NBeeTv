@@ -240,7 +240,13 @@ void test_i18n(Check& c) {
         c.expect(contains(large_note, "192×144") && contains(free_note, "192×144") && !contains(large_note, "%@") && !contains(free_note, "%@"), language + "：模式選單那兩組的說明沒有填好");
         // 英文、西班牙文的說明裡寫的是「20%」：百分號要原樣留著，不能被當成要填值的記號吃掉
         if (language == "en" || language == "es") c.expect(contains(free_note, "20") && contains(free_note, "%"), language + "：「20%」的百分號不見了：「" + free_note + "」");
-        for (const char* key : {"FM 大畫面", "FM 無導頻", "標準", "較細", "細緻", "FM 語音通道用的大畫面（實驗中）", "FM 大畫面，幀裡沒有導頻（實驗中）"}) {
+        const std::string quick_note = LF("畫面 %@。和最快的模式一樣快、比較清楚；只給訊號穩定的 FM 用，不適合短波", {"96×72"});
+        const std::string quick_summary = LF("每張 %@ · 幀裡沒有導頻，只給 FM 用，實驗中", {"0.67 秒"});
+        c.expect(contains(quick_note, "96×72") && !contains(quick_note, "%@") && contains(quick_summary, "0.67") && !contains(quick_summary, "%@"),
+                 language + "：快速模式那一組的說明沒有填好：「" + quick_note + "」「" + quick_summary + "」");
+        for (const char* key : {"FM 大畫面", "FM 無導頻", "快速", "標準", "較細", "細緻", "FM 語音通道用的大畫面（實驗中）", "FM 大畫面，幀裡沒有導頻（實驗中）",
+                                "FM 語音通道用的快速模式，幀裡沒有導頻（實驗中）", "畫面 %@。和最快的模式一樣快、比較清楚；只給訊號穩定的 FM 用，不適合短波",
+                                "每張 %@ · 幀裡沒有導頻，只給 FM 用，實驗中"}) {
             c.expect(i18n::has_translation(language, key), language + "：「" + key + "」沒有翻譯");
         }
         if (language != "zh-Hant") c.expect(L("設定") != "設定" || language == "ja", language + "：「設定」沒有翻譯");
@@ -364,31 +370,35 @@ void test_models(Check& c) {
     c.expect(missing.empty() && static_cast<int>(modes::all().size()) == nbtv_mode_count(),
              "核心的模式表有 " + std::to_string(nbtv_mode_count()) + " 個模式，這裡有模型的是 " + joined(ids_of(modes::all())) + "；沒有模型的：" + joined(missing) +
                  "（權重檔要在 models/ 裡，哪個模式用哪一份寫在 tools/model_file.hpp）");
-    for (const int id : {11, 12, 13, 14, 15, 5, 6, 7}) c.expect(modes::find(id) != nullptr, "少了模式 " + std::to_string(id));
+    for (const int id : {11, 12, 13, 14, 15, 3, 4, 5, 6, 7}) c.expect(modes::find(id) != nullptr, "少了模式 " + std::to_string(id));
     c.expect(modes::default_id() == 11, "預設是模式 11");
-    // 選單的順序與分組：只看現在這八個模式之間的先後與各自在哪一組。之後模式表多了別的模式，夾在裡面不影響這幾條
+    // 選單的順序與分組：只看現在這十個模式之間的先後與各自在哪一組。之後模式表多了別的模式，夾在裡面不影響這幾條
     const auto known = [&ids_of](const std::vector<ModeInfo>& list) {
         std::vector<int> ids;
         for (const int id : ids_of(list)) {
-            for (const int wanted : {11, 12, 13, 14, 15, 5, 6, 7}) {
+            for (const int wanted : {11, 12, 13, 14, 15, 3, 4, 5, 6, 7}) {
                 if (id == wanted) ids.push_back(id);
             }
         }
         return ids;
     };
     const std::vector<int> order = known(modes::menu_order());
-    c.expect(order == std::vector<int>({14, 12, 11, 13, 15, 5, 6, 7}), "選單的順序應該是 14 12 11 13 15 5 6 7，得到 " + joined(order));
-    // 選單的三組：每個模式剛好在其中一組，接起來就是選單的順序；分組只看畫面的大小與有沒有導頻
+    c.expect(order == std::vector<int>({14, 12, 11, 13, 3, 15, 4, 5, 6, 7}), "選單的順序應該是 14 12 11 13 3 15 4 5 6 7，得到 " + joined(order));
+    // 選單的四組：每個模式剛好在其中一組，接起來就是選單的順序；分組只看畫面的大小與有沒有導頻
     const modes::MenuGroups groups = modes::menu_groups();
     std::vector<int> grouped = ids_of(groups.standard);
+    for (const int id : ids_of(groups.quick)) grouped.push_back(id);
     for (const int id : ids_of(groups.large)) grouped.push_back(id);
     for (const int id : ids_of(groups.pilot_free)) grouped.push_back(id);
-    c.expect(grouped == ids_of(modes::menu_order()), "三組接起來是 " + joined(grouped) + "，選單的順序是 " + joined(ids_of(modes::menu_order())));
-    for (const ModeInfo& mode : groups.standard) c.expect(!mode.large_picture(), "模式 " + std::to_string(mode.id) + " 的畫面不是 96×72，卻在第一組");
+    c.expect(grouped == ids_of(modes::menu_order()), "四組接起來是 " + joined(grouped) + "，選單的順序是 " + joined(ids_of(modes::menu_order())));
+    for (const ModeInfo& mode : groups.standard) c.expect(!mode.large_picture() && !mode.pilot_free(), "模式 " + std::to_string(mode.id) + " 不是 96×72、有導頻的，卻在第一組");
+    for (const ModeInfo& mode : groups.quick) c.expect(!mode.large_picture() && mode.pilot_free(), "模式 " + std::to_string(mode.id) + " 不該在「FM 快速」那一組");
     for (const ModeInfo& mode : groups.large) c.expect(mode.large_picture() && !mode.pilot_free(), "模式 " + std::to_string(mode.id) + " 不該在「FM 大畫面」那一組");
     for (const ModeInfo& mode : groups.pilot_free) c.expect(mode.large_picture() && mode.pilot_free(), "模式 " + std::to_string(mode.id) + " 不該在「沒有導頻」那一組");
-    c.expect(known(groups.standard) == std::vector<int>({14, 12, 11, 13}) && known(groups.large) == std::vector<int>({15}) && known(groups.pilot_free) == std::vector<int>({5, 6, 7}),
-             "三組應該是 14 12 11 13｜15｜5 6 7，得到 " + joined(ids_of(groups.standard)) + "｜" + joined(ids_of(groups.large)) + "｜" + joined(ids_of(groups.pilot_free)));
+    c.expect(known(groups.standard) == std::vector<int>({14, 12, 11, 13}) && known(groups.quick) == std::vector<int>({3}) && known(groups.large) == std::vector<int>({15}) &&
+                 known(groups.pilot_free) == std::vector<int>({4, 5, 6, 7}),
+             "四組應該是 14 12 11 13｜3｜15｜4 5 6 7，得到 " + joined(ids_of(groups.standard)) + "｜" + joined(ids_of(groups.quick)) + "｜" + joined(ids_of(groups.large)) + "｜" +
+                 joined(ids_of(groups.pilot_free)));
     std::vector<std::string> used;
     for (const ModeInfo& mode : modes::all()) {
         c.expect(mode.frame_seconds > 0.3 && mode.frame_seconds < 10 && !mode.model_name.empty() && !mode.label().empty() && !mode.summary().empty() && !mode.content_text().empty() &&
@@ -2098,7 +2108,7 @@ void test_pilot_free(Check& c) {
         double seconds;
         const char* tier;
     };
-    const Expected expected[] = {{5, 2.293, "標準"}, {6, 2.880, "較細"}, {7, 4.427, "細緻"}};
+    const Expected expected[] = {{4, 1.013, "快速"}, {5, 2.293, "標準"}, {6, 2.880, "較細"}, {7, 4.427, "細緻"}};
     const PictureSize large{192, 144};
     bool complete = true;
     std::string details;
@@ -2193,6 +2203,152 @@ void test_pilot_free(Check& c) {
     const App::VideoTimeline timeline = App::video_timeline(sequence, true);
     const ModeInfo* last = modes::find(12);
     c.expect(timeline.pictures.size() == sequence.size() && std::fabs(timeline.last_hold - std::max(1.0, last->frame_seconds)) < 1e-6, "影片的時間軸：最後一張停留它那個模式一張的長度");
+}
+
+/// 模式 3、4：沒有導頻的幀裡快的兩個，用的都是加寬的模型。
+///   * 模式表與說明：模式 3 的畫面是 96×72、每張 0.667 秒（和模式 14 一樣長）；模式 4 是 192×144、每張 1.013 秒
+///   * 預覽另外解：只有模式 4 要（解一張比半幀還久）。另外解出來的和編碼時順便解的逐位元組相同
+///   * 一幀接一幀地送，中間換模式與畫面大小（14 → 3 → 4 → 3）：每一幀都要收到，模式與大小都對
+///   * 整個發射流程用模式 4（模擬的輸出照實際的時間取走取樣、記錄用的 PTT）：連續送幾張，聲音中途不能斷
+///     （準備一張要比一幀快：預覽的解碼不能擋住編碼）；發射中看得到 192×144 的預覽，而且就是其中一張解回來的樣子。
+///     這台電腦光是編一張就超過一幀的六成時（很慢的電腦、CI 的虛擬機、開著偵錯工具的版本），連續發射本來就可能接不上：
+///     那就只看流程走得完、畫面解得回來，不檢查聲音有沒有斷
+/// 整項把推論限制成一條執行緒（核心平常會分給幾條執行緒一起算）：等於一台核心少的電腦。
+/// 開發用的 Mac 上八條執行緒算一張模式 4 只要 0.2 秒，預覽分不分開都接得上，那樣就測不出這一項要看的東西。
+void test_fast_fm(Check& c) {
+    const ModeInfo* three = modes::find(3);
+    const ModeInfo* four = modes::find(4);
+    const ModeInfo* fourteen = modes::find(14);
+    if (three == nullptr || four == nullptr || fourteen == nullptr) {
+        c.expect(false, "app 裡沒有模式 3、4 或 14（少了權重檔）");
+        return;
+    }
+    nbtv_set_inference_threads(1);
+    struct RestoreThreads {
+        ~RestoreThreads() { nbtv_set_inference_threads(0); }   // 0：回到預設
+    } restore_threads;
+    const PictureSize large{192, 144};
+    // 模式表與說明
+    c.expect(three->pilot_free() && !three->large_picture() && three->picture == kStandardPicture, "模式 3 不是 96×72、沒有導頻的");
+    c.expect(std::fabs(three->frame_seconds - 0.667) < 0.001 && three->frame_symbols == fourteen->frame_symbols,
+             "模式 3 每張 " + number(three->frame_seconds, 3) + " 秒、" + std::to_string(three->frame_symbols) + " 個符號（模式 14 是 " + std::to_string(fourteen->frame_symbols) + " 個）");
+    c.expect(three->learned_values == 1728 && three->large_model, "模式 3 的模型是 " + std::to_string(three->learned_values) + " 個值" + (three->large_model ? "" : "、不是加寬的"));
+    c.expect(three->label() == "模式 3 · FM 無導頻" && three->menu_detail() == "快速" && three->content_text() == "大型網路" && contains(three->summary(), "沒有導頻") &&
+                 !contains(three->summary(), "大畫面") && contains(three->summary(), three->model_name),
+             "模式 3 的說明是「" + three->label() + "」「" + three->menu_detail() + "」「" + three->content_text() + "」「" + three->summary() + "」");
+    c.expect(four->pilot_free() && four->picture == large && std::fabs(four->frame_seconds - 1.013) < 0.001 && four->learned_values == 3024 && four->large_model,
+             "模式 4 是 " + four->picture.text() + "、每張 " + number(four->frame_seconds, 3) + " 秒、" + std::to_string(four->learned_values) + " 個值");
+    c.expect(three->model_name != four->model_name && three->model_name != fourteen->model_name, "模式 3、4、14 用的模型有重複的");
+    std::string apart;
+    for (const ModeInfo& mode : modes::all()) {
+        if (mode.preview_apart()) apart += std::to_string(mode.id) + " ";
+    }
+    c.expect(apart == "4 ", "預覽另外解的模式是「" + apart + "」，應該只有模式 4");
+    c.info(three->label() + "：" + three->seconds_text() + "、模型 " + three->model_name + "；" + four->label() + "：" + four->seconds_text() + "、模型 " + four->model_name);
+
+    // 連續發射中換模式與畫面大小；模式 4 的預覽另外解
+    double encode_seconds = 0;   // 這台電腦編一張模式 4 要多久
+    {
+        CoreTransmitter tx, reference;
+        tx.set_callsign("n0call");
+        reference.set_callsign("n0call");
+        std::vector<float> audio = demo::silence(0.3);
+        std::vector<int> sent;
+        for (const int id : {14, 3, 4, 3}) {
+            const ModeInfo* mode = modes::find(id);
+            c.expect(tx.set_mode(id) && tx.picture_size() == mode->picture, "模式 " + std::to_string(id) + " 設定不了");
+            const Picture picture = picture_or_gray("coffee", mode->picture);
+            const double began = uptime_seconds();
+            const std::optional<EncodedFrame> frame = tx.encode(picture, id == 4);
+            if (!frame) {
+                c.expect(false, "模式 " + std::to_string(id) + " 編碼失敗");
+                continue;
+            }
+            if (id == 4) encode_seconds = uptime_seconds() - began;
+            audio.insert(audio.end(), frame->samples.begin(), frame->samples.end());
+            sent.push_back(id);
+            if (id == 4) {
+                c.expect(frame->preview == nullptr && static_cast<int>(frame->values.size()) == four->learned_values, "模式 4 編碼時還是解了預覽，或沒有給通道值");
+                reference.set_mode(4);
+                const std::optional<EncodedFrame> together = reference.encode(picture);
+                const PicturePtr alone = preview_from_values(frame->values, 4);
+                c.expect(alone && together && together->preview && alone->size == large && alone->rgb == together->preview->rgb, "模式 4 另外解的預覽和編碼時順便解的不一樣");
+                std::vector<float> fewer = frame->values;
+                fewer.pop_back();
+                c.expect(preview_from_values(fewer, 4) == nullptr && preview_from_values(frame->values, 5) == nullptr, "通道值的個數對不上，還是解出了預覽");
+            } else {
+                c.expect(frame->preview != nullptr && frame->preview->size == mode->picture && frame->values.empty(), "模式 " + std::to_string(id) + " 的預覽不對");
+            }
+        }
+        const std::vector<float> tail = tx.finish();
+        audio.insert(audio.end(), tail.begin(), tail.end());
+        const std::vector<DecodedFrame> got = decode(audio);
+        std::string sent_ids, got_ids;
+        for (const int id : sent) sent_ids += std::to_string(id) + " ";
+        for (const DecodedFrame& frame : got) got_ids += std::to_string(frame.mode_id) + (frame.decoded ? " " : "✗ ");
+        c.expect(got.size() == sent.size() && got_ids == sent_ids, "送的是模式 " + sent_ids + "，收到的是 " + got_ids);
+        for (std::size_t i = 0; i < got.size() && i < sent.size(); ++i) {
+            const ModeInfo* mode = modes::find(sent[i]);
+            c.expect(got[i].decoded && got[i].header_ok && got[i].callsign == "N0CALL" && got[i].picture && got[i].picture->size == mode->picture,
+                     "第 " + std::to_string(i + 1) + " 幀（模式 " + std::to_string(sent[i]) + "）的內容不對");
+        }
+        c.info("連續送模式 " + sent_ids + "：收到 " + std::to_string(got.size()) + "/" + std::to_string(sent.size()) + " 張，大小都對");
+    }
+
+    // 整個發射流程：模式 4
+    std::vector<std::string> traces;
+    const auto previous_trace = App::trace;
+    App::trace = [&traces](const std::string& line) { traces.push_back(line); };
+    // 夠快的電腦送 4 張（每張 1.013 秒）、檢查中途沒有斷；太慢的只送 2 張、只看流程
+    const bool fast_enough = encode_seconds < 0.6 * four->frame_seconds;
+    const int wanted = fast_enough ? 4 : 2;
+    Rig rig(4);
+    rig.set_still(picture_or_gray("rocket", large));
+    rig.app->start_transmit();
+    PicturePtr on_air;
+    const bool sent_enough = rig.wait(fast_enough ? 60 : 240, [&] {
+        if (rig.app->tx_preview && rig.app->tx_preview->size == large) on_air = rig.app->tx_preview;
+        return rig.app->tx_frames_sent >= wanted || rig.app->tx_phase == App::TxPhase::idle;
+    });
+    c.expect(sent_enough && rig.app->is_on_air(), "模式 4 沒有連續送出 " + std::to_string(wanted) + " 張：" + rig.app->notice.value_or(""));
+    c.expect(on_air != nullptr, "模式 4 發射中一直沒有預覽");
+    rig.app->stop_transmit();
+    c.expect(rig.wait_idle(fast_enough ? 20 : 120), "送完之後要回到待機");
+    App::trace = previous_trace;
+    const std::vector<float> audio = rig.sink->take();
+    const std::vector<DecodedFrame> frames = decode(audio);
+    bool all_four = static_cast<int>(frames.size()) >= wanted;
+    double closest = 0;
+    for (const DecodedFrame& frame : frames) {
+        all_four = all_four && frame.decoded && frame.mode_id == 4 && frame.picture && frame.picture->size == large;
+        if (on_air && frame.picture && frame.picture->size == large) closest = std::max(closest, demo::psnr(*frame.picture, *on_air));
+    }
+    c.expect(all_four, "模式 4 送出去的幀解回來 " + std::to_string(frames.size()) + " 張，其中有不是模式 4 的");
+    // 預覽是某一張「沒有雜訊時對方看到的樣子」：和解回來的其中一張幾乎相同
+    if (on_air) c.expect(closest > 30, "發射中的預覽和解回來的每一張都差很多（最接近的 PSNR " + number(closest, 1) + " dB）");
+    // 聲音中途沒有斷：第一個有聲音的取樣到最後一個之間，沒有超過 10 毫秒的靜音（輸出佇列空掉時送出去的就是靜音）
+    std::size_t first = audio.size(), last = 0;
+    for (std::size_t i = 0; i < audio.size(); ++i) {
+        if (audio[i] == 0.0f) continue;
+        if (first == audio.size()) first = i;
+        last = i;
+    }
+    std::size_t longest = 0, run = 0;
+    for (std::size_t i = first; i < last; ++i) {
+        run = audio[i] == 0.0f ? run + 1 : 0;
+        longest = std::max(longest, run);
+    }
+    if (fast_enough) {
+        c.expect(first < last && longest < static_cast<std::size_t>(kSampleRate / 100),
+                 "模式 4 發射時聲音中途斷了 " + number(1000.0 * static_cast<double>(longest) / kSampleRate, 0) + " 毫秒（準備一張比一幀還久？）");
+    } else {
+        c.info("這台電腦編一張模式 4 要 " + number(encode_seconds, 2) + " 秒（一幀 " + number(four->frame_seconds, 2) + " 秒），太慢：只看流程走得完，沒有檢查聲音有沒有斷");
+    }
+    int apart_count = 0;
+    for (const std::string& line : traces) apart_count += contains(line, "的預覽另外解好了") ? 1 : 0;
+    c.expect(apart_count > 0, "模式 4 的預覽不是另外解的");
+    c.info("模式 4 發射：解回來 " + std::to_string(frames.size()) + " 張，預覽和其中一張 " + number(closest, 1) + " dB；聲音中途最長的靜音 " +
+           number(1000.0 * static_cast<double>(longest) / kSampleRate, 1) + " 毫秒；預覽另外解了 " + std::to_string(apart_count) + " 張");
 }
 
 /// 圖片序列與「存成影片時印上訊雜比」配上畫面是 192×144 的模式（用模式 5）：這兩樣原本是照 96×72 寫的，
@@ -3022,7 +3178,8 @@ int run(const Options& options) {
         {"loopback", "每個模式的收發", test_loopback},
         {"channel", "有雜訊、有頻偏的收訊", test_channel},
         {"fm", "FM 大畫面（模式 15）：畫面的大小跟著模式", [&work](Check& c) { test_large_picture(c, work); }},
-        {"fm-pilotfree", "FM 無導頻（模式 5、6、7）：模式表與選單、連續發射中換模式", test_pilot_free},
+        {"fm-pilotfree", "FM 無導頻的大畫面（模式 4 到 7）：模式表與選單、連續發射中換模式", test_pilot_free},
+        {"fm-fast", "FM 無導頻的快速模式（模式 3、4）：預覽另外解、連續發射不能斷", test_fast_fm},
         {"scale", "來源畫面的縮放", test_scale},
         {"png", "圖片檔的讀寫", [&work](Check& c) { test_png(c, work); }},
         {"fonts", "系統的字型", test_fonts},

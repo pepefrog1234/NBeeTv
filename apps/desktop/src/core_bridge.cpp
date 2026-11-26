@@ -88,10 +88,15 @@ std::string ModeInfo::quality() const {
 std::string ModeInfo::detail() const { return pilot_free() ? L("FM 無導頻") : large_picture() ? L("FM 大畫面") : quality(); }
 
 std::string ModeInfo::menu_detail() const {
-    // 沒有導頻的大畫面模式在選單裡自成一組（標題已經說了是哪一種幀），這裡只寫畫面的細緻程度：
-    // 一張畫面送的值愈多愈細（模式 5 和模式 15 一樣多，是「標準」；模式 6 是「較細」；模式 7 是「細緻」）。
-    if (!pilot_free() || !large_picture()) return detail();
-    return learned_values <= 8000 ? L("標準") : learned_values <= 12000 ? L("較細") : L("細緻");
+    // 沒有導頻的模式在選單裡自成一組（標題已經說了是哪一種幀），這裡只寫畫面的細緻程度：一張畫面送的值愈多愈細
+    // （模式 3、4 最少，是「快速」；模式 5 和模式 15 一樣多，是「標準」；模式 6 是「較細」；模式 7 是「細緻」）。
+    if (!pilot_free()) return detail();
+    return learned_values <= 4000 ? L("快速") : learned_values <= 8000 ? L("標準") : learned_values <= 12000 ? L("較細") : L("細緻");
+}
+
+bool ModeInfo::preview_apart() const {
+    const double wide = learned_width / 32.0, large = static_cast<double>(picture.rgb_bytes()) / kStandardPicture.rgb_bytes();
+    return 0.054 * wide * wide * large > 0.5 * frame_seconds;
 }
 
 std::string ModeInfo::label() const { return name() + " · " + detail(); }
@@ -102,6 +107,7 @@ std::string ModeInfo::content_text() const { return large_picture() ? picture.te
 
 std::string ModeInfo::summary() const {
     const std::string text = large_picture() && pilot_free() ? LF("每張 %@ · %@ 的大畫面，幀裡沒有導頻，只給 FM 用，實驗中", {seconds_text(), picture.text()})
+                             : pilot_free()                  ? LF("每張 %@ · 幀裡沒有導頻，只給 FM 用，實驗中", {seconds_text()})
                              : large_picture()               ? LF("每張 %@ · %@ 的大畫面，給 FM 用，實驗中", {seconds_text(), picture.text()})
                              : large_model                   ? LF("每張 %@ · 大型的類神經網路編碼，實驗中", {seconds_text()})
                                                              : LF("每張 %@ · 類神經網路編碼，實驗中", {seconds_text()});
@@ -152,7 +158,7 @@ std::vector<ModeInfo> menu_order() {
 MenuGroups menu_groups() {
     MenuGroups groups;
     for (const ModeInfo& mode : menu_order()) {
-        if (!mode.large_picture()) groups.standard.push_back(mode);
+        if (!mode.large_picture()) (mode.pilot_free() ? groups.quick : groups.standard).push_back(mode);
         else if (mode.pilot_free()) groups.pilot_free.push_back(mode);
         else groups.large.push_back(mode);
     }
@@ -247,20 +253,37 @@ void CoreTransmitter::set_callsign(const std::string& callsign) { nbtv_tx_set_ca
 
 int CoreTransmitter::frame_samples() const { return nbtv_tx_frame_samples(handle_); }
 
-std::optional<EncodedFrame> CoreTransmitter::encode(const Picture& picture) {
+std::optional<EncodedFrame> CoreTransmitter::encode(const Picture& picture, bool preview_apart) {
     // 核心照目前這個模式的大小讀 rgb：大小不對的畫面不能交給它
     if (picture.size != picture_size_ || picture.rgb.size() != static_cast<std::size_t>(picture_size_.rgb_bytes())) return std::nullopt;
     const int count = frame_samples();
     EncodedFrame frame;
     frame.samples.resize(static_cast<std::size_t>(count));
-    auto preview = std::make_shared<Picture>(picture_size_);
+    auto preview = preview_apart ? nullptr : std::make_shared<Picture>(picture_size_);
     nbtv_tx_frame_info info{};
-    const int written = nbtv_tx_encode_image(handle_, picture.rgb.data(), frame.samples.data(), count, preview->rgb.data(), &info);
+    const int written =
+        nbtv_tx_encode_image(handle_, picture.rgb.data(), frame.samples.data(), count, preview ? preview->rgb.data() : nullptr, &info);
     if (written != count) return std::nullopt;
     frame.preview = preview;
     frame.mode_id = info.mode_id;
     frame.sequence = info.sequence;
+    if (preview_apart) {
+        nbtv_mode_info mode{};
+        if (nbtv_mode_by_id(info.mode_id, &mode) != 0) return std::nullopt;
+        frame.values.resize(static_cast<std::size_t>(mode.learned_values));
+        if (nbtv_tx_last_values(handle_, frame.values.data(), mode.learned_values) != mode.learned_values) return std::nullopt;
+    }
     return frame;
+}
+
+PicturePtr preview_from_values(const std::vector<float>& values, int mode_id) {
+    const ModeInfo* mode = modes::find(mode_id);
+    if (mode == nullptr || static_cast<int>(values.size()) != mode->learned_values) return nullptr;
+    const LoadedModel* model = Models::shared().find(mode->learned_values, mode->learned_width, mode->picture);
+    if (model == nullptr) return nullptr;
+    auto picture = std::make_shared<Picture>(mode->picture);
+    if (nbtv_model_decode(model->handle, values.data(), static_cast<int>(values.size()), picture->rgb.data()) != 0) return nullptr;
+    return picture;
 }
 
 bool CoreTransmitter::discard_last() { return nbtv_tx_discard_last(handle_) == 0; }

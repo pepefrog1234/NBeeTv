@@ -1,4 +1,4 @@
-// 發射來源：鏡頭與影片檔，以及把來源畫面縮成送出的大小（96×72；模式 5–7 與 15 是 192×144）的工具。
+// 發射來源：鏡頭與影片檔，以及把來源畫面縮成送出的大小（96×72；模式 4–7 與 15 是 192×144）的工具。
 // （第三種來源「圖片序列」在 ImageSequence.swift。）
 import Accelerate
 import AVFoundation
@@ -19,7 +19,7 @@ enum ScaleMode: String {
 
 /// 縮成送出的大小的一格畫面。
 struct ScaledFrame {
-    let rgb: Data            // 寬×高×3（96×72，或模式 5–7 與 15 的 192×144）
+    let rgb: Data            // 寬×高×3（96×72，或模式 4–7 與 15 的 192×144）
     let sourceSize: CGSize   // 來源的像素大小
 }
 

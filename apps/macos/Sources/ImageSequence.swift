@@ -52,7 +52,7 @@ final class ImageSequenceSource {
     // MARK: 讀一張圖
 
     /// 讀進來的圖，短邊至少留這麼多像素（384）：96×72 的畫面長邊的四倍，最後縮成送出的大小時品質不受影響。
-    /// 畫面是 192×144 的模式（5–7 與 15）也夠用：短邊是畫面高度的 2.7 倍，還是往小的縮。
+    /// 畫面是 192×144 的模式（4–7 與 15）也夠用：短邊是畫面高度的 2.7 倍，還是往小的縮。
     private static let shortSidePixels = 4 * max(NBTV.imageWidth, NBTV.imageHeight)
 
     /// 把一張圖讀進來。讀不到（檔案不見了、壞了、其實不是圖片）回傳 nil。

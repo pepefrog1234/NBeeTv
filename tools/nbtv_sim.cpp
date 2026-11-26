@@ -116,7 +116,7 @@ int main(int argc, char** argv) {
     if (args.has("help")) {
         std::printf(
             "用法：nbtv-sim [選項]\n"
-            "  --mode N          模式編號 11–15 或 5–7（預設 11）。5–7 的幀沒有導頻，是給 FM 用的：\n"
+            "  --mode N          模式編號 11–15 或 3–7（預設 11）。3–7 的幀沒有導頻，是給 FM 用的：\n"
             "                    這裡的衰落通道與頻偏都不適用，只有 awgn 有意義\n"
             "  --channel 名稱    awgn、poor、moderate、slow（預設 awgn）\n"
             "  --snr 清單        訊雜比，可用逗號列出多個，例如 3,4,5（3 kHz 雜訊頻寬）\n"
@@ -125,7 +125,7 @@ int main(int argc, char** argv) {
             "  --offset Hz       頻率偏移；--ppm N 取樣時脈誤差\n"
             "  --tone Hz         單頻載波干擾的頻率；--tone-db dB 它相對於訊號的功率（預設 0）\n"
             "  --impulse N       每秒 N 次脈衝雜訊；--impulse-db dB 脈衝期間的雜訊功率（預設 20）；--impulse-ms 持續時間（預設 20）\n"
-            "  --image 檔.ppm    要送的畫面（大小和模式的畫面相同：96×72，模式 5–7 與 15 是 192×144）\n"
+            "  --image 檔.ppm    要送的畫面（大小和模式的畫面相同：96×72，模式 4–7 與 15 是 192×144）\n"
             "  --model 檔名      權重檔（預設用 models/ 裡給那個模式的）\n"
             "  --learned-mean    告訴解碼器的訊雜比用各格點雜訊的平均值，不用中位數（比較用）\n"
             "  --learned-plain   雜訊特別大的格點不壓小（比較用）\n"

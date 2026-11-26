@@ -223,7 +223,7 @@ final class AppModel: ObservableObject {
         let start: Int64
         let end: Int64
         let samples: [Float]
-        let preview: CGImage?
+        var preview: CGImage?   // 預覽另外解的模式（ModeInfo.previewApart）排進來時還沒有，解好了才補上
         let number: Int
         let image: URL?   // 來源是圖片序列時，這一張是哪一個圖片檔
     }
@@ -235,6 +235,11 @@ final class AppModel: ObservableObject {
     }
     private let transmitter = CoreTransmitter()  // 只在 txQueue 上使用
     private let txQueue = DispatchQueue(label: "nbtv.tx", qos: .userInitiated)
+    // 預覽另外解的模式（ModeInfo.previewApart；現在是模式 4）：「對方看到的畫面」在這條佇列上解，不擋住編碼的那一條。
+    // 一次只解一張。上一張還沒解完又排進新的一張，等著的那一張就換成新的（電腦慢的時候預覽跳著更新，發射不受影響）。
+    private let txPreviewQueue = DispatchQueue(label: "nbtv.txpreview", qos: .userInitiated)
+    private var txPreviewBusy = false
+    private var txPreviewWaiting: (values: [Float], modeID: Int, number: Int, session: Int)?
     private let pttQueue = DispatchQueue(label: "nbtv.ptt", qos: .userInitiated)
     private var pttDriver: PTTDriver?
     private var onAir: [OnAirFrame] = []
@@ -516,7 +521,7 @@ final class AppModel: ObservableObject {
 
     func isDisplayed(_ frame: ReceivedFrame) -> Bool { displayedFrame?.id == frame.id }
 
-    /// 一張收到的畫面存成檔案時的內容與檔名：和收到的畫面一樣大的 PNG（96×72，模式 5–7 與 15 是 192×144），像素完全相同。
+    /// 一張收到的畫面存成檔案時的內容與檔名：和收到的畫面一樣大的 PNG（96×72，模式 4–7 與 15 是 192×144），像素完全相同。
     static func exportFile(for frame: ReceivedFrame) -> (data: Data, name: String)? {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -692,7 +697,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// 送出的畫面多大：跟著發射模式（模式 11–14 是 96×72，模式 5–7 與 15 是 192×144）。
+    /// 送出的畫面多大：跟著發射模式（模式 3 與 11–14 是 96×72，模式 4–7 與 15 是 192×144）。
     /// 沒在發射時是設定裡選的模式，發射中是這一次發射用的模式（txModeID 兩種情形都照實）。
     var txPictureSize: PictureSize { Modes.find(txModeID)?.pictureSize ?? .standard }
 
@@ -889,7 +894,7 @@ final class AppModel: ObservableObject {
     /// 下一張要送的那個圖片檔；還沒選圖片時是 nil
     var nextImage: URL? { imageFiles.indices.contains(imageIndex) ? imageFiles[imageIndex] : nil }
 
-    /// 圖片序列的預覽：「下一張要送的」那一張縮成送出的大小（96×72，模式 5–7 與 15 是 192×144）、印上畫布的樣子。
+    /// 圖片序列的預覽：「下一張要送的」那一張縮成送出的大小（96×72，模式 4–7 與 15 是 192×144）、印上畫布的樣子。
     /// 位置、縮放方式、畫布或送出的大小變了就重算。
     /// 一次只算一張：還在算的時候位置又變了（拖著滑桿），等這一張算完再算最新的那一張，不會越積越多。
     private func refreshImagePreview() {
@@ -1034,7 +1039,8 @@ final class AppModel: ObservableObject {
         guard isOnAir, let display = txDisplay else { return }
         if txFrameNumber != display.number || txPreview == nil {
             txFrameNumber = display.number
-            txPreview = display.preview
+            // 預覽另外解的模式：這一張的預覽可能還沒解好，先留著上一張的，解好了再換（見 decodeNextTransmitPreview）
+            if let preview = display.preview { txPreview = preview }
         }
         if txFramesSent != display.sent { txFramesSent = display.sent }
         txFrameProgress = display.progress
@@ -1042,7 +1048,7 @@ final class AppModel: ObservableObject {
     }
 
     /// 來源有新的一格（或縮放方式、畫布、送出的畫面大小改了）時，重算預覽。預覽就是會送出去的樣子：
-    /// 和送出的畫面一樣大（96×72，模式 5–7 與 15 是 192×144），畫布的字也印在上面。
+    /// 和送出的畫面一樣大（96×72，模式 4–7 與 15 是 192×144），畫布的字也印在上面。
     private func refreshPreview() {
         let (buffer, turns, version) = latestFrame.get()
         let mode = settings.scaleMode
@@ -1150,6 +1156,7 @@ final class AppModel: ObservableObject {
         txFrameNumber = 0
         txFrameProgress = 0
         txPreview = nil
+        txPreviewWaiting = nil
         onAir.removeAll()
         txNextNumber = 1
         txPreparing = true
@@ -1174,6 +1181,7 @@ final class AppModel: ObservableObject {
                 self.txEndsAfterFirst = ended && capture.image != nil
                 self.txLastRGB = rgb
                 let picture = self.applyCanvas(to: rgb)   // 畫布的字在這裡印上去；txLastRGB 留的是沒有印字的
+                let apart = mode.previewApart
                 self.txQueue.async {
                     // 上一次若有編好卻沒送出去的幀（取消、PTT 失敗），先取消它，再把重取樣濾波器清乾淨
                     self.transmitter.discardLast()
@@ -1181,7 +1189,7 @@ final class AppModel: ObservableObject {
                     self.transmitter.setMode(mode.id)
                     self.transmitter.setCallsign(callsign)
                     let began = Date()
-                    let frame = self.transmitter.encode(rgb: picture)
+                    let frame = self.transmitter.encode(rgb: picture, previewApart: apart)
                     let spent = Date().timeIntervalSince(began)
                     DispatchQueue.main.async {
                         if session == self.txSession { self.txPrepareSeconds = spent }
@@ -1341,10 +1349,41 @@ final class AppModel: ObservableObject {
         }
         onAir.append(OnAirFrame(start: start, end: txEnd, samples: frame.samples, preview: NBTV.image(fromRGB: frame.preview),
                                 number: txNextNumber, image: txPendingImage))
+        if !frame.values.isEmpty { scheduleTransmitPreview(values: frame.values, modeID: frame.modeID, number: txNextNumber) }
         txPendingImage = nil
         txNextNumber += 1
         txPreparing = false
         return true
+    }
+
+    /// 預覽另外解的那一張（ModeInfo.previewApart）：排進去解。
+    private func scheduleTransmitPreview(values: [Float], modeID: Int, number: Int) {
+        txPreviewWaiting = (values, modeID, number, txSession)
+        if !txPreviewBusy { decodeNextTransmitPreview() }
+    }
+
+    /// 解等著的那一張，解好了補到它在 onAir 裡的那一筆上。它已經在播的話畫面上馬上換；還沒輪到它，輪到時 txTick 會帶著。
+    private func decodeNextTransmitPreview() {
+        guard let job = txPreviewWaiting else { return }
+        txPreviewWaiting = nil
+        guard job.session == txSession else { return }   // 那一次發射已經結束
+        txPreviewBusy = true
+        txPreviewQueue.async { [weak self] in
+            let began = Date()
+            let image = LearnedModel.preview(values: job.values, modeID: job.modeID).flatMap { NBTV.image(fromRGB: $0) }
+            let spent = Date().timeIntervalSince(began)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.txPreviewBusy = false
+                if job.session == self.txSession, let image {
+                    if let index = self.onAir.firstIndex(where: { $0.number == job.number }) { self.onAir[index].preview = image }
+                    if job.number <= self.txFrameNumber { self.txPreview = image }
+                    AppModel.trace?(String(format: "第 %d 張的預覽另外解好了（%.0f 毫秒）%@", job.number, spent * 1000,
+                                           job.number <= self.txFrameNumber ? "，它已經在播" : "，它還沒開始播"))
+                }
+                self.decodeNextTransmitPreview()
+            }
+        }
     }
 
     private func txTick() {
@@ -1447,9 +1486,10 @@ final class AppModel: ObservableObject {
             let lastPicture = self.accept(capture)
             self.txLastRGB = rgb
             let picture = self.applyCanvas(to: rgb)   // 發射中改了畫布的字，下一張就照新的印
+            let apart = Modes.find(self.txModeID)?.previewApart ?? false
             self.txQueue.async {
                 let began = Date()
-                let frame = self.transmitter.encode(rgb: picture)
+                let frame = self.transmitter.encode(rgb: picture, previewApart: apart)
                 let spent = Date().timeIntervalSince(began)
                 DispatchQueue.main.async {
                     guard session == self.txSession else { return }
@@ -1605,6 +1645,7 @@ final class AppModel: ObservableObject {
         txModeID = settings.txModeID
         onAir.removeAll()
         txPreview = nil
+        txPreviewWaiting = nil
         // 接收在開始送音訊時停掉了（還沒走到那一步就取消的話，接收一直沒停）
         if engine?.isReceiving == false { startReceiving() }
         if scheduledRun { finishScheduledRun(failure: failure) }

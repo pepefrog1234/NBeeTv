@@ -67,6 +67,9 @@ const ModeRow kModeSpec[] = {
     {5, 86, 2.293, 4067, 7782, 18, 32, 192, 144},    // 和模式 15 同一個模型；83 個酬載符號，資料格數剛好一樣
     {6, 108, 2.880, 5145, 9938, 23, 32, 192, 144},
     {7, 166, 4.427, 7987, 15622, 36, 32, 192, 144},
+    // 同一種幀裡快的兩個，模型是加寬的：3 的畫面是 96×72（和模式 14 一樣是 25 個符號，省下導頻多放 2 個通道），4 是 192×144
+    {3, 25, 0.667, 1078, 1804, 16, 64, 96, 72},
+    {4, 38, 1.013, 1715, 3078, 7, 64, 192, 144},
 };
 
 void test_mode_table() {
@@ -126,12 +129,23 @@ void test_mode_table() {
     CHECK(m15.image_width == 2 * m11.image_width && m15.image_height == 2 * m11.image_height);
     CHECK(m15.image_width == kMaxImageWidth && m15.image_height == kMaxImageHeight);
     for (int id : {11, 12, 13, 14}) CHECK(find_mode(id)->image_width == kImageWidth && find_mode(id)->image_height == kImageHeight);
-    // 有散佈導頻的是 11–15；5–7 沒有，都是 192×144 的大畫面
+    // 有散佈導頻的是 11–15；3–7 沒有。其中 4–7 是 192×144 的大畫面，3 的畫面是 96×72
     for (int id : {11, 12, 13, 14, 15}) CHECK(find_mode(id)->scattered_pilots);
-    for (int id : {5, 6, 7}) {
+    for (int id : {4, 5, 6, 7}) {
         const Mode& m = *find_mode(id);
         CHECK(!m.scattered_pilots && m.image_width == kMaxImageWidth && m.image_height == kMaxImageHeight);
     }
+    // 模式 3 和模式 14 一樣長（都是 25 個符號），畫面也一樣大、模型一樣寬；省下導頻之後資料格多 15%，多放 2 個通道
+    const Mode& m3 = *find_mode(3);
+    const Mode& m14 = *find_mode(14);
+    CHECK(!m3.scattered_pilots && m3.image_width == kImageWidth && m3.image_height == kImageHeight);
+    CHECK(m3.frame_symbols() == m14.frame_symbols() && m3.learned_width == m14.learned_width);
+    CHECK_EQ(m3.latent_channels(), m14.latent_channels() + 2);
+    CHECK_NEAR(static_cast<double>(m3.data_cells()) / m14.data_cells(), 1.153, 0.001);
+    // 模式 4 的模型和 3 一樣寬（都比 5–7 的寬一倍），每張 1 秒出頭
+    const Mode& m4 = *find_mode(4);
+    CHECK(m4.learned_width == m3.learned_width && m4.learned_width == 2 * find_mode(5)->learned_width);
+    CHECK(m4.frame_seconds() > 1.0 && m4.frame_seconds() < 1.02);
     // 模式 5 用的模型和 15 相同、資料格一樣多，少了導頻所以符號比較少：每張快 16%
     const Mode& m5 = *find_mode(5);
     CHECK(m5.data_cells() == m15.data_cells() && m5.cell_multiplier == m15.cell_multiplier && m5.payload_symbols < m15.payload_symbols);
@@ -141,15 +155,15 @@ void test_mode_table() {
 }
 
 void test_undefined_ids() {
-    // 0–4、8–10 是已經移除的數位與類比模式用過的編號，現在沒有定義（5–7 後來給了沒有散佈導頻的幀）
-    for (int id : {-1, 0, 1, 2, 3, 4, 8, 9, 10, 16}) CHECK(find_mode(id) == nullptr);
+    // 0–2、8–10 是已經移除的數位與類比模式用過的編號，現在沒有定義（3–7 後來給了沒有散佈導頻的幀）
+    for (int id : {-1, 0, 1, 2, 8, 9, 10, 16}) CHECK(find_mode(id) == nullptr);
     // 沒有散佈導頻的幀結尾的參考符號用的是 S1 的第 0 條序列：它不能是任何模式的編號
     CHECK(find_mode(kTailReferenceId) == nullptr);
 }
 
 void test_c_api() {
     CHECK(std::strcmp(nbtv_version_string(), "0.1.0") == 0);
-    CHECK_EQ(nbtv_mode_count(), 8);
+    CHECK_EQ(nbtv_mode_count(), 10);
     CHECK_EQ(NBTV_IMAGE_MAX_RGB_BYTES, kMaxImageRgbBytes);
     for (int i = 0; i < nbtv_mode_count(); ++i) {
         nbtv_mode_info a{};

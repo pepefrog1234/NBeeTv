@@ -32,7 +32,7 @@ struct RxFrame {
     int sequence = -1;
     float snr_db = 0.0f;
     float freq_offset_hz = 0.0f;
-    int image_width = 0;            // 這個模式的畫面大小（像素）：模式 11–14 是 96×72，模式 5–7 與 15 是 192×144
+    int image_width = 0;            // 這個模式的畫面大小（像素）：模式 3 與 11–14 是 96×72，模式 4–7 與 15 是 192×144
     int image_height = 0;
     std::vector<std::uint8_t> rgb;  // 寬×高×3 的畫面，decoded 時有效
     std::int64_t start_sample = 0;  // 幀開頭在輸入串流裡的位置（12 kHz 的取樣編號）

@@ -1,5 +1,5 @@
 // 發射來源：鏡頭（SDL3 的相機 API）、檔案（影片或圖片）與圖片序列，以及把來源的一格縮成送出的大小
-// （96×72；模式 5–7 與 15 是 192×144）。
+// （96×72；模式 4–7 與 15 是 192×144）。
 // 對應 macOS 版的 VideoSources.swift 與 ImageSequence.swift。
 //
 // 影片檔靠使用者電腦上的 ffmpeg 解碼（這個程式自己不帶影片的解碼器）：播放時開一個 ffmpeg 把畫面從管線送過來，
@@ -87,7 +87,7 @@ public:
     static std::vector<std::string> files(const std::vector<std::string>& selection);
 
     /// 讀進來的圖，短邊至少留這麼多像素（384）：96×72 的畫面長邊的四倍，最後縮成送出的大小時品質不受影響。
-    /// 畫面是 192×144 的模式（5–7 與 15）也夠用：短邊是畫面高度的 2.7 倍，還是往小的縮。
+    /// 畫面是 192×144 的模式（4–7 與 15）也夠用：短邊是畫面高度的 2.7 倍，還是往小的縮。
     static constexpr int kShortSidePixels = 4 * (kImageWidth > kImageHeight ? kImageWidth : kImageHeight);
     /// 把一張圖讀進來：照記載的方向轉正、縮到夠用的大小（幾千萬像素的相片不必整張留著）。
     /// 讀不到（檔案不見了、壞了、其實不是圖片）回傳空的。原圖轉正之後的大小在 shown_width()、shown_height()。

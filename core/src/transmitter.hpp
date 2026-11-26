@@ -30,10 +30,13 @@ public:
     // 這個模式會用的模型；沒有的話是空指標。
     const LearnedCodec* model_for(const Mode& mode) const { return models_.find(mode); }
 
-    // rgb 是這個模式的一張畫面（mode.image_rgb_bytes() 個位元組：模式 11–14 是 96×72×3，模式 5–7 與 15 是 192×144×3）。
+    // rgb 是這個模式的一張畫面（mode.image_rgb_bytes() 個位元組：96×72×3，模式 4–7 與 15 是 192×144×3）。
     // preview 不是空指標時，填入沒有雜訊時對方看到的畫面（同樣大小；要多跑一次解碼器）。
+    // values 不是空指標時，填入這張畫面的通道值（mode.learned_values 個）：之後交給那個模型的 decode
+    // （訊雜比給 kLearnedMaxSnrDb）算出來的就是 preview，外殼可以把這一步放到另一條執行緒上。
     // 沒有這個模式用的模型時回傳空的，幀序號不變。
-    std::vector<float> learned_frame(const Mode& mode, std::span<const std::uint8_t> rgb, std::vector<std::uint8_t>* preview = nullptr);
+    std::vector<float> learned_frame(const Mode& mode, std::span<const std::uint8_t> rgb, std::vector<std::uint8_t>* preview = nullptr,
+                                     std::vector<float>* values = nullptr);
 
 private:
     std::string callsign_;

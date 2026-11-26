@@ -72,6 +72,7 @@ struct nbtv_tx {
     nbtv::Transmitter tx;
     nbtv::Interpolator4 up;
     bool need_flush = false;
+    std::vector<float> last_values;  // 最近編的那一張畫面的通道值（nbtv_tx_last_values）；沒有、或那一幀取消了就是空的
 
     // 編最近那一幀之前的狀態，供 nbtv_tx_discard_last 還原
     struct Undo {
@@ -169,6 +170,13 @@ int nbtv_model_image_width(const nbtv_model* model) { return model != nullptr ? 
 
 int nbtv_model_image_height(const nbtv_model* model) { return model != nullptr ? model->codec->image_height() : 0; }
 
+int nbtv_model_decode(const nbtv_model* model, const float* values, int count, uint8_t* rgb) {
+    if (model == nullptr || values == nullptr || rgb == nullptr || count != model->codec->value_count()) return -1;
+    const std::span<const float> in(values, static_cast<std::size_t>(count));
+    const std::span<std::uint8_t> out(rgb, static_cast<std::size_t>(model->codec->rgb_bytes()));
+    return model->codec->decode(in, nbtv::kLearnedMaxSnrDb, out) ? 0 : -1;
+}
+
 /* ---- 合併最近幾幀 ---- */
 
 nbtv_merge* nbtv_merge_load(const uint8_t* data, size_t size) {
@@ -249,14 +257,24 @@ int nbtv_tx_encode_image(nbtv_tx* tx, const uint8_t* rgb, float* samples, int ca
     local.sequence = tx->tx.sequence();
     std::vector<std::uint8_t> preview;
     tx->remember();
-    const std::vector<float> frame = tx->tx.learned_frame(mode, rgb_span(rgb, mode), preview_rgb != nullptr ? &preview : nullptr);
+    const std::vector<float> frame =
+        tx->tx.learned_frame(mode, rgb_span(rgb, mode), preview_rgb != nullptr ? &preview : nullptr, &tx->last_values);
     if (frame.empty()) {
         tx->undo.valid = false;
+        tx->last_values.clear();
         return -1;
     }
     if (preview_rgb != nullptr) std::copy(preview.begin(), preview.end(), preview_rgb);
     if (info != nullptr) *info = local;
     return tx->deliver(frame, samples, capacity);
+}
+
+int nbtv_tx_last_values(const nbtv_tx* tx, float* values, int capacity) {
+    if (tx == nullptr || values == nullptr || tx->last_values.empty()) return -1;
+    const int count = static_cast<int>(tx->last_values.size());
+    if (capacity < count) return -1;
+    std::copy(tx->last_values.begin(), tx->last_values.end(), values);
+    return count;
 }
 
 int nbtv_tx_discard_last(nbtv_tx* tx) {
@@ -265,6 +283,7 @@ int nbtv_tx_discard_last(nbtv_tx* tx) {
     tx->up = tx->undo.up;
     tx->need_flush = tx->undo.need_flush;
     tx->undo.valid = false;
+    tx->last_values.clear();  // 那一幀不算數了，它的通道值也不再給
     return 0;
 }
 

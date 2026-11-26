@@ -59,6 +59,13 @@ Mode 5 uses the same model as mode 15 at 2.29 seconds per picture; mode 6 takes 
 mode 7 takes 4.43 seconds and is 3.6 dB better. They only work on FM voice channels with no frequency offset and a steady signal
 (not on SSB); they too are supported by the command-line tools and both apps, and have only been checked in simulation.
 
+The same kind of frame also has two experimental fast modes, **modes 3 and 4**, both using the network four times larger.
+Mode 3 has a 96×72 picture at 0.67 seconds per picture, as fast as mode 14; dropping the pilots makes room for 2 more channels
+and its model is trained only for FM signal levels, so it is 1.8 dB better than mode 14. Mode 4 is a 192×144 picture at 1.01 seconds:
+2.7 dB below mode 5, but about 3 dB better than an equally fast 96×72 picture enlarged to the same size. Mode 4 takes about four times
+the computation of the other large-picture modes (about 0.13 seconds to decode one picture on an M4 Max), so a slow computer
+with few cores may not keep up. They too work only on FM and have only been checked in simulation.
+
 ## Download
 
 Get the file for your platform from [Releases](https://github.com/pepefrog1234/NBeeTv/releases). Each one is built and tested on a machine of that platform and processor type.
@@ -112,7 +119,7 @@ The Windows and Linux packages contain `nbtv-gui` (`nbtv-gui.exe` on Windows): t
 
 Every package includes the command-line tools. They work on files rather than live audio: to transmit, you play the generated WAV file into the radio; to receive, you record the radio's audio to a WAV file and decode it.
 
-After unpacking, the executables and `models/` are in the same folder and can be run right there. Pictures are always 96×72 binary PPM files (192×144 for modes 5–7 and 15), which ffmpeg can produce.
+After unpacking, the executables and `models/` are in the same folder and can be run right there. Pictures are always 96×72 binary PPM files (192×144 for modes 4–7 and 15), which ffmpeg can produce.
 
 ```sh
 # Convert a photo to a 96×72 PPM

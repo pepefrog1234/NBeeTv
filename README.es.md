@@ -59,6 +59,14 @@ El modo 5 usa el mismo modelo que el modo 15 y tarda 2.29 segundos por imagen; e
 el modo 7 tarda 4.43 segundos y la mejora en 3.6 dB. Solo sirven en canales de voz en FM sin desplazamiento de frecuencia y con señal estable
 (no en SSB); también funcionan con las herramientas de línea de comandos y con las dos apps, y solo se han comprobado en simulación.
 
+En el mismo tipo de trama hay además dos modos rápidos experimentales, los **modos 3 y 4**, ambos con la red cuatro veces mayor.
+El modo 3 tiene una imagen de 96×72 y tarda 0.67 segundos por imagen, igual de rápido que el modo 14; al quitar los pilotos caben
+2 canales más y su modelo está entrenado solo para los niveles de señal de FM, así que supera al modo 14 en 1.8 dB.
+El modo 4 es una imagen grande de 192×144 a 1.01 segundos: queda 2.7 dB por debajo del modo 5, pero unos 3 dB por encima de una imagen
+de 96×72 igual de rápida ampliada al mismo tamaño. El modo 4 exige unas cuatro veces más cálculo que los otros modos de imagen grande
+(unos 0.13 segundos para decodificar una imagen en un M4 Max), así que una computadora lenta con pocos núcleos puede no dar abasto.
+También sirven solo en FM y solo se han comprobado en simulación.
+
 ## Descarga
 
 Descarga el archivo de tu plataforma desde [Releases](https://github.com/pepefrog1234/NBeeTv/releases). Cada uno se compila y se prueba en una máquina de esa plataforma y con ese tipo de procesador.
@@ -112,7 +120,7 @@ Los paquetes de Windows y Linux incluyen `nbtv-gui` (`nbtv-gui.exe` en Windows):
 
 Todos los paquetes incluyen las herramientas de línea de comandos. Trabajan con archivos, no en directo: para transmitir se reproduce en el equipo el archivo WAV generado; para recibir se graba el audio del equipo en un archivo WAV y se decodifica.
 
-Al descomprimir el paquete, los ejecutables y `models/` quedan en la misma carpeta y se pueden usar ahí mismo. Las imágenes son siempre archivos PPM binarios de 96×72 (192×144 para los modos 5 a 7 y 15), que se pueden generar con ffmpeg.
+Al descomprimir el paquete, los ejecutables y `models/` quedan en la misma carpeta y se pueden usar ahí mismo. Las imágenes son siempre archivos PPM binarios de 96×72 (192×144 para los modos 4 a 7 y 15), que se pueden generar con ffmpeg.
 
 ```sh
 # Convertir una foto en un PPM de 96×72

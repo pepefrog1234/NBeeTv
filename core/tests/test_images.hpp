@@ -23,7 +23,7 @@ inline std::vector<std::uint8_t> load(const char* name) {
     return rgb;
 }
 
-// 同一張測試圖放大成 width×height：每個像素重複整數倍。畫面比較大的模型（模式 5–7 與 15 的 192×144）用；
+// 同一張測試圖放大成 width×height：每個像素重複整數倍。畫面比較大的模型（模式 4–7 與 15 的 192×144）用；
 // tools/learned/export.py 產生參考答案時做的是同一件事。96×72 就是原圖；不是 96×72 的整數倍時回傳灰色的畫面。
 inline std::vector<std::uint8_t> load(const char* name, int width, int height) {
     const std::vector<std::uint8_t> small = load(name);
