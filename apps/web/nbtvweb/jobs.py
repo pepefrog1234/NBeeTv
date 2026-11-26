@@ -239,7 +239,7 @@ class JobManager:
             merge=self.cfg.merge, timeout=self.cfg.decode_timeout, on_frame=on_frame,
         )
         job.position = job.seconds
-        verdict = evaluate(frames, self.cfg.callsign, self.cfg.min_frames)
+        verdict = evaluate(frames, self.cfg.min_frames)
 
         def sheet() -> bytes | None:
             image = cardlib.contact_sheet([f.rgb for f in frames if f.rgb is not None])
@@ -258,6 +258,7 @@ class JobManager:
                 "reported": verdict.reported,
                 "pictures": verdict.pictures,
                 "frames": verdict.counted,
+                "callsign": verdict.callsign,  # 從錄音解出來的呼號；卡片就是發給這一台的
                 "callsign_frames": verdict.callsign_frames,
                 "other_callsigns": verdict.other_callsigns,
                 "modes": {str(m): n for m, n in verdict.modes.items()},

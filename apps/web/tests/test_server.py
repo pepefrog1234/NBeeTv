@@ -92,6 +92,7 @@ class EndToEndTests(unittest.TestCase):
         stats = result["stats"]
         self.assertEqual(stats["frames"], 14)
         self.assertGreaterEqual(stats["callsign_frames"], 1)
+        self.assertEqual(stats["callsign"], "BX4ACP")  # 從錄音解出來的呼號
         self.assertEqual(stats["modes"], {"14": 14})
         serial = result["card"]["serial"]
 
@@ -196,10 +197,20 @@ class EndToEndTests(unittest.TestCase):
         eleven = self.site.run(util.recording(mode=14, frames=11, channel="awgn", snr=15.0))["result"]
         self.assertEqual((eleven["ok"], eleven["stats"]["frames"]), (True, 11))
 
-    def test_other_callsign_gets_no_card(self):
+    def test_card_carries_the_callsign_in_the_recording(self):
+        # 本站設定的呼號是 BX4ACP；錄音裡是別台的發射，卡片就發給那一台
         result = self.site.run(util.recording(mode=14, frames=14, callsign="N0CALL", channel="awgn", snr=15.0))["result"]
-        self.assertEqual((result["ok"], result["reason"], result["card"]), (False, "no_callsign", None))
-        self.assertEqual(result["stats"]["other_callsigns"], ["N0CALL"])
+        self.assertEqual((result["ok"], result["reason"]), (True, None))
+        self.assertEqual((result["stats"]["callsign"], result["stats"]["other_callsigns"]), ("N0CALL", []))
+        serial = result["card"]["serial"]
+        stored = self.site.http.get(f"/api/cards/{serial}").json()
+        self.assertEqual((stored["signature_valid"], stored["record"]["station"]), (True, "N0CALL"))
+        download = self.site.http.get(f"/card/{serial}.png?download=1")
+        self.assertIn(f'filename="N0CALL-NBTV-{serial}.png"', download.headers["content-disposition"])
+        # 下載回來的卡片檔裡，簽過的紀錄寫的電台也是錄音裡的那一台
+        self.assertEqual(decode_png(download.content).record["station"], "N0CALL")
+        # 本站自己的呼號沒有變：頁面頂端與根憑證的檔名還是它
+        self.assertEqual(self.site.http.get("/api/config").json()["station"], "BX4ACP")
 
     def test_noise_gets_no_card(self):
         rng = np.random.default_rng(5)

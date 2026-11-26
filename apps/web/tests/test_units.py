@@ -28,10 +28,10 @@ def frame(index, *, callsign="BX4ACP", header=True, picture=True, snr=10.0, mode
 
 
 class RuleTests(unittest.TestCase):
-    """條件：有畫面的幀「超過」10 幀，而且至少一幀解出本台的呼號。"""
+    """條件：有畫面的幀「超過」10 幀，而且至少一幀解出呼號。卡片發給解出來的那個呼號。"""
 
     def check(self, frames):
-        return evaluate(frames, "BX4ACP", 10)
+        return evaluate(frames, 10)
 
     def test_eleven_frames_pass_ten_do_not(self):
         self.assertTrue(self.check([frame(i) for i in range(11)]).ok)
@@ -43,20 +43,47 @@ class RuleTests(unittest.TestCase):
         frames = [frame(i, header=(i == 4)) for i in range(12)]
         verdict = self.check(frames)
         self.assertTrue(verdict.ok)
-        self.assertEqual((verdict.counted, verdict.callsign_frames), (12, 1))
+        self.assertEqual((verdict.callsign, verdict.counted, verdict.callsign_frames), ("BX4ACP", 12, 1))
         self.assertIs(verdict.best, frames[4])  # 卡片正中放解得出呼號的那一幀
 
     def test_no_callsign(self):
         verdict = self.check([frame(i, header=False) for i in range(30)])
-        self.assertEqual((verdict.ok, verdict.reason), (False, "no_callsign"))
+        self.assertEqual((verdict.ok, verdict.reason, verdict.callsign), (False, "no_callsign", None))
 
-    def test_other_station_does_not_count(self):
+    def test_the_card_goes_to_whichever_station_was_heard(self):
+        # 不限定是哪一台：解出什麼呼號，卡片就是那一台的
         verdict = self.check([frame(i, callsign="N0CALL") for i in range(30)])
-        self.assertEqual((verdict.ok, verdict.reason, verdict.counted), (False, "no_callsign", 0))
-        self.assertEqual(verdict.other_callsigns, ["N0CALL"])
+        self.assertEqual((verdict.ok, verdict.callsign, verdict.counted, verdict.callsign_frames), (True, "N0CALL", 30, 30))
+        self.assertEqual(verdict.other_callsigns, [])
+        portable = self.check([frame(i, callsign="JA1XYZ/P") for i in range(12)])
+        self.assertEqual((portable.ok, portable.callsign), (True, "JA1XYZ/P"))
+
+    def test_several_stations_in_one_recording(self):
+        # 以解出來次數最多的呼號為準；別的呼號送的幀不算進它的幀數
         mixed = [frame(i, callsign="N0CALL") for i in range(20)] + [frame(20 + i) for i in range(10)]
         verdict = self.check(mixed)
-        self.assertEqual((verdict.ok, verdict.reason, verdict.counted), (False, "too_few", 10))
+        self.assertEqual((verdict.ok, verdict.callsign, verdict.counted, verdict.callsign_frames), (True, "N0CALL", 20, 20))
+        self.assertEqual(verdict.other_callsigns, ["BX4ACP"])
+        self.assertEqual(verdict.best.callsign, "N0CALL")
+        self.assertTrue(all(f.callsign == "N0CALL" for f in verdict.strip))
+        # 次數最多的那一台自己的幀不夠，就不發卡（不會改發給另一台）
+        short = [frame(i, callsign="N0CALL") for i in range(8)] + [frame(8 + i) for i in range(10)]
+        verdict = self.check(short)
+        self.assertEqual((verdict.ok, verdict.reason, verdict.callsign, verdict.counted), (False, "too_few", "BX4ACP", 10))
+        # 標頭壞掉的幀不知道是誰送的，算給次數最多的那一台
+        unknown = [frame(i, callsign="N0CALL") for i in range(6)] + [frame(6 + i, header=False) for i in range(6)]
+        verdict = self.check(unknown)
+        self.assertEqual((verdict.ok, verdict.callsign, verdict.counted, verdict.callsign_frames), (True, "N0CALL", 12, 6))
+        # 一樣多的時候取先出現的
+        tie = [frame(i, callsign="AA1AAA" if i % 2 == 0 else "BB2BBB") for i in range(24)]
+        self.assertEqual(self.check(tie).callsign, "AA1AAA")
+
+    def test_text_that_is_not_a_callsign_is_ignored(self):
+        # 標頭的檢查碼對了、但寫法不像呼號的（空的、有空白或小寫、太長），不能當成卡片上的電台
+        for text in ("", "bx4acp", "BX4 ACP", "TOOLONGCALL", "<b>"):
+            with self.subTest(text=text):
+                verdict = self.check([frame(i, callsign=text) for i in range(30)])
+                self.assertEqual((verdict.ok, verdict.reason, verdict.callsign), (False, "no_callsign", None))
 
     def test_nothing_received(self):
         verdict = self.check([])

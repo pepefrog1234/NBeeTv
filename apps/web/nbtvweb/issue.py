@@ -54,8 +54,10 @@ class Issuer:
 
     def issue(self, verdict: Verdict, listener: Listener, audio_sha256: str, audio_seconds: float) -> Issued:
         """發一張卡（會花零點幾秒畫圖，要在執行緒裡呼叫）。verdict 必須是通過的。"""
-        if not verdict.ok or verdict.best is None or verdict.best.rgb is None:
+        if not verdict.ok or not verdict.callsign or verdict.best is None or verdict.best.rgb is None:
             raise IssueError("not_eligible")
+        # 卡片上的電台是從這份錄音解出來的呼號，不是設定檔裡本站自己的呼號
+        station = verdict.callsign
         now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
         day_start = now.replace(hour=0, minute=0, second=0).strftime("%Y-%m-%dT%H:%M:%SZ")
         if self.store.count_since(day_start) >= self.cfg.cards_per_day:
@@ -72,7 +74,7 @@ class Issuer:
         for _ in range(5):
             serial = new_serial()
             content = cardlib.CardContent(
-                callsign=self.cfg.callsign,
+                callsign=station,
                 serial=serial,
                 verify_url=f"{self.cfg.public_url}/v/{serial}",
                 verify_hint=hint,
@@ -100,7 +102,7 @@ class Issuer:
                 "type": RECORD_TYPE,
                 "serial": serial,
                 "issued_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "station": self.cfg.callsign,
+                "station": station,
                 "issuer": self.cfg.public_url,
                 # 解碼器量到的
                 "reception": {
@@ -141,7 +143,7 @@ class Issuer:
             if self.embedder is not None:
                 # C2PA 記的是整個檔案的雜湊，所以放在最後：上面的三個文字區塊都寫好了才加
                 try:
-                    png = self.embedder.embed(png, record, f"{self.cfg.callsign} NBTV reception card {serial}")
+                    png = self.embedder.embed(png, record, f"{station} NBTV reception card {serial}")
                 except ProvenanceError as e:
                     log.error("%s", e)
                     raise IssueError("internal") from None

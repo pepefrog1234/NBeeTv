@@ -309,6 +309,7 @@
   function renderStats(stats) {
     const list = $("stats");
     list.replaceChildren();
+    if (stats.callsign) addStat(list, t("stats.station"), stats.callsign);
     addStat(list, t("stats.frames"), String(stats.frames));
     addStat(list, t("stats.callsign"), String(stats.callsign_frames));
     const modes = Object.entries(stats.modes || {}).map(([mode, n]) => t("stats.modes.item", { mode, n })).join("、");
@@ -340,9 +341,9 @@
     }
 
     const result = o.result, stats = result.stats;
+    // station：從這份錄音解出來的呼號（卡片就是發給這一台的），不是本站自己的呼號
     const vars = {
-      frames: stats.frames, pictures: stats.pictures, callsign: stats.callsign_frames,
-      others: (stats.other_callsigns || []).join("、"),
+      frames: stats.frames, pictures: stats.pictures, callsign: stats.callsign_frames, station: stats.callsign || "",
     };
     if (result.ok && result.card) {
       $("result").classList.add("good");
@@ -358,9 +359,7 @@
       $("result").classList.add("bad");
       const reason = ["no_signal", "no_callsign", "too_few", "model_mismatch"].includes(result.reason) ? result.reason : "no_signal";
       $("result-title").textContent = t(`fail.${reason}.heading`, vars);
-      // 解出了別人的呼號時，原因不是訊號弱，而是這根本不是本台的發射
-      const other = reason === "no_callsign" && vars.others;
-      $("result-body").textContent = t(other ? "fail.no_callsign.other" : `fail.${reason}.body`, vars);
+      $("result-body").textContent = t(`fail.${reason}.body`, vars);
       if (reason === "no_signal") {
         ["tip1", "tip2", "tip3"].forEach((name) => {
           const li = document.createElement("li");

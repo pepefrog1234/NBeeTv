@@ -360,9 +360,9 @@ def render(content: CardContent, background: Image.Image, fonts: Fonts) -> Image
     draw.text((x0 - 6, y), text, font=font, fill=INK, anchor="ls")
 
     y += 62
-    draw.text((x0, y), "確認收到本台的窄頻電視（NBTV）訊號", font=fonts.get("medium", 33), fill=INK, anchor="ls")
+    draw.text((x0, y), "確認收到這個電台的窄頻電視（NBTV）訊號", font=fonts.get("medium", 33), fill=INK, anchor="ls")
     y += 38
-    draw.text((x0, y), "Confirming reception of our narrow-band television (NBTV) signal",
+    draw.text((x0, y), "Confirming reception of this station's narrow-band television (NBTV) signal",
               font=fonts.get("regular", 22), fill=SECONDARY, anchor="ls")
 
     y += 34
@@ -429,7 +429,7 @@ def render(content: CardContent, background: Image.Image, fonts: Fonts) -> Image
     draw.text((x1, y), f"發行 Issued {content.issued_at}", font=small, fill=TERTIARY, anchor="rs")
     y += 28
     draw.text((x0, y), "＊", font=fonts.get("regular", 15), fill=ACCENT, anchor="ls")
-    draw.text((x0 + 20, y), "聽眾自填，本台沒有查核  Reported by the listener, not verified by the station",
+    draw.text((x0 + 20, y), "聽眾自填，本站沒有查核  Reported by the listener, not verified by this site",
               font=small, fill=TERTIARY, anchor="ls")
     y += 28
     fingerprint = " ".join(content.fingerprint[i:i + 4] for i in range(0, 16, 4))

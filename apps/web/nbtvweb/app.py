@@ -370,7 +370,8 @@ def create_app(cfg: Config) -> FastAPI:
     @app.get("/card/{name}", include_in_schema=False)
     async def card_png(name: str, request: Request):
         normal = normalize_serial(name[:-4]) if name.endswith(".png") else None
-        if normal is None or store.get(normal) is None:
+        card = store.get(normal) if normal is not None else None
+        if card is None:
             return error(404, "not_found")
         path = store.card_path(normal)
         if not path.is_file():
@@ -385,7 +386,13 @@ def create_app(cfg: Config) -> FastAPI:
             return RedirectResponse(f"/card/{normal}.png{wanted}", status_code=301, headers={"cache-control": REDIRECT_CACHE})
         headers = {"cache-control": "public, max-age=31536000, immutable"}
         if download:
-            headers["content-disposition"] = f'attachment; filename="{cfg.callsign}-NBTV-{normal}.png"'
+            # 檔名開頭是這張卡上的呼號（從錄音解出來的那一個）；呼號裡的 / 不能放進檔名
+            try:
+                station = str(json.loads(card.record_text).get("station") or "")
+            except ValueError:
+                station = ""
+            station = re.sub(r"[^0-9A-Z.-]", "-", station)[:9] or cfg.callsign
+            headers["content-disposition"] = f'attachment; filename="{station}-NBTV-{normal}.png"'
         return FileResponse(path, media_type="image/png", headers=headers)
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

@@ -1,4 +1,7 @@
-"""發卡的條件：有畫面的幀超過門檻，而且至少一幀的標頭解出了本台的呼號。
+"""發卡的條件：有畫面的幀超過門檻，而且至少一幀的標頭解出了呼號。
+
+卡片上印的電台就是從錄音解出來的那個呼號：不限定是哪一台，誰的發射都可以領卡。
+一段錄音裡有好幾個呼號時，以標頭解出來次數最多的那一個為準（一樣多時取先出現的）。
 
 這幾個模式的畫面沒有「解成功或失敗」的分界（訊號再弱也會有一張糊的畫面），
 有對錯可言的只有標頭：呼號與幀序號有 CRC 保護。所以條件裡兩樣都要。
@@ -9,6 +12,7 @@ from __future__ import annotations
 import statistics
 from dataclasses import dataclass, field
 
+from .config import CALLSIGN_RE
 from .decoder import Frame
 
 
@@ -16,11 +20,12 @@ from .decoder import Frame
 class Verdict:
     ok: bool
     reason: str | None           # no_signal、no_callsign、too_few、model_mismatch
+    callsign: str | None         # 這段錄音是哪一台送的（卡片上印的就是它）；一個呼號都沒解出來時是 None
     reported: int                # 接收機回報了幾幀
     pictures: int                # 其中幾幀有畫面
     counted: int                 # 算數的幀：有畫面，而且不是別的呼號送的
-    callsign_frames: int         # 標頭解出本台呼號的幀
-    other_callsigns: list[str]
+    callsign_frames: int         # 標頭解出這個呼號的幀
+    other_callsigns: list[str]   # 錄音裡另外還解出了哪些呼號
     modes: dict[int, int]        # 算數的幀裡，各個模式各幾幀
     snr_median: float | None
     snr_best: float | None
@@ -29,9 +34,16 @@ class Verdict:
     strip: list[Frame] = field(default_factory=list)  # 卡片上另外排的幾幀
 
 
-def evaluate(frames: list[Frame], callsign: str, min_frames: int, strip_size: int = 5) -> Verdict:
-    ours = [f for f in frames if f.header and f.callsign == callsign]
-    others = sorted({f.callsign for f in frames if f.header and f.callsign and f.callsign != callsign})
+def evaluate(frames: list[Frame], min_frames: int, strip_size: int = 5) -> Verdict:
+    # 這段錄音是誰送的：標頭解出來的呼號裡出現最多次的那一個（一樣多時取先出現的）。
+    # 寫法不像呼號的不算：它之後要印在卡片上、放進檔名。
+    seen: dict[str, int] = {}
+    for f in frames:
+        if f.header and f.callsign and CALLSIGN_RE.match(f.callsign):
+            seen[f.callsign] = seen.get(f.callsign, 0) + 1
+    callsign = max(seen, key=seen.__getitem__) if seen else None
+    ours = [f for f in frames if f.header and f.callsign == callsign] if callsign else []
+    others = sorted(c for c in seen if c != callsign)
     # 標頭壞掉的幀不知道是誰送的，算進來；標頭明確寫著別的呼號的不算
     counted = [f for f in frames if f.picture and not (f.header and f.callsign != callsign)]
     pictures = sum(1 for f in frames if f.picture)
@@ -53,7 +65,7 @@ def evaluate(frames: list[Frame], callsign: str, min_frames: int, strip_size: in
         reason = None
 
     def quality(f: Frame) -> tuple[int, float]:
-        # 先挑標頭解得出本台呼號的，再比訊雜比
+        # 先挑標頭解得出這個呼號的，再比訊雜比
         return (1 if f.header and f.callsign == callsign else 0, f.snr_db if f.snr_db is not None else -99.0)
 
     best = max(counted, key=quality) if counted else None
@@ -66,6 +78,7 @@ def evaluate(frames: list[Frame], callsign: str, min_frames: int, strip_size: in
     return Verdict(
         ok=reason is None,
         reason=reason,
+        callsign=callsign,
         reported=len(frames),
         pictures=pictures,
         counted=len(counted),
