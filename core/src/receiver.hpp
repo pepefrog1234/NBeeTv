@@ -2,7 +2,7 @@
 // 內部流程：解析濾波 → 搜尋 S0（前後兩半相同）→ 以 S0、S1 判定頻偏與模式 → 收滿一幀後
 // 解調、通道估測、解碼 → 依幀長預測下一幀的位置並持續追蹤。
 // 收訊時也一邊繼續找前導符號：對方可能中途停了、換成另一次發射；失去同步時回頭從最後確定有東西的位置重新搜尋。
-// 不開執行緒；push() 會在呼叫端的執行緒上把能做的事做完。
+// push() 會在呼叫端的執行緒上把能做的事做完才返回（一幀收完時解畫面的那一段會另外用幾條執行緒一起算，見 parallel.hpp）。
 #pragma once
 
 #include <array>
@@ -26,6 +26,7 @@ struct RxFrame {
     int mode_id = -1;
     bool decoded = false;        // 有畫面（rgb 有效）
     bool model_missing = false;  // 收到了一幀，但沒有設定這個模式的模型，或對方用的是另一份權重，所以沒有畫面
+    bool skipped = false;        // 收到了一幀、也解得出來，但設定成先不解畫面（RxTuning::skip_pictures），所以沒有畫面
     bool header_ok = false;      // 標頭（呼號、幀序號）可信。標頭壞了畫面仍可能還原得出來
     std::string callsign;
     int sequence = -1;
@@ -49,6 +50,7 @@ struct RxStatus {
     float input_level_db = -120.0f;  // 輸入音量（均方根，dBFS）
     long frames_decoded = 0;
     long frames_failed = 0;
+    long frames_skipped = 0;       // 設定成先不解畫面而略過的幀數
 };
 
 // 同步判定的參數。預設值由模擬定出；公開出來是為了讓模擬工具可以掃描。
@@ -89,6 +91,10 @@ struct RxTuning {
     // 解這一幀之前，把前面幾幀收到的值合進來（learned_merge.hpp）：訊號弱、畫面平靜時畫面比較清楚也比較穩定。
     // 要另外設定合併用的權重（Receiver::set_merge）；這一幀的模型沒有對應的權重時，和關掉一樣。
     bool learned_merge = false;
+    // 先不解畫面：幀照常接收、回報（標頭、訊雜比都有），只跳過最花時間的那一步，回報的幀 skipped 是 true。
+    // 給呼叫端在來不及的時候用（音訊積太多時先打開，消化完再關掉）：只少幾張畫面，同步與追蹤都不中斷。
+    // 合併最近幾幀照樣把略過的那一幀收到的值記下來。隨時可以改，下一幀起生效。
+    bool skip_pictures = false;
 };
 
 class Receiver {
@@ -275,6 +281,7 @@ private:
     std::deque<RxFrame> frames_;
     long frames_decoded_ = 0;
     long frames_failed_ = 0;
+    long frames_skipped_ = 0;
 };
 
 }  // namespace nbtv

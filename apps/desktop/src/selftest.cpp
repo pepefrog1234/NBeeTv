@@ -420,6 +420,10 @@ void test_models(Check& c) {
 }
 
 void test_loopback(Check& c) {
+    // 畫面的編碼、解碼用的是哪一種寫法、幾條執行緒（下面的毫秒數跟著它變；環境變數 NBTV_KERNEL、NBTV_THREADS 可以改）
+    const std::string kernel = nbtv_inference_kernel();
+    c.expect((kernel == "avx2" || kernel == "generic") && nbtv_inference_threads() >= 1, "推論的設定讀不到");
+    c.info(std::string("推論：") + kernel + "，最多 " + std::to_string(nbtv_inference_threads()) + " 條執行緒");
     for (const ModeInfo& mode : modes::menu_order()) {
         // 畫面的大小跟著模式：測試圖是 96×72，畫面比較大的模式每個像素重複放大
         const Picture coffee = picture_or_gray("coffee", mode.picture);
@@ -2774,6 +2778,162 @@ void test_ui_transmit(Check& c) {
     c.expect(decode(rig.sink->take()).size() == static_cast<std::size_t>(rig.app->tx_frames_sent), "從介面按出來的發射，送出的每一張都解得出來");
 }
 
+// 接收的音訊交給兩條執行緒（app.cpp 的 Engine）：一條算瀑布圖的頻譜，一條做解調與解畫面。
+// 這裡不開音訊裝置，把音訊像音訊的執行緒那樣一段一段交進去；用 debug_hold_decoder 讓解畫面的那一條停住，
+// 等於一台解一張畫面要很久的電腦——停多久由測試決定，不靠計時，快的慢的電腦上結果都一樣。
+void test_receive_threads(Check& c) {
+    const ModeInfo* mode = modes::find(14);  // 每張 0.67 秒，最容易來不及的模式
+    if (mode == nullptr) return c.expect(false, "app 裡沒有模式 14");
+    const Picture coffee = picture_or_gray("coffee", mode->picture), rocket = picture_or_gray("rocket", mode->picture);
+
+    // 一次發射：count 張接在一起，前後留一點靜音
+    const auto transmission = [&](int count, double lead, double trail) {
+        CoreTransmitter tx;
+        tx.set_mode(mode->id);
+        tx.set_callsign("BX4ACP");
+        std::vector<float> audio = demo::silence(lead);
+        for (int i = 0; i < count; ++i) {
+            const std::optional<EncodedFrame> frame = tx.encode(i % 2 == 0 ? coffee : rocket);
+            if (frame) audio.insert(audio.end(), frame->samples.begin(), frame->samples.end());
+        }
+        const std::vector<float> tail = tx.finish(), pad = demo::silence(trail);
+        audio.insert(audio.end(), tail.begin(), tail.end());
+        audio.insert(audio.end(), pad.begin(), pad.end());
+        return audio;
+    };
+    // 兩次發射：四張，停一下，再兩張
+    std::vector<float> six = transmission(4, 0.3, 0.6);
+    const std::vector<float> two = transmission(2, 0.0, 0.5), one = transmission(1, 0.3, 0.5);
+    six.insert(six.end(), two.begin(), two.end());
+    const double six_seconds = static_cast<double>(six.size()) / kSampleRate;
+
+    Settings settings = Settings::load("");
+    settings.callsign = "BX4ACP";
+    App app(std::move(settings), true);
+    const std::size_t chunk = kSampleRate / 50;  // 20 毫秒一段
+    const auto piece = [&](const std::vector<float>& audio, std::size_t at) {
+        return std::vector<float>(audio.begin() + static_cast<std::ptrdiff_t>(at), audio.begin() + static_cast<std::ptrdiff_t>(std::min(audio.size(), at + chunk)));
+    };
+    // 頻譜與接收的狀態都是攢一小段時間才交給介面的，最後那一小段要等下一段音訊進來才會交
+    // （實際接收時音訊不會停，這裡交得比實際快很多又說停就停）：等一下，再給一段靜音
+    const auto flush = [&] {
+        demo::spin(&app, 0.12);
+        app.debug_feed_input(demo::silence(0.02));
+    };
+    // 照接收機消化的速度交：還排著的不到 0.1 秒才交下一段，所以不會有來不及的時候
+    const auto feed_paced = [&](const std::vector<float>& audio) {
+        for (std::size_t at = 0; at < audio.size(); at += chunk) {
+            demo::wait_until(&app, 20, [&] { return app.debug_receive_backlog() < 0.1; });
+            app.debug_feed_input(piece(audio, at));
+        }
+        flush();
+        return demo::wait_until(&app, 20, [&] { return app.debug_receive_backlog() == 0; });
+    };
+    // 解畫面的那一條設定成會停住（debug_hold_decoder）之後用：先照它的速度交到第一張解出來、停住為止，
+    // 剩下的不等它，一段接一段交進去（每段之間讓出一毫秒，大約是實際的二十倍快）。回傳有沒有停住。
+    const auto feed_until_held = [&](const std::vector<float>& audio) {
+        for (std::size_t at = 0; at < audio.size(); at += chunk) {
+            if (app.debug_decoder_held()) demo::spin(&app, 0.001);
+            else demo::wait_until(&app, 20, [&] { return app.debug_receive_backlog() < 0.1 || app.debug_decoder_held(); });
+            app.debug_feed_input(piece(audio, at));
+        }
+        flush();
+        return demo::wait_until(&app, 20, [&] { return app.debug_decoder_held(); });
+    };
+    const auto lines = [&] { return static_cast<double>(app.waterfall.version()); };
+    // 量 call 花多久。解畫面的那一條這時候是停著的：萬一 call 會等它（這正是要抓的毛病），測試自己也會跟著卡死，
+    // 所以另外開一條執行緒，三秒之後把它放開——那樣量到的就是三秒多，下面的檢查會失敗，而不是整個測試停在這裡。
+    const auto timed = [&](const std::function<void()>& call) {
+        std::atomic<bool> returned{false};
+        std::thread rescue([&] {
+            for (int i = 0; i < 300 && !returned.load(); ++i) SDL_Delay(10);
+            if (!returned.load()) app.debug_hold_decoder(false);
+        });
+        const double began = uptime_seconds();
+        call();
+        const double seconds = uptime_seconds() - began;
+        returned.store(true);
+        rescue.join();
+        return seconds;
+    };
+    const double expected_lines = six_seconds * WaterfallStore::kLinesPerSecond;
+
+    // 1. 平常：來得及的時候每一張都解出來，順序、呼號、幀序號都對，瀑布圖的列數和音訊的長度對得上
+    app.debug_begin_receiving();
+    const double lines_before = lines();
+    c.expect(feed_paced(six), "照接收機的速度交音訊，應該消化得完");
+    c.expect(demo::wait_until(&app, 10, [&] { return app.history.size() == 6; }), "來得及的時候六張都要解出來，解出 " + std::to_string(app.history.size()));
+    c.expect(app.skipped_frames == 0, "來得及的時候不應該略過畫面");
+    if (app.history.size() == 6) {
+        bool ordered = true;
+        const int sequences[6] = {1, 0, 3, 2, 1, 0};  // history 最新的在前面：第二次發射的第 1、0 張，第一次的第 3、2、1、0 張
+        for (std::size_t i = 0; i < 6; ++i) ordered = ordered && app.history[i].sequence == sequences[i] && app.history[i].callsign == "BX4ACP" && app.history[i].mode_id == mode->id;
+        c.expect(ordered, "收到的六張的順序、呼號或幀序號不對");
+    }
+    c.expect(demo::wait_until(&app, 5, [&] { return lines() - lines_before >= expected_lines - 3; }),
+             "瀑布圖的列數和音訊的長度對不上：多了 " + number(lines() - lines_before, 0) + " 列，應該約 " + number(expected_lines, 0) + " 列");
+
+    // 2. 解畫面的那一條停住的時候：瀑布圖照樣走完，主執行緒重新開始接收也不必等它
+    app.debug_begin_receiving();
+    app.debug_hold_decoder(true);
+    const double lines_held = lines();
+    const std::size_t history_before = app.history.size();
+    c.expect(feed_until_held(six), "第一張解出來之後，解畫面的那一條應該停住");
+    c.expect(demo::wait_until(&app, 10, [&] { return lines() - lines_held >= expected_lines - 3; }),
+             "解畫面的那一條停住的時候瀑布圖應該照樣走完：只多了 " + number(lines() - lines_held, 0) + " 列，應該約 " + number(expected_lines, 0) + " 列");
+    c.expect(app.debug_decoder_held() && app.debug_receive_backlog() > 3.0 && app.history.size() == history_before,
+             "停住的時候後面的音訊應該都還排著（" + number(app.debug_receive_backlog(), 1) + " 秒）");
+    const double restart_seconds = timed([&] { app.debug_begin_receiving(); });
+    c.expect(restart_seconds < 0.25, "重新開始接收不可以等解畫面的那一條：等了 " + number(restart_seconds, 2) + " 秒");
+    c.expect(app.debug_decoder_held(), "重新開始接收的時候，解畫面的那一條應該還停著（測試沒有測到東西）");
+    app.debug_hold_decoder(false);
+    c.expect(demo::wait_until(&app, 10, [&] { return app.debug_receive_backlog() == 0 && !app.debug_decoder_held(); }), "重新開始之後，先前排著的音訊應該很快就丟完");
+    demo::spin(&app, 0.3);
+    c.expect(app.history.size() == history_before && app.skipped_frames == 0, "重新開始之前那一次的結果不可以再交出來");
+
+    // 3. 來不及的時候：停住期間積下來的那幾張略過不解（幀照樣收到），不堆積；消化完之後又照常解
+    app.debug_hold_decoder(true);
+    c.expect(feed_until_held(six), "第一張解出來之後應該停住");
+    app.debug_hold_decoder(false);
+    c.expect(demo::wait_until(&app, 20, [&] { return app.debug_receive_backlog() == 0 && app.skipped_frames == 5; }),
+             "積下來的五張應該略過：略過 " + std::to_string(app.skipped_frames) + " 張，還排著 " + number(app.debug_receive_backlog(), 1) + " 秒");
+    c.expect(app.history.size() == history_before + 1, "停住之前解出來的那一張要在：多了 " + std::to_string(app.history.size() - history_before) + " 張");
+    c.expect(app.last_result == App::LastResult::skipped && app.notice == L("這台電腦解一張畫面比收一張還久，來不及的畫面會略過"), "略過的時候要告訴使用者");
+    c.expect(app.sync_callsign == "BX4ACP", "略過的那幾張，呼號照樣要認得");
+    // 開發用（NBTV_SELFTEST_SCREENS）：這時候主視窗的樣子，五種語言、最小的視窗各存一張——看「上一張」那一列與底列的說明放不放得下
+    if (const char* keep = std::getenv("NBTV_SELFTEST_SCREENS"); keep != nullptr && *keep != '\0') {
+        const std::string original = i18n::language();
+        for (const std::string& language : i18n::languages()) {
+            i18n::use(language);
+            app.notice = L("這台電腦解一張畫面比收一張還久，來不及的畫面會略過");
+            OffscreenUI screen(app, 1040, 700, 1.0f);
+            screen.frames(3);
+            keep_screen(screen, "rx-skipped-" + language);
+        }
+        i18n::use(original);
+        app.notice = L("這台電腦解一張畫面比收一張還久，來不及的畫面會略過");
+    }
+    c.expect(feed_paced(one) && demo::wait_until(&app, 10, [&] { return app.history.size() == history_before + 2; }), "消化完之後，下一張應該照常解出來");
+    // （「上一張」那一列在對方停止發射、同步消失之後會清掉，這裡不看它）
+    c.expect(app.skipped_frames == 5 && !app.history.empty() && app.history.front().sequence == 0 && app.history.front().picture != nullptr,
+             "消化完之後不應該再略過：略過 " + std::to_string(app.skipped_frames) + " 張");
+
+    // 4. 停止接收也不必等；停止之後交進來的音訊不算
+    app.debug_hold_decoder(true);
+    c.expect(feed_until_held(six), "應該停住");
+    const double stop_seconds = timed([&] { app.debug_stop_receiving(); });
+    c.expect(stop_seconds < 0.25, "停止接收不可以等解畫面的那一條：等了 " + number(stop_seconds, 2) + " 秒");
+    c.expect(app.debug_decoder_held(), "停止接收的時候，解畫面的那一條應該還停著（測試沒有測到東西）");
+    app.debug_hold_decoder(false);
+    c.expect(demo::wait_until(&app, 10, [&] { return app.debug_receive_backlog() == 0; }), "停止之後，排著的音訊應該很快就丟完");
+    const std::size_t history_stopped = app.history.size();
+    for (std::size_t at = 0; at < one.size(); at += chunk) app.debug_feed_input(piece(one, at));
+    demo::spin(&app, 0.3);
+    c.expect(app.history.size() == history_stopped && app.debug_receive_backlog() == 0, "停止之後交進來的音訊不可以再解");
+    c.info("重新開始接收等了 " + number(restart_seconds * 1000, 1) + " 毫秒，停止接收等了 " + number(stop_seconds * 1000, 1) + " 毫秒（解畫面的那一條當時停著）");
+    app.shutdown();
+}
+
 void test_sdl_audio(Check& c) {
     // 只有在指定用 SDL 的「假」音訊驅動（SDL_AUDIODRIVER=dummy）時才跑：它不碰任何真的音效裝置，卻走和真的裝置一樣的程式路徑
     const char* driver = std::getenv("SDL_AUDIODRIVER");
@@ -2891,6 +3051,7 @@ int run(const Options& options) {
         {"ui-click", "介面：按鈕、選單、輸入框", test_ui_click},
         {"ui-images", "介面：圖片序列的上一張、下一張、滑桿，從按鈕發射", [&work](Check& c) { test_ui_images(c, work); }},
         {"ui-transmit", "介面：從按鈕發射", test_ui_transmit},
+        {"rx-threads", "接收：解畫面不擋瀑布圖、來不及時略過不堆積、停止不必等", test_receive_threads},
         {"sdl-audio", "SDL 的音訊裝置（假的驅動）", test_sdl_audio},
     };
 

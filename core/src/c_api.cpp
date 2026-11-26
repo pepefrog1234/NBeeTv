@@ -11,8 +11,10 @@
 #include "callsign.hpp"
 #include "dsp.hpp"
 #include "learned_codec.hpp"
+#include "learned_kernels.hpp"
 #include "learned_merge.hpp"
 #include "modes.hpp"
+#include "parallel.hpp"
 #include "receiver.hpp"
 #include "spectrum.hpp"
 #include "transmitter.hpp"
@@ -184,6 +186,14 @@ uint32_t nbtv_merge_model_id(const nbtv_merge* merge) { return merge != nullptr 
 
 int nbtv_merge_frames(const nbtv_merge* merge) { return merge != nullptr ? merge->merge->frames() : 0; }
 
+/* ---- 運算 ---- */
+
+int nbtv_inference_threads(void) { return nbtv::parallel_threads(); }
+
+void nbtv_set_inference_threads(int threads) { nbtv::set_parallel_threads(threads); }
+
+const char* nbtv_inference_kernel(void) { return nbtv::nn::kernels().name; }
+
 /* ---- 呼號 ---- */
 
 int nbtv_callsign_normalize(const char* text, char* out) {
@@ -301,6 +311,10 @@ void nbtv_rx_set_merging(nbtv_rx* rx, int enabled) {
     if (rx != nullptr) rx->rx.tuning().learned_merge = enabled != 0;
 }
 
+void nbtv_rx_set_decode_pictures(nbtv_rx* rx, int enabled) {
+    if (rx != nullptr) rx->rx.tuning().skip_pictures = enabled == 0;
+}
+
 void nbtv_rx_push(nbtv_rx* rx, const float* samples, int count) {
     if (rx == nullptr || samples == nullptr || count <= 0) return;
     const std::span<const float> in(samples, static_cast<std::size_t>(count));
@@ -329,6 +343,7 @@ void nbtv_rx_get_status(const nbtv_rx* rx, nbtv_rx_status* out) {
     out->input_level_db = s.input_level_db;
     out->frames_decoded = static_cast<int>(s.frames_decoded);
     out->frames_failed = static_cast<int>(s.frames_failed);
+    out->frames_skipped = static_cast<int>(s.frames_skipped);
 }
 
 int nbtv_rx_poll_frame(nbtv_rx* rx, nbtv_rx_frame* out) {
@@ -338,6 +353,7 @@ int nbtv_rx_poll_frame(nbtv_rx* rx, nbtv_rx_frame* out) {
     std::memset(out, 0, sizeof *out);
     out->mode_id = f.mode_id;
     out->model_missing = f.model_missing ? 1 : 0;
+    out->skipped = f.skipped ? 1 : 0;
     out->header_ok = f.header_ok ? 1 : 0;
     std::strncpy(out->callsign, f.callsign.c_str(), NBTV_CALLSIGN_MAX);
     out->sequence = f.header_ok ? f.sequence : -1;

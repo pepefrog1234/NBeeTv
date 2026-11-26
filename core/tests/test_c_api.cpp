@@ -207,6 +207,156 @@ void test_spectrum() {
     }
 }
 
+// 推論用幾條執行緒、用哪一種寫法：設定與讀回；不管用幾條，編出來的聲音、預覽與解出來的畫面都逐位元相同
+void test_inference_settings() {
+    const int before = nbtv_inference_threads();
+    CHECK(before >= 1 && before <= 64);
+    const std::string kernel = nbtv_inference_kernel();
+    CHECK(kernel == "generic" || kernel == "avx2");
+    nbtv_set_inference_threads(3);
+    CHECK_EQ(nbtv_inference_threads(), 3);
+    nbtv_set_inference_threads(1000);
+    CHECK_EQ(nbtv_inference_threads(), 64);
+    nbtv_set_inference_threads(-1);
+    CHECK_EQ(nbtv_inference_threads(), before);
+
+    // 模式 15 的畫面是 192×144，一定會分給別的執行緒
+    nbtv_mode_info mode{};
+    CHECK_EQ(nbtv_mode_by_id(15, &mode), 0);
+    nbtv_model* model = load_model("261125-3");
+    if (model == nullptr) return;
+    const std::vector<std::uint8_t> rgb = test_images::load("rocket", mode.image_width, mode.image_height);
+    const std::size_t rgb_bytes = rgb.size();
+    std::vector<float> audio[3];
+    std::vector<std::uint8_t> preview[3], picture[3];
+    const int settings[3] = {1, 2, 8};
+    for (int round = 0; round < 3; ++round) {
+        nbtv_set_inference_threads(settings[round]);
+        nbtv_tx* tx = nbtv_tx_create(12000);
+        nbtv_tx_set_mode(tx, 15);
+        nbtv_tx_set_callsign(tx, "N0CALL");
+        nbtv_tx_set_model(tx, model);
+        const int n = nbtv_tx_frame_samples(tx);
+        audio[round].assign(3000, 0.0f);
+        std::vector<float> frame(static_cast<std::size_t>(n));
+        preview[round].resize(rgb_bytes);
+        CHECK_EQ(nbtv_tx_encode_image(tx, rgb.data(), frame.data(), n, preview[round].data(), nullptr), n);
+        audio[round].insert(audio[round].end(), frame.begin(), frame.end());
+        audio[round].insert(audio[round].end(), 6000, 0.0f);
+        nbtv_tx_destroy(tx);
+
+        nbtv_rx* rx = nbtv_rx_create(12000);
+        nbtv_rx_set_model(rx, model);
+        nbtv_rx_push(rx, audio[round].data(), static_cast<int>(audio[round].size()));
+        nbtv_rx_frame f;
+        while (nbtv_rx_poll_frame(rx, &f))
+            if (f.decoded) picture[round].assign(f.rgb, f.rgb + rgb_bytes);
+        nbtv_rx_destroy(rx);
+        CHECK(picture[round].size() == rgb_bytes);
+    }
+    for (int round = 1; round < 3; ++round) {
+        CHECK(audio[round] == audio[0]);
+        CHECK(preview[round] == preview[0]);
+        CHECK(picture[round] == picture[0]);
+    }
+    nbtv_model_destroy(model);
+    nbtv_set_inference_threads(0);
+    std::printf("  推論：%s，預設最多 %d 條執行緒；1、2、8 條的結果逐位元相同\n", kernel.c_str(), before);
+}
+
+// 來不及的時候先不解畫面（nbtv_rx_set_decode_pictures）：幀照樣回報，只是沒有畫面；再打開之後又有畫面，同步沒有斷。
+// merge_weights 不是空指標的話，同時打開合併最近幾幀（略過的那一幀收到的值照樣記著，後面的幀合得進去）。
+// 有導頻的幀（模式 12）與沒有導頻的幀（模式 5）在接收機裡是兩條路，各試一次。
+void test_skip_pictures(int mode_id, const char* weights, const char* merge_weights, double min_psnr) {
+    nbtv_rx_set_decode_pictures(nullptr, 0);  // 空指標不做事
+    nbtv_mode_info mode{};
+    CHECK_EQ(nbtv_mode_by_id(mode_id, &mode), 0);
+    nbtv_model* model = load_model(weights);
+    if (model == nullptr) return;
+    const std::vector<std::uint8_t> merge_file = merge_weights != nullptr ? read_weights(merge_weights) : std::vector<std::uint8_t>();
+    nbtv_merge* merge = merge_file.empty() ? nullptr : nbtv_merge_load(merge_file.data(), merge_file.size());
+    const std::vector<std::uint8_t> rgb = test_images::load("coffee", mode.image_width, mode.image_height);
+    const std::size_t rgb_bytes = rgb.size();
+
+    const int rate = 12000;
+    nbtv_tx* tx = nbtv_tx_create(rate);
+    nbtv_tx_set_mode(tx, mode_id);
+    nbtv_tx_set_callsign(tx, "N0CALL");
+    nbtv_tx_set_model(tx, model);
+    const int n = nbtv_tx_frame_samples(tx);
+    std::vector<float> audio(3000, 0.0f), frame(static_cast<std::size_t>(n));
+    for (int i = 0; i < 5; ++i) {
+        CHECK_EQ(nbtv_tx_encode_image(tx, rgb.data(), frame.data(), n, nullptr, nullptr), n);
+        audio.insert(audio.end(), frame.begin(), frame.end());
+    }
+    audio.insert(audio.end(), 6000, 0.0f);
+    nbtv_tx_destroy(tx);
+
+    nbtv_rx* rx = nbtv_rx_create(rate);
+    nbtv_rx_set_model(rx, model);
+    if (merge != nullptr) {
+        nbtv_rx_set_merge(rx, merge);
+        nbtv_rx_set_merging(rx, 1);
+    }
+    std::vector<nbtv_rx_frame> frames;
+    for (std::size_t pos = 0; pos < audio.size(); pos += 240) {
+        // 第一張收到之後關掉，第三張（略過了兩張）之後再打開
+        nbtv_rx_set_decode_pictures(rx, frames.size() >= 1 && frames.size() < 3 ? 0 : 1);
+        nbtv_rx_push(rx, audio.data() + pos, static_cast<int>(std::min<std::size_t>(240, audio.size() - pos)));
+        nbtv_rx_frame f;
+        while (nbtv_rx_poll_frame(rx, &f)) frames.push_back(f);
+    }
+    CHECK_EQ(static_cast<int>(frames.size()), 5);
+    for (std::size_t i = 0; i < frames.size(); ++i) {
+        const nbtv_rx_frame& f = frames[i];
+        const bool skipped = i == 1 || i == 2;
+        CHECK_EQ(f.mode_id, mode_id);
+        CHECK_EQ(f.header_ok, 1);
+        CHECK(std::strcmp(f.callsign, "N0CALL") == 0);
+        CHECK_EQ(f.sequence, static_cast<int>(i));
+        CHECK_EQ(f.model_missing, 0);
+        CHECK_EQ(f.skipped, skipped ? 1 : 0);
+        CHECK_EQ(f.decoded, skipped ? 0 : 1);
+        CHECK(f.snr_db > 15.0);
+        const std::vector<std::uint8_t> got(f.rgb, f.rgb + rgb_bytes);
+        if (skipped) CHECK(std::all_of(got.begin(), got.end(), [](std::uint8_t v) { return v == 0; }));
+        else CHECK(test_images::psnr(got, rgb) > min_psnr);
+    }
+    nbtv_rx_status st{};
+    nbtv_rx_get_status(rx, &st);
+    CHECK_EQ(st.frames_decoded, 3);
+    CHECK_EQ(st.frames_skipped, 2);
+    CHECK_EQ(st.frames_failed, 0);
+
+    // 重設不會改變這個設定，只把計數歸零；沒有模型的模式照樣回報「模型不符」，不算略過
+    nbtv_rx_set_decode_pictures(rx, 0);
+    nbtv_rx_reset(rx);
+    nbtv_rx_push(rx, audio.data(), static_cast<int>(audio.size()));
+    int skipped = 0, decoded = 0;
+    nbtv_rx_frame f;
+    while (nbtv_rx_poll_frame(rx, &f)) {
+        skipped += f.skipped;
+        decoded += f.decoded;
+    }
+    CHECK_EQ(skipped, 5);
+    CHECK_EQ(decoded, 0);
+    nbtv_rx_set_model(rx, nullptr);
+    nbtv_rx_reset(rx);
+    nbtv_rx_push(rx, audio.data(), static_cast<int>(audio.size()));
+    int missing = 0;
+    skipped = 0;
+    while (nbtv_rx_poll_frame(rx, &f)) {
+        skipped += f.skipped;
+        missing += f.model_missing;
+    }
+    CHECK_EQ(skipped, 0);
+    CHECK_EQ(missing, 5);
+
+    nbtv_rx_destroy(rx);
+    if (merge != nullptr) nbtv_merge_destroy(merge);
+    nbtv_model_destroy(model);
+}
+
 // 取消已經編好、但決定不送的那一幀：之後的尾巴與幀序號要和「從來沒編過那一幀」完全一樣。
 void test_discard_last() {
     const std::vector<std::uint8_t> a = test_images::load("coffee"), b = test_images::load("rocket");
@@ -756,6 +906,10 @@ void test_bad_samples(int rate) {
 
 int main() {
     test_helpers();
+    test_inference_settings();
+    test_skip_pictures(12, "261122-3", nullptr, 23.5);
+    test_skip_pictures(12, "261122-3", "261124-8", 23.5);
+    test_skip_pictures(5, "261125-3", nullptr, 26.0);  // 幀裡沒有導頻的模式
     test_discard_last();
     // 下限：各個模型對那張圖不加雜訊時的 PSNR（test_learned.cpp 的對照表）減 0.3 dB
     loopback(12000, 11, "261123-1", "coffee", 28.3);

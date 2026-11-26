@@ -258,6 +258,7 @@ bool LearnedMerge::merge(std::span<const float> values, std::span<const float> n
     const float log10_8 = 0.9030899869919435f;
     const std::size_t rule_width = static_cast<std::size_t>(m.rule1.out);
     std::vector<float> h1(rule_width), h2(rule_width);
+    const Kernels& kernel = kernels();
     for (int c = 0; c < latent; ++c)
         for (int p = 0; p < kGrid; ++p) {
             const std::size_t i = static_cast<std::size_t>(c) * kGrid + static_cast<std::size_t>(p);
@@ -270,16 +271,19 @@ bool LearnedMerge::merge(std::span<const float> values, std::span<const float> n
                 const float ls = std::log10(vj / 2.0f);
                 const float ld = guess.v[static_cast<std::size_t>(p) * static_cast<std::size_t>(slots) + static_cast<std::size_t>(j)];
                 const float in[kRuleInputs] = {ld / 2.0f, ls / 2.0f, l0 / 2.0f, guess_all[static_cast<std::size_t>(j)] / 2.0f};
+                // 一排值一起算 GELU（一個一個呼叫的話，這個迴圈一張畫面要呼叫幾十萬次）
                 for (std::size_t o = 0; o < rule_width; ++o) {
                     const float* w = m.rule1.w.data() + o * kRuleInputs;
-                    h1[o] = gelu(m.rule1.b[o] + w[0] * in[0] + w[1] * in[1] + w[2] * in[2] + w[3] * in[3]);
+                    h1[o] = m.rule1.b[o] + w[0] * in[0] + w[1] * in[1] + w[2] * in[2] + w[3] * in[3];
                 }
+                kernel.gelu(h1.data(), rule_width);
                 for (std::size_t o = 0; o < rule_width; ++o) {
                     const float* w = m.rule2.w.data() + o * rule_width;
                     float s = m.rule2.b[o];
                     for (std::size_t k = 0; k < rule_width; ++k) s += w[k] * h1[k];
-                    h2[o] = gelu(s);
+                    h2[o] = s;
                 }
+                kernel.gelu(h2.data(), rule_width);
                 float correction = m.rule3.b[0];
                 for (std::size_t k = 0; k < rule_width; ++k) correction += m.rule3.w[k] * h2[k];
                 const float simple = ln10 * (ls - ld - log10_8);

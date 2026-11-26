@@ -1,9 +1,11 @@
 #include "app.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 
 #include "i18n.hpp"
 #include "png.hpp"
@@ -43,8 +45,18 @@ std::string slashes_to_dashes(std::string text) {
 
 // ---------------------------------------------------------------- 音訊裝置與核心之間的橋樑（macOS 版的 RadioEngine）
 //
-// 核心的接收機與頻譜分析都只在 core 這條執行緒上使用，不在音訊的執行緒、也不在主執行緒上做解調
-// （一幀結束時 nbtv_rx_push 可能花幾十毫秒，慢的電腦更久）。發射機只在 App 的 tx_worker_ 上使用。
+// 收到的音訊由音訊的執行緒交給兩條執行緒各做各的，都不在音訊的執行緒、也不在主執行緒上做：
+//   spectrum  算瀑布圖的頻譜。很快，所以瀑布圖一直在動；
+//   rx        核心的接收機：同步、解調，一幀收完時解一張畫面。解畫面是最花時間的一步
+//             （核心會另外用幾條執行緒一起算），慢的電腦上可能要幾百毫秒，這段時間不可以擋到別的事。
+// 發射機只在 App 的 tx_worker_ 上使用。
+//
+// 來不及的時候：解一張畫面的時間比一幀還長的話（例如每張 0.67 秒的模式 14 配上很慢的電腦），還沒處理的音訊會愈積愈多，
+// 畫面愈來愈晚出來。所以積超過 kSkipAbove 秒就請接收機先不解畫面（幀照樣收，只少畫面），消化到 kResumeBelow 秒以下再恢復：
+// 少幾張畫面，但出來的畫面不會晚超過解一張的時間，同步也不會斷。
+//
+// 主執行緒不等這兩條執行緒（從前開始、停止接收時會等它們把排著的工作做完，積多了視窗就跟著停住）：
+// 每一段音訊帶著「第幾次接收」的編號，停止或重新開始之後，先前排著的一看編號不對就丟掉。
 
 struct App::Engine {
     /// 輸出佇列要放得下開頭的靜音、一整張，再加上提早排進去的下一張；照最長的模式算，至少 14 秒。
@@ -54,65 +66,101 @@ struct App::Engine {
         return std::max(14.0, 2 * longest + 2);
     }
 
-    AudioOutput output{queue_seconds()};
-    AudioInput input;
-    CoreReceiver receiver;
-    CoreSpectrum spectrum;
-    CoreTransmitter transmitter;
-    /// 開始接收了幾次（主執行緒上讀寫）。
-    int generation = 0;
-    /// 接收的更新、發射監看的頻譜列：在 core 的執行緒上呼叫，由 App 轉回主執行緒。
-    std::function<void(RxUpdate)> on_rx_update;
-    std::function<void(std::vector<std::array<float, kSpectrumBins>>)> on_monitor_rows;
-
-    // 以下只在 core 的執行緒上讀寫
-    bool receiving = false;
-    int active_generation = 0;
-    RxUpdate pending;          // 還沒交給介面的更新
-    double last_delivery = 0;
+    static constexpr double kSkipAbove = 1.0;
+    static constexpr double kResumeBelow = 0.2;
     /// 音訊每十幾毫秒進來一段，但介面不需要更新得那麼勤：攢到這麼久才交一次；解出新的一幀時立刻交。
     static constexpr double kDeliveryInterval = 0.08;
 
-    Worker core;   // 宣告在最後：解構時最先結束
+    AudioOutput output{queue_seconds()};
+    AudioInput input;
+    CoreReceiver receiver;       // 只在 rx 這條執行緒上使用
+    CoreSpectrum spectrum;       // 只在 spectrum 這條執行緒上使用
+    CoreTransmitter transmitter;
+    /// 開始接收了幾次（主執行緒上讀寫）。
+    int generation = 0;
+    /// 接收的更新、發射監看的頻譜列：在上面兩條執行緒上呼叫，由 App 轉回主執行緒。
+    std::function<void(RxUpdate)> on_rx_update;
+    std::function<void(std::vector<std::array<float, kSpectrumBins>>)> on_monitor_rows;
+
+    /// 現在這一次接收的編號；沒有在接收時是 0。
+    std::atomic<int> active{0};
+    /// 交給 rx、還沒處理的取樣數。
+    std::atomic<std::int64_t> rx_waiting{0};
+    /// 接收機最近一次回報是不是同步中（瀑布圖的參考位準要不要跟著動，看的是這個）。
+    std::atomic<bool> rx_synced{false};
+    /// 測試用：test_hold 開著的時候，rx 每解出一張畫面就停在那裡（test_held 變成 true），直到關掉為止——
+    /// 等於一台解一張畫面要很久的電腦，而且要停多久由測試決定，不靠計時。和真的解碼一樣，停止或重新開始接收也打斷不了它。
+    std::atomic<bool> test_hold{false};
+    std::atomic<bool> test_held{false};
+
+    // 以下只在 rx 這條執行緒上讀寫
+    RxUpdate rx_pending;         // 還沒交給介面的狀態與幀
+    double rx_delivered = 0;
+    bool skipping = false;       // 現在是不是請接收機先不解畫面
+
+    // 以下只在 spectrum 這條執行緒上讀寫
+    std::vector<std::array<float, kSpectrumBins>> rows_pending;
+    double rows_delivered = 0;
+
+    Worker spectrum_worker;  // 這兩條宣告在最後：解構時最先結束
+    Worker rx_worker;
 
     Engine() {
         // app 接收用的接收機一律把最近幾幀合起來解（畫面沒變的地方合併前面幾張，訊號弱時比較清楚也比較穩定）
         receiver.set_merging(true);
         input.on_samples = [this](std::vector<float> samples) {
-            core.post([this, samples = std::move(samples)] { process(samples); });
+            const int session = active.load();
+            if (session == 0) return;
+            const auto shared = std::make_shared<const std::vector<float>>(std::move(samples));
+            rx_waiting.fetch_add(static_cast<std::int64_t>(shared->size()));
+            rx_worker.post([this, shared, session] { receive(*shared, session); });
+            spectrum_worker.post([this, shared, session] { analyse(*shared, session); });
         };
     }
 
     ~Engine() {
+        test_hold.store(false);
+        active.store(0);  // 還排著的音訊一輪到就丟掉，兩條執行緒很快就結束
         input.stop();
         output.stop();
     }
 
     bool is_receiving() const { return input.running(); }
 
-    /// 從指定的輸入裝置開始接收；接收機會先清成初始狀態。
-    bool start_receiving(SDL_AudioDeviceID device, std::string* error) {
+    /// 開始新的一次接收：接收機與頻譜先清成初始狀態，之後交進來的音訊才算這一次的。
+    void begin() {
         const int current = ++generation;
-        core.sync([this, current] {
+        active.store(current);
+        // 排在新的音訊前面：輪到的時候，這一次的第一段音訊還在後面
+        rx_worker.post([this] {
             receiver.reset();
-            spectrum.reset();
-            pending = RxUpdate();
-            active_generation = current;
-            receiving = true;
+            receiver.set_decode_pictures(true);
+            skipping = false;
+            rx_pending = RxUpdate();
+            rx_synced.store(false);
         });
+        spectrum_worker.post([this] {
+            spectrum.reset();
+            rows_pending.clear();
+        });
+    }
+
+    /// 從指定的輸入裝置開始接收。
+    bool start_receiving(SDL_AudioDeviceID device, std::string* error) {
+        begin();
         if (input.start(device, error)) return true;
-        core.sync([this] { receiving = false; });
+        active.store(0);
         return false;
     }
 
     void stop_receiving() {
         input.stop();
-        core.sync([this] { receiving = false; });
+        active.store(0);
     }
 
     /// 發射時把送出的音訊交給頻譜分析，瀑布圖顯示送出的訊號。
     void monitor(std::vector<float> samples) {
-        core.post([this, samples = std::move(samples)] {
+        spectrum_worker.post([this, samples = std::move(samples)] {
             spectrum.push(samples.data(), static_cast<int>(samples.size()));
             std::vector<std::array<float, kSpectrumBins>> rows;
             std::array<float, kSpectrumBins> row{};
@@ -121,30 +169,73 @@ struct App::Engine {
         });
     }
 
+    /// 等頻譜那條執行緒把排著的做完再清（它的工作都很短）。
     void reset_spectrum() {
-        core.sync([this] { spectrum.reset(); });
+        spectrum_worker.sync([this] {
+            spectrum.reset();
+            rows_pending.clear();
+        });
     }
 
-    void process(const std::vector<float>& samples) {
-        if (!receiving) return;
+    // rx 執行緒
+    void receive(const std::vector<float>& samples, int session) {
+        const std::int64_t waiting = rx_waiting.fetch_sub(static_cast<std::int64_t>(samples.size())) - static_cast<std::int64_t>(samples.size());
+        if (session != active.load()) return;
+        const double behind = static_cast<double>(waiting) / kSampleRate;  // 這一段後面還排著幾秒
+        if (!skipping && behind > kSkipAbove) {
+            skipping = true;
+            receiver.set_decode_pictures(false);
+        } else if (skipping && behind < kResumeBelow) {
+            skipping = false;
+            receiver.set_decode_pictures(true);
+        }
         receiver.push(samples.data(), static_cast<int>(samples.size()));
-        spectrum.push(samples.data(), static_cast<int>(samples.size()));
         const nbtv_rx_status status = receiver.status();
-        pending.synced = status.synced != 0;
-        pending.mode_id = status.mode_id;
-        pending.snr_valid = status.snr_valid != 0;
-        pending.snr_db = status.snr_db;
-        pending.offset_hz = status.freq_offset_hz;
-        pending.input_level_db = status.input_level_db;
-        while (std::optional<DecodedFrame> frame = receiver.poll_frame()) pending.frames.push_back(std::move(*frame));
-        std::array<float, kSpectrumBins> row{};
-        while (spectrum.poll(row)) pending.spectrum_rows.push_back(row);
+        rx_synced.store(status.synced != 0);
+        rx_pending.has_status = true;
+        rx_pending.synced = status.synced != 0;
+        rx_pending.mode_id = status.mode_id;
+        rx_pending.snr_valid = status.snr_valid != 0;
+        rx_pending.snr_db = status.snr_db;
+        rx_pending.offset_hz = status.freq_offset_hz;
+        rx_pending.input_level_db = status.input_level_db;
+        bool decoded = false;
+        while (std::optional<DecodedFrame> frame = receiver.poll_frame()) {
+            decoded = decoded || frame->decoded;
+            rx_pending.frames.push_back(std::move(*frame));
+        }
+        if (decoded && test_hold.load()) {
+            test_held.store(true);
+            while (test_hold.load()) SDL_Delay(1);
+            test_held.store(false);
+        }
         const double now = uptime_seconds();
-        if (pending.frames.empty() && now - last_delivery < kDeliveryInterval) return;
-        last_delivery = now;
-        RxUpdate update = std::move(pending);
-        update.generation = active_generation;
-        pending = RxUpdate();
+        if (rx_pending.frames.empty() && now - rx_delivered < kDeliveryInterval) return;
+        rx_delivered = now;
+        if (session != active.load()) {  // 解這一幀的時候停止了：不交
+            rx_pending = RxUpdate();
+            return;
+        }
+        RxUpdate update = std::move(rx_pending);
+        update.generation = session;
+        rx_pending = RxUpdate();
+        if (on_rx_update) on_rx_update(std::move(update));
+    }
+
+    // spectrum 執行緒
+    void analyse(const std::vector<float>& samples, int session) {
+        if (session != active.load()) return;
+        spectrum.push(samples.data(), static_cast<int>(samples.size()));
+        std::array<float, kSpectrumBins> row{};
+        while (spectrum.poll(row)) rows_pending.push_back(row);
+        const double now = uptime_seconds();
+        if (rows_pending.empty() || now - rows_delivered < kDeliveryInterval) return;
+        rows_delivered = now;
+        RxUpdate update;
+        update.generation = session;
+        update.spectrum_rows = std::move(rows_pending);
+        update.rows_synced = rx_synced.load();
+        rows_pending.clear();
         if (on_rx_update) on_rx_update(std::move(update));
     }
 };
@@ -317,23 +408,37 @@ void App::clear_sync_state() {
     last_result = LastResult::none;
 }
 
+// 一份更新裡有接收機的狀態與解出來的幀（has_status），或是瀑布圖的頻譜列，或是兩樣都有：
+// 實際接收時這兩樣來自兩條執行緒（見 Engine），各交各的。
 void App::apply(const RxUpdate& update) {
     if (tx_phase != TxPhase::idle && live) return;
-    if (update.synced || !update.frames.empty()) last_signal_time_ = clock();
-    input_level_db = update.input_level_db;
-    for (const DecodedFrame& frame : update.frames) add(frame, schedule::now());
-    if (update.synced) {
-        synced = true;
-        rx_mode_id = update.mode_id;
-        snr_db = update.snr_valid ? std::optional<double>(update.snr_db) : std::nullopt;
-        offset_hz = update.offset_hz;
-    } else if (synced || update.frames.empty()) {
-        clear_sync_state();
+    if (update.has_status) {
+        if (update.synced || !update.frames.empty()) last_signal_time_ = clock();
+        input_level_db = update.input_level_db;
+        for (const DecodedFrame& frame : update.frames) add(frame, schedule::now());
+        if (update.synced) {
+            synced = true;
+            rx_mode_id = update.mode_id;
+            snr_db = update.snr_valid ? std::optional<double>(update.snr_db) : std::nullopt;
+            offset_hz = update.offset_hz;
+        } else if (synced || update.frames.empty()) {
+            clear_sync_state();
+        }
     }
-    append_spectrum(update.spectrum_rows, update.synced ? WaterfallStore::Reference::hold : WaterfallStore::Reference::noise);
+    append_spectrum(update.spectrum_rows, update.rows_synced ? WaterfallStore::Reference::hold : WaterfallStore::Reference::noise);
 }
 
 void App::add(const DecodedFrame& frame, double time) {
+    if (frame.skipped) {
+        // 幀收到了，但這台電腦來不及解畫面（Engine 請接收機先不解）。第一次發生時在底列說明，之後只記在「上一張」那一列
+        last_result = LastResult::skipped;
+        if (frame.header_ok && !frame.callsign.empty()) sync_callsign = frame.callsign;
+        if (skipped_frames++ == 0) {
+            notice = L("這台電腦解一張畫面比收一張還久，來不及的畫面會略過");
+            note("解畫面的速度跟不上，開始略過來不及的畫面");
+        }
+        return;
+    }
     if (!frame.decoded || !frame.picture) {
         // 幀收到了，但對方用的是另一份權重（或沒有那個模式的權重檔）
         last_result = frame.model_missing ? LastResult::model_missing : LastResult::failed;
@@ -1233,6 +1338,26 @@ void App::debug_use_simulated_output(std::function<void(const std::vector<float>
     engine_->output.simulated_sink = std::move(sink);
     engine_->output.simulated_stall_after = stall_after;
 }
+
+void App::debug_begin_receiving() {
+    if (engine_) engine_->begin();
+}
+
+void App::debug_stop_receiving() {
+    if (engine_) engine_->stop_receiving();
+}
+
+void App::debug_feed_input(std::vector<float> samples) {
+    if (engine_ && engine_->input.on_samples) engine_->input.on_samples(std::move(samples));
+}
+
+void App::debug_hold_decoder(bool hold) {
+    if (engine_) engine_->test_hold.store(hold);
+}
+
+bool App::debug_decoder_held() const { return engine_ && engine_->test_held.load(); }
+
+double App::debug_receive_backlog() const { return engine_ ? static_cast<double>(engine_->rx_waiting.load()) / kSampleRate : 0.0; }
 
 void App::first_frame_ready(std::optional<EncodedFrame> frame, int session) {
     if (session != tx_session_ || tx_phase != TxPhase::starting) return;

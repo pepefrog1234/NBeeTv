@@ -387,6 +387,8 @@ int main(int argc, char** argv) {
         return 0;
     case Options::Mode::version:
         log::line(std::string("nbtv-gui ") + nbtv_version_string());
+        // 這台電腦上畫面的編解碼用的是哪一種寫法、幾條執行緒（回報「會卡」的時候附上這一行，比較好判斷）
+        log::line(std::string("畫面的編解碼：") + nbtv_inference_kernel() + "，最多 " + std::to_string(nbtv_inference_threads()) + " 條執行緒");
         return 0;
     case Options::Mode::selftest: {
         init_headless();

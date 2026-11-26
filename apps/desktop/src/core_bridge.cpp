@@ -193,6 +193,8 @@ void CoreReceiver::reset() { nbtv_rx_reset(handle_); }
 
 void CoreReceiver::set_merging(bool on) { nbtv_rx_set_merging(handle_, on ? 1 : 0); }
 
+void CoreReceiver::set_decode_pictures(bool on) { nbtv_rx_set_decode_pictures(handle_, on ? 1 : 0); }
+
 void CoreReceiver::push(const float* samples, int count) { nbtv_rx_push(handle_, samples, count); }
 
 nbtv_rx_status CoreReceiver::status() const {
@@ -210,6 +212,7 @@ std::optional<DecodedFrame> CoreReceiver::poll_frame() {
     const bool fits = size.width > 0 && size.height > 0 && size.width <= NBTV_IMAGE_MAX_WIDTH && size.height <= NBTV_IMAGE_MAX_HEIGHT;
     frame.decoded = frame_->decoded != 0 && fits;
     frame.model_missing = frame_->model_missing != 0;
+    frame.skipped = frame_->skipped != 0;
     frame.header_ok = frame_->header_ok != 0;
     frame_->callsign[NBTV_CALLSIGN_MAX] = '\0';
     frame.callsign = frame_->callsign;

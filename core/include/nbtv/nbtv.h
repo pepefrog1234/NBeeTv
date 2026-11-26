@@ -2,7 +2,8 @@
  * hf-nbtv 核心函式庫的 C API。
  *
  * 各平台的外殼（macOS／iOS 的 Swift、Android 的 Kotlin、桌面的 C++）只透過這個標頭使用核心。
- * 核心本身不開執行緒、不碰音訊裝置：外殼把收到的音訊取樣推進來、取回畫面；把畫面推進來、取回要播放的音訊取樣。
+ * 核心本身不碰音訊裝置：外殼把收到的音訊取樣推進來、取回畫面；把畫面推進來、取回要播放的音訊取樣。
+ * 工作都在呼叫的那條執行緒上做完才返回；只有畫面的編碼與解碼會另外用幾條執行緒一起算（見下面「運算」一節）。
  *
  * 畫面的編解碼是類神經網路（「學習式」的編碼）：每個模式各有一份權重檔，收發兩端都要先載入、設定給
  * 發射機與接收機，見下面「模型」一節。
@@ -131,6 +132,25 @@ uint32_t nbtv_merge_model_id(const nbtv_merge *merge);
 /* 一共看幾幀：現在這一幀，加上前面幾幀。 */
 int nbtv_merge_frames(const nbtv_merge *merge);
 
+/* ------------------------------------------------------------------ 運算 */
+
+/*
+ * 畫面的編碼與解碼（類神經網路的推論）是核心裡最花時間的部分，會分給幾條執行緒一起算：
+ * 呼叫 nbtv_tx_encode_image、nbtv_rx_push 的那一條，加上核心自己開的幾條幫手。幫手是整個行程共用的一組，
+ * 第一次用到時才開，之後留著等下一張畫面。算出來的結果和只用一條執行緒時逐位元相同。
+ *
+ * nbtv_inference_threads 回傳最多同時用幾條（含呼叫的那一條）。預設是這台電腦的邏輯處理器數，最多 8；
+ * 環境變數 NBTV_THREADS 有設的話用它。nbtv_set_inference_threads 可以改：1 是完全不開執行緒，最多 64，
+ * 0 回到預設；整個行程一起生效，隨時可以改。
+ *
+ * nbtv_inference_kernel 回傳這台電腦上最內層的迴圈用的是哪一種寫法："avx2"（x86-64 上 CPU 與作業系統都支援
+ * AVX2 與 FMA 時）或 "generic"（其他情形：一般的 C++，由編譯器向量化）。啟動後第一次用到時決定，之後不變。
+ * 兩種寫法的結果只差在浮點數的末位，遠小於通道的雜訊，不影響互通。環境變數 NBTV_KERNEL=generic 可以指定不用 avx2。
+ */
+int nbtv_inference_threads(void);
+void nbtv_set_inference_threads(int threads);
+const char *nbtv_inference_kernel(void);
+
 /* ------------------------------------------------------------------ 呼號 */
 
 /*
@@ -227,7 +247,18 @@ void nbtv_rx_set_merge(nbtv_rx *rx, const nbtv_merge *merge);
 /* 打開（非 0）或關掉（0）合併最近幾幀；預設是關的。nbtv_rx_reset 不會改變這個設定，只會忘掉前面收到的幀。 */
 void nbtv_rx_set_merging(nbtv_rx *rx, int enabled);
 
-/* 推入收到的音訊。同步、解調與解碼都在這個呼叫裡完成，一幀結束時可能花幾十毫秒。 */
+/*
+ * 打開（非 0，預設）或關掉（0）解畫面。關掉時幀照常接收、回報（呼號、幀序號、訊雜比都有），只跳過解畫面那一步：
+ * 回報的幀 decoded = 0、skipped = 1。給外殼在來不及的時候用：解畫面是最花時間的一步，電腦太慢、一幀的時間裡解不完時，
+ * 還沒處理的音訊會愈積愈多，畫面愈來愈晚出來。積太多的時候先關掉、消化完再打開，只少幾張畫面，同步不會斷。
+ * 合併最近幾幀照樣把略過的那一幀記下來。隨時可以改，下一幀起生效；nbtv_rx_reset 不會改變這個設定。
+ */
+void nbtv_rx_set_decode_pictures(nbtv_rx *rx, int enabled);
+
+/*
+ * 推入收到的音訊。同步、解調與解碼都在這個呼叫裡完成才返回：一幀結束時要解一張畫面，
+ * 視模式與電腦的快慢要幾毫秒到幾百毫秒（會用到幾條執行緒，見「運算」一節）。
+ */
 void nbtv_rx_push(nbtv_rx *rx, const float *samples, int count);
 
 typedef struct nbtv_rx_status {
@@ -241,6 +272,7 @@ typedef struct nbtv_rx_status {
     float input_level_db;     /* 輸入音量（均方根，dBFS） */
     int frames_decoded;       /* 累計解出來的幀數 */
     int frames_failed;        /* 累計解碼失敗的幀數 */
+    int frames_skipped;       /* 累計因為關掉解畫面而略過的幀數（nbtv_rx_set_decode_pictures） */
 } nbtv_rx_status;
 
 void nbtv_rx_get_status(const nbtv_rx *rx, nbtv_rx_status *out);
@@ -257,6 +289,7 @@ typedef struct nbtv_rx_frame {
     int image_height;
     uint8_t rgb[NBTV_IMAGE_MAX_RGB_BYTES];
     int model_missing;   /* 收到了一幀，但沒有設定這個模式的模型、或權重和對方不同，所以沒有畫面 */
+    int skipped;         /* 收到了一幀，但當時關掉了解畫面（nbtv_rx_set_decode_pictures），所以沒有畫面 */
 } nbtv_rx_frame;
 
 /*

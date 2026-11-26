@@ -422,6 +422,7 @@ void Receiver::reset() {
     earlier_.clear();
     frames_decoded_ = 0;
     frames_failed_ = 0;
+    frames_skipped_ = 0;
     mode_ = nullptr;
     snr_valid_ = false;
     sync_quality_ = 0.0;
@@ -484,6 +485,7 @@ RxStatus Receiver::status() const {
     s.input_level_db = static_cast<float>(10.0 * std::log10(std::max(level_, 1e-12)));
     s.frames_decoded = frames_decoded_;
     s.frames_failed = frames_failed_;
+    s.frames_skipped = frames_skipped_;
     s.sync_quality = static_cast<float>(sync_quality_);
     if (s.synced) {
         s.mode_id = mode_->id;
@@ -1373,6 +1375,7 @@ void Receiver::process_frame_free() {
     if (trace_) std::fprintf(stderr, "[rx]   → 標頭%s、%s\n", ok ? "正確" : "沒解出來", frame.decoded ? "有畫面" : "沒有畫面");
     if (emit) {
         if (frame.decoded) ++frames_decoded_;
+        else if (frame.skipped) ++frames_skipped_;
         else ++frames_failed_;
         frames_.push_back(std::move(frame));
     }
@@ -1493,6 +1496,16 @@ void Receiver::decode_picture(const Mode& mode, const LearnedUnpacked& l, bool w
     const bool usable = model != nullptr && learned_model_matches(l, *model);
     frame.model_missing = whole && !usable;
     frame.decoded = whole && usable;
+    if (frame.decoded && tuning_.skip_pictures) {
+        // 設定成先不解畫面：這一幀收到的值照樣記下來，之後的幀合併時用得到
+        frame.decoded = false;
+        frame.skipped = true;
+        const LearnedMerge* merge = tuning_.learned_merge ? find_merge(model->model_id()) : nullptr;
+        if (merge != nullptr) remember(*merge, mode, l, frame);
+        else earlier_.clear();
+        if (trace_) std::fprintf(stderr, "[rx]   設定成先不解畫面，這一幀略過\n");
+        return;
+    }
     if (frame.decoded) {
         frame.rgb.resize(static_cast<std::size_t>(model->rgb_bytes()));
         LearnedRxOptions options;
@@ -1633,6 +1646,7 @@ void Receiver::process_frame() {
     if (trace_) std::fprintf(stderr, "[rx]   → 標頭%s、%s\n", ok ? "正確" : "沒解出來", frame.decoded ? "有畫面" : "沒有畫面");
     if (emit) {
         if (frame.decoded) ++frames_decoded_;
+        else if (frame.skipped) ++frames_skipped_;
         else ++frames_failed_;
         frames_.push_back(std::move(frame));
     }

@@ -32,3 +32,7 @@
 "跟著系統" = "Igual que el sistema";
 "跟著系統（%@）" = "Igual que el sistema (%@)";
 "跟著系統，或自己指定" = "Igual que el sistema, o el que elijas";
+
+// 接收：這台電腦來不及解每一張畫面時
+"來不及解" = "Omitida (lento)";
+"這台電腦解一張畫面比收一張還久，來不及的畫面會略過" = "Este equipo tarda más en decodificar una imagen que en recibirla; las que no llegue a tiempo se omiten";

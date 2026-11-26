@@ -32,3 +32,7 @@
 "跟著系統" = "Same as the system";
 "跟著系統（%@）" = "Same as the system (%@)";
 "跟著系統，或自己指定" = "Follow the system, or pick one";
+
+// 接收：這台電腦來不及解每一張畫面時
+"來不及解" = "Skipped (too slow)";
+"這台電腦解一張畫面比收一張還久，來不及的畫面會略過" = "This computer takes longer to decode a picture than to receive one, so pictures it cannot keep up with are skipped";

@@ -144,6 +144,7 @@ struct DecodedFrame {
     int mode_id = 0;
     bool decoded = false;        // 有畫面
     bool model_missing = false;  // 收到了一幀，但權重和對方的不同（或沒有那個模式的權重檔），所以沒有畫面
+    bool skipped = false;        // 收到了一幀，但那時候來不及解畫面（CoreReceiver::set_decode_pictures），所以沒有畫面
     bool header_ok = false;
     std::string callsign;
     int sequence = -1;
@@ -162,6 +163,9 @@ public:
     void reset();
     /// 要不要把最近幾幀合起來解（預設不要）。只對有配合併用權重的模型有作用；重設不會改變這個設定。
     void set_merging(bool on);
+    /// 要不要解畫面（預設要）。關掉時幀照樣收、照樣回報，只是沒有畫面（DecodedFrame::skipped）：
+    /// 電腦來不及的時候先關掉、消化完積著的音訊再打開，只少幾張畫面，同步不會斷。重設不會改變這個設定。
+    void set_decode_pictures(bool on);
     void push(const float* samples, int count);
     nbtv_rx_status status() const;
     std::optional<DecodedFrame> poll_frame();

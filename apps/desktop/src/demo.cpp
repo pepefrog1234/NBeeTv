@@ -187,7 +187,9 @@ std::vector<RxUpdate> receive(const std::vector<float>& audio) {
         spectrum.push(audio.data() + position, count);
         RxUpdate update;
         const nbtv_rx_status status = receiver.status();
+        update.has_status = true;
         update.synced = status.synced != 0;
+        update.rows_synced = update.synced;
         update.mode_id = status.mode_id;
         update.snr_valid = status.snr_valid != 0;
         update.snr_db = status.snr_db;

@@ -1,8 +1,10 @@
 // 學習式網路共用的零件：權重檔的解析，以及卷積、線性層、GELU 這些前向計算的基本運算。
 // 畫面的編解碼（learned_codec.cpp）與接收端合併最近幾幀用的小網路（learned_merge.cpp）都用這一份。
-// 只給核心裡面的這幾個 .cpp 引用，不是對外的介面。全部是行內函式，不開執行緒。
+// 只給核心裡面的這幾個 .cpp 引用，不是對外的介面。全部是行內函式；最花時間的兩個迴圈（卷積的內積與 GELU）
+// 在 learned_kernels.cpp，這裡把它們切成小塊分給幾條執行緒（parallel.hpp）。
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -15,6 +17,8 @@
 #include <vector>
 
 #include "bits.hpp"
+#include "learned_kernels.hpp"
+#include "parallel.hpp"
 #include "types.hpp"
 
 namespace nbtv::nn {
@@ -229,79 +233,31 @@ struct Block {
     Conv c1, c2;
 };
 
-// 內積的累加器分成這麼多路。最內層是固定長度的迴圈，編譯器會把它變成向量運算；
-// 分路之後求和的順序是寫死的，不需要讓編譯器重排浮點加法（-ffast-math）。
-inline constexpr int kLanes = 16;
+// 一次卷積切成小塊分給幾條執行緒（parallel.hpp）。一塊是「16 個輸出通道 × 幾列輸出」：
+// 16 個通道的權重與那幾列用到的輸入都放得進處理器自己的快取；通道以 16 個為界，兩條執行緒不會寫到同一條快取線的同一段。
+// 切法只看這一層的形狀，和用幾條執行緒無關；每個輸出值都是同一個內積算出來的，所以結果和不切、不開執行緒時逐位元相同。
+inline constexpr int kTileChannels = 16;
+inline constexpr std::size_t kTileInputValues = 32768;       // 一塊用到的輸入最多大約這麼多個值（128 KB）
+inline constexpr double kTileWork = 1.0e6;                   // 一塊最多大約這麼多次乘加：塊小一點，快慢不同的核心才分得勻
+inline constexpr double kParallelMinWork = 1.0e6;            // 整層的乘加次數比這個少就不分給別的執行緒：叫醒它們的時間不划算
+inline constexpr std::size_t kGeluChunk = 16384;             // GELU 一段幾個值
+inline constexpr std::size_t kGeluParallelMin = 2 * kGeluChunk;
 
-inline float sum_lanes(const float* a) {
-    float s = 0.0f;
-    for (int j = 0; j < kLanes; ++j) s += a[j];
-    return s;
-}
-
-// 一個輸出像素、四個輸出通道：核心的每一列對應輸入裡一段連續的值，各自和四組權重做內積。
-// 四個通道一起算，輸入只需要讀一次。
-inline void pixel_dot4(const float* in, std::size_t row_step, const float* w0, const float* w1, const float* w2, const float* w3,
-                       int rows, int n, float out[4]) {
-    float a0[kLanes] = {}, a1[kLanes] = {}, a2[kLanes] = {}, a3[kLanes] = {};
-    for (int r = 0; r < rows; ++r) {
-        const float* x = in + static_cast<std::size_t>(r) * row_step;
-        const std::size_t off = static_cast<std::size_t>(r) * static_cast<std::size_t>(n);
-        const float* p0 = w0 + off;
-        const float* p1 = w1 + off;
-        const float* p2 = w2 + off;
-        const float* p3 = w3 + off;
-        int i = 0;
-        for (; i + kLanes <= n; i += kLanes) {
-            for (int j = 0; j < kLanes; ++j) {
-                const float v = x[i + j];
-                a0[j] += v * p0[i + j];
-                a1[j] += v * p1[i + j];
-                a2[j] += v * p2[i + j];
-                a3[j] += v * p3[i + j];
-            }
-        }
-        for (; i < n; ++i) {
-            const float v = x[i];
-            a0[0] += v * p0[i];
-            a1[0] += v * p1[i];
-            a2[0] += v * p2[i];
-            a3[0] += v * p3[i];
-        }
-    }
-    out[0] = sum_lanes(a0);
-    out[1] = sum_lanes(a1);
-    out[2] = sum_lanes(a2);
-    out[3] = sum_lanes(a3);
-}
-
-// 輸出通道數不是 4 的倍數時，剩下的一個一個算
-inline float pixel_dot1(const float* in, std::size_t row_step, const float* w, int rows, int n) {
-    float a[kLanes] = {};
-    for (int r = 0; r < rows; ++r) {
-        const float* x = in + static_cast<std::size_t>(r) * row_step;
-        const float* p = w + static_cast<std::size_t>(r) * static_cast<std::size_t>(n);
-        int i = 0;
-        for (; i + kLanes <= n; i += kLanes)
-            for (int j = 0; j < kLanes; ++j) a[j] += x[i + j] * p[i + j];
-        for (; i < n; ++i) a[0] += x[i] * p[i];
-    }
-    return sum_lanes(a);
-}
-
-// 二維卷積。out 不可以和 in 是同一個。
-inline void conv2d(const Conv& cv, const Map& in, Map& out) {
+// 二維卷積。out 不可以和 in 是同一個。kernel 是內層迴圈用哪一種寫法，平常不必給（測試用來對照）。
+inline void conv2d(const Conv& cv, const Map& in, Map& out, const Kernels& kernel = kernels()) {
     const int ho = (in.h + 2 * cv.pad - cv.k) / cv.stride + 1;
     const int wo = (in.w + 2 * cv.pad - cv.k) / cv.stride + 1;
     const int wp = in.w + 2 * cv.pad;
     const std::size_t cin = static_cast<std::size_t>(cv.cin);
     const std::size_t row_step = static_cast<std::size_t>(wp) * cin;  // 往下一列要跳過幾個值
 
-    // 四周補零的輸入；不補零的卷積（1×1）直接用原來的
+    // 四周補零的輸入；不補零的卷積（1×1）直接用原來的。
+    // 核心的一列不是 16 的倍數時，內層迴圈會多讀幾個值再丟掉（learned_kernels.hpp 的 kConvSlack），後面要留位置。
+    const bool ragged = (cv.k * cv.cin) % 16 != 0;
     std::vector<float> padded;
     const float* src = in.v.data();
-    if (cv.pad > 0) {
-        padded.assign(static_cast<std::size_t>(in.h + 2 * cv.pad) * row_step, 0.0f);
+    if (cv.pad > 0 || ragged) {
+        padded.assign(static_cast<std::size_t>(in.h + 2 * cv.pad) * row_step + (ragged ? kConvSlack : 0), 0.0f);
         for (int y = 0; y < in.h; ++y) {
             const std::size_t first = static_cast<std::size_t>(y + cv.pad) * static_cast<std::size_t>(wp) + static_cast<std::size_t>(cv.pad);
             std::memcpy(padded.data() + first * cin, in.at(y, 0), static_cast<std::size_t>(in.w) * cin * sizeof(float));
@@ -310,50 +266,59 @@ inline void conv2d(const Conv& cv, const Map& in, Map& out) {
     }
 
     out.shape(ho, wo, cv.cout);
-    const int seg = cv.k * cv.cin;  // 核心的一列對應多長的一段
-    const std::size_t per_out = static_cast<std::size_t>(cv.k) * static_cast<std::size_t>(seg);  // 一個輸出通道的權重個數
-    const std::size_t px_step = static_cast<std::size_t>(cv.stride) * cin;
-    const std::size_t out_c = static_cast<std::size_t>(cv.cout);
+    ConvTile whole{};
+    whole.src = src;
+    whole.weights = cv.w.data();
+    whole.bias = cv.b.data();
+    whole.dst = out.v.data();
+    whole.row_step = row_step;
+    whole.px_step = static_cast<std::size_t>(cv.stride) * cin;
+    whole.stride = cv.stride;
+    whole.k = cv.k;
+    whole.seg = cv.k * cv.cin;  // 核心的一列對應多長的一段
+    whole.cout = cv.cout;
+    whole.wo = wo;
 
-    // 輸出通道在外層：四個通道的權重留在快取裡，輸入則是順著掃過去
-    int oc = 0;
-    for (; oc + 4 <= cv.cout; oc += 4) {
-        const float* w0 = cv.w.data() + static_cast<std::size_t>(oc) * per_out;
-        const float* w1 = w0 + per_out;
-        const float* w2 = w1 + per_out;
-        const float* w3 = w2 + per_out;
-        const float b0 = cv.b[static_cast<std::size_t>(oc)], b1 = cv.b[static_cast<std::size_t>(oc) + 1];
-        const float b2 = cv.b[static_cast<std::size_t>(oc) + 2], b3 = cv.b[static_cast<std::size_t>(oc) + 3];
-        for (int oy = 0; oy < ho; ++oy) {
-            const float* px = src + static_cast<std::size_t>(oy) * static_cast<std::size_t>(cv.stride) * row_step;
-            float* dst = out.at(oy, 0) + oc;
-            for (int ox = 0; ox < wo; ++ox, px += px_step, dst += out_c) {
-                float sum[4];
-                pixel_dot4(px, row_step, w0, w1, w2, w3, cv.k, seg, sum);
-                dst[0] = sum[0] + b0;
-                dst[1] = sum[1] + b1;
-                dst[2] = sum[2] + b2;
-                dst[3] = sum[3] + b3;
-            }
+    const int blocks = (cv.cout + kTileChannels - 1) / kTileChannels;
+    const std::size_t band_values = static_cast<std::size_t>(cv.stride) * row_step;  // 多一列輸出，多用到幾個輸入值
+    const double row_work = static_cast<double>(wo) * std::min(cv.cout, kTileChannels) * cv.k * whole.seg;  // 一塊多一列輸出要多少次乘加
+    const int band_rows = std::clamp(static_cast<int>(std::min(static_cast<double>(kTileInputValues / std::max<std::size_t>(band_values, 1)),
+                                                                kTileWork / std::max(row_work, 1.0))),
+                                     1, std::max(ho, 1));
+    const int bands = (ho + band_rows - 1) / band_rows;
+    // 第 index 塊：通道在外層，同一組權重連續做完各列，再換下一組
+    const auto run = [&](int first, int last) {
+        for (int index = first; index < last; ++index) {
+            ConvTile tile = whole;
+            tile.oc_begin = (index / bands) * kTileChannels;
+            tile.oc_end = std::min(cv.cout, tile.oc_begin + kTileChannels);
+            tile.oy_begin = (index % bands) * band_rows;
+            tile.oy_end = std::min(ho, tile.oy_begin + band_rows);
+            kernel.conv_tile(tile);
         }
-    }
-    for (; oc < cv.cout; ++oc) {
-        const float* w = cv.w.data() + static_cast<std::size_t>(oc) * per_out;
-        const float bias = cv.b[static_cast<std::size_t>(oc)];
-        for (int oy = 0; oy < ho; ++oy) {
-            const float* px = src + static_cast<std::size_t>(oy) * static_cast<std::size_t>(cv.stride) * row_step;
-            float* dst = out.at(oy, 0) + oc;
-            for (int ox = 0; ox < wo; ++ox, px += px_step, dst += out_c) *dst = pixel_dot1(px, row_step, w, cv.k, seg) + bias;
-        }
-    }
+    };
+    const double work = static_cast<double>(ho) * wo * cv.cout * cv.k * whole.seg;
+    if (work < kParallelMinWork) run(0, blocks * bands);
+    else parallel_for(blocks * bands, 1, run);
 }
 
-// GELU（和 PyTorch 預設的一樣，用誤差函數的精確式）
-inline float gelu(float x) { return 0.5f * x * (1.0f + std::erf(x * 0.70710678118654752f)); }
-
-inline void gelu_inplace(std::vector<float>& v) {
-    for (float& x : v) x = gelu(x);
+// GELU（PyTorch 預設的那一種，用誤差函數）。怎麼算的在 learned_kernels.cpp。
+inline void gelu_inplace(float* values, std::size_t count) {
+    const Kernels& kernel = kernels();
+    if (count < kGeluParallelMin) {
+        kernel.gelu(values, count);
+        return;
+    }
+    const int chunks = static_cast<int>((count + kGeluChunk - 1) / kGeluChunk);
+    parallel_for(chunks, 1, [&](int first, int last) {
+        for (int chunk = first; chunk < last; ++chunk) {
+            const std::size_t begin = static_cast<std::size_t>(chunk) * kGeluChunk;
+            kernel.gelu(values + begin, std::min(kGeluChunk, count - begin));
+        }
+    });
 }
+
+inline void gelu_inplace(std::vector<float>& v) { gelu_inplace(v.data(), v.size()); }
 
 inline std::vector<float> apply(const Linear& l, const float* x) {
     std::vector<float> y(static_cast<std::size_t>(l.out));

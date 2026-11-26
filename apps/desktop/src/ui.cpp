@@ -881,8 +881,11 @@ void UI::draw_signal_panel(const Rect& rect) {
     const std::string mode = app_.rx_mode_id ? mode_text(L("模式（自動偵測）"), modes::find(*app_.rx_mode_id), *app_.rx_mode_id) : std::string("—");
     row(3, L("模式（自動偵測）"), mode, false);
     const std::string last = app_.last_result == App::LastResult::ok ? L("解碼成功") : app_.last_result == App::LastResult::failed ? L("解碼失敗")
-                             : app_.last_result == App::LastResult::model_missing ? L("模型不符") : std::string("—");
-    row(4, L("上一張"), last, false, false, app_.last_result == App::LastResult::failed || app_.last_result == App::LastResult::model_missing ? kTx : kText);
+                             : app_.last_result == App::LastResult::model_missing ? L("模型不符")
+                             : app_.last_result == App::LastResult::skipped ? L("來不及解") : std::string("—");
+    const bool trouble = app_.last_result == App::LastResult::failed || app_.last_result == App::LastResult::model_missing ||
+                         app_.last_result == App::LastResult::skipped;
+    row(4, L("上一張"), last, false, false, trouble ? kTx : kText);
 }
 
 void UI::draw_recent_panel(const Rect& rect) {

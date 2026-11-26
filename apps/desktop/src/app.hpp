@@ -28,6 +28,8 @@ namespace nbtvgui {
 struct RxUpdate {
     /// 第幾次開始接收的結果。重新開始接收（換裝置、發射結束）之後，先前那一次晚到的更新要丟掉。
     int generation = 0;
+    /// 這一份有沒有接收機的狀態（下面六項）與解出來的幀；只帶頻譜列的更新沒有。
+    bool has_status = false;
     bool synced = false;
     int mode_id = -1;
     bool snr_valid = false;
@@ -36,11 +38,13 @@ struct RxUpdate {
     double input_level_db = -120;
     std::vector<DecodedFrame> frames;
     std::vector<std::array<float, kSpectrumBins>> spectrum_rows;
+    /// 這幾列頻譜進來的時候接收機是不是同步中（同步中瀑布圖的參考位準不跟著訊號動）。
+    bool rows_synced = false;
 };
 
 class App {
 public:
-    enum class LastResult { none, ok, failed, model_missing };
+    enum class LastResult { none, ok, failed, model_missing, skipped };
     enum class TxPhase { idle, starting, transmitting, stopping };
 
     /// 收到的一張畫面。
@@ -70,6 +74,8 @@ public:
     std::optional<double> offset_hz;
     std::optional<int> rx_mode_id;
     LastResult last_result = LastResult::none;
+    /// 這次執行以來，因為這台電腦來不及解而略過的畫面數（幀有收到，只是沒有解成畫面）。
+    int skipped_frames = 0;
     double input_level_db = -120;
     std::deque<ReceivedFrame> history;      // 新的在前
     std::optional<std::uint64_t> selected_id;
@@ -220,6 +226,16 @@ public:
     void abort_transmit();
     /// 測試用：之後的發射不開音訊裝置，改由模擬的輸出照實際的時間把取樣取走。
     void debug_use_simulated_output(std::function<void(const std::vector<float>&)> sink, std::optional<double> stall_after = std::nullopt);
+    /// 測試用：不開音訊裝置就開始（或結束）一次接收；音訊由 debug_feed_input 一段一段交進來，像音訊的執行緒那樣。
+    void debug_begin_receiving();
+    void debug_stop_receiving();
+    void debug_feed_input(std::vector<float> samples);
+    /// 測試用：開著的時候，接收的那條執行緒每解出一張畫面就停住（debug_decoder_held 變成 true），到關掉為止——
+    /// 等於一台解一張畫面要很久的電腦（停止或重新開始接收也打斷不了它，和真的解碼一樣）。
+    void debug_hold_decoder(bool hold);
+    bool debug_decoder_held() const;
+    /// 測試用：交進來、接收機還沒處理的音訊有幾秒。
+    double debug_receive_backlog() const;
 
     // ---- 示範圖與測試用
     /// 當成來源已經有畫面：live 是 false 的示範圖裡，發射鈕才是可以按的樣子。
