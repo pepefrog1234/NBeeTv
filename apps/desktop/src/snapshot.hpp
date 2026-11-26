@@ -21,7 +21,12 @@ double time_today(int hour, int minute, int second);
 /// quick：不經過核心收發，直接把測試圖放進「最近收到」（自我測試用，快很多）。
 std::unique_ptr<App> make_receiving_app(bool quick = false);
 /// 發射中：我們用模式 11 發射，已送出 8 張，第 9 張送到 1.6 秒。
-std::unique_ptr<App> make_transmitting_app(const std::deque<App::ReceivedFrame>& history);
+/// mode_id：改用別的模式（畫面比較大的模式，測試圖每個像素重複放大成它的大小）。
+std::unique_ptr<App> make_transmitting_app(const std::deque<App::ReceivedFrame>& history, int mode_id = 11);
+/// 給 FM 用的大畫面（192×144）接收中：對方（N0CALL）在 FM 語音通道上先用模式 15 傳了兩張，接著用幀裡沒有導頻的模式 5 傳了三張，
+/// 第四張收到一半；我們這邊選的發射模式是 tx_mode_id（0：模式 5），所以右側欄的預覽也是 192×144。
+/// quick：不經過核心收發，直接把放大的測試圖放進「最近收到」（自我測試用）。app 裡沒有這幾個模式的模型時回傳空的。
+std::unique_ptr<App> make_fm_app(int tx_mode_id = 0, bool quick = false);
 /// 待機：沒有訊號，只有電台通帶內的雜訊；發射來源選影片檔（work_directory 裡做一段示範影片；沒有 ffmpeg 時改用一張圖片）。
 std::unique_ptr<App> make_idle_app(const std::string& work_directory);
 /// 待機，發射來源選圖片序列：三張測試圖各存成一個圖片檔（放在 work_directory 的 pictures 裡），選那個資料夾，

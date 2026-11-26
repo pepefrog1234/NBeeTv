@@ -1,4 +1,5 @@
-// 發射來源：鏡頭（SDL3 的相機 API）、檔案（影片或圖片）與圖片序列，以及把來源的一格縮成 96×72。
+// 發射來源：鏡頭（SDL3 的相機 API）、檔案（影片或圖片）與圖片序列，以及把來源的一格縮成送出的大小
+// （96×72；模式 5–7 與 15 是 192×144）。
 // 對應 macOS 版的 VideoSources.swift 與 ImageSequence.swift。
 //
 // 影片檔靠使用者電腦上的 ffmpeg 解碼（這個程式自己不帶影片的解碼器）：播放時開一個 ffmpeg 把畫面從管線送過來，
@@ -39,7 +40,7 @@ struct SourceFrame {
     int width = 0;
     int height = 0;
     std::vector<std::uint8_t> rgb;
-    /// 來源原本的大小。影片解碼時先縮小過（最後只要 96×72，不必整張解出來），畫面上顯示的「來源 1920×1080」要的是原本的；
+    /// 來源原本的大小。影片解碼時先縮小過（最後只要 96×72 或 192×144，不必整張解出來），畫面上顯示的「來源 1920×1080」要的是原本的；
     /// 0 表示就是 width、height。
     int native_width = 0;
     int native_height = 0;
@@ -48,8 +49,16 @@ struct SourceFrame {
 };
 using SourceFramePtr = std::shared_ptr<const SourceFrame>;
 
-/// 把任意大小的畫面縮成 96×72。縮小時每個輸出的像素是它蓋到的那一塊來源像素的平均。
-Picture scale_frame(const SourceFrame& frame, ScaleMode mode);
+/// 把任意大小的畫面縮成 size 這麼大（預設是 96×72）。縮小時每個輸出的像素是它蓋到的那一塊來源像素的平均。
+Picture scale_frame(const SourceFrame& frame, ScaleMode mode, PictureSize size = kStandardPicture);
+
+/// 一張已經縮好的畫面換成另一種大小（模式換成畫面大小不同的那一種時，手上只有上一格縮好的畫面）。
+/// 已經是那個大小就原樣回傳。
+Picture resize_picture(const Picture& picture, PictureSize size);
+
+/// 同樣是換成另一種大小，但不內插也不平均：每個輸出的像素直接取它對到的那個來源像素（最近鄰）。
+/// 96×72 換成 192×144 就是每個像素重複成 2×2。內附的測試圖、存成影片時一段裡大小不同的畫面是這樣放大的。
+Picture replicate_picture(const Picture& picture, PictureSize size);
 
 /// 讀一張圖片檔（JPEG、PNG、BMP、GIF…）。讀不了回傳空的。
 /// 手機直拍的相片存的是橫的像素加上「要轉 90 度」的記號（EXIF 的方向）：JPEG 照那個記號轉正。
@@ -77,7 +86,8 @@ public:
     /// 在開檔的對話框裡先點哪一張、後點哪一張不影響順序（對話框本來就不保證照點的順序給）。
     static std::vector<std::string> files(const std::vector<std::string>& selection);
 
-    /// 讀進來的圖，短邊至少留這麼多像素：送出去的畫面長邊（96）的四倍，最後縮成 96×72 時品質不受影響。
+    /// 讀進來的圖，短邊至少留這麼多像素（384）：96×72 的畫面長邊的四倍，最後縮成送出的大小時品質不受影響。
+    /// 畫面是 192×144 的模式（5–7 與 15）也夠用：短邊是畫面高度的 2.7 倍，還是往小的縮。
     static constexpr int kShortSidePixels = 4 * (kImageWidth > kImageHeight ? kImageWidth : kImageHeight);
     /// 把一張圖讀進來：照記載的方向轉正、縮到夠用的大小（幾千萬像素的相片不必整張留著）。
     /// 讀不到（檔案不見了、壞了、其實不是圖片）回傳空的。原圖轉正之後的大小在 shown_width()、shown_height()。

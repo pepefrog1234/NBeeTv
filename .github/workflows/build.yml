@@ -188,7 +188,9 @@ jobs:
       # 桌面 app（Windows、Linux）也一樣對著解開的那一份做，都不碰真的音訊裝置與鏡頭：
       #   1. 自我測試：收發的流程、PTT、檔案來源、定時發射、介面的每個按鈕……音訊走 SDL 的「假」驅動（走的是和真的裝置一樣的程式）；
       #   2. 不開視窗把六張畫面各算成一張圖，五種語言都算（留在 Artifacts 裡，看得到這個平台上的字型與版面）；
-      #   3. 真的開視窗幾秒鐘：一次是示範資料，一次照平常的方式啟動（Linux 的機器沒有螢幕，用 xvfb 給一個假的）。
+      #      另外多算給 FM 用的大畫面（192×144）那三張：接收中、模式選單、發射中；
+      #   3. 真的開視窗幾秒鐘：示範資料兩次（一般的，與給 FM 用的 192×144 大畫面），再照平常的方式啟動一次
+      #      （Linux 的機器沒有螢幕，用 xvfb 給一個假的）。
       # 視窗程式在 Windows 上沒有主控台可以印字，所以結果一律另外寫進檔案（--report）再印出來。
       - name: 解開下載包，跑桌面 app 的檢查
         if: runner.os != 'macOS'
@@ -236,10 +238,13 @@ jobs:
           run version "$gui" --version
           grep -q "nbtv-gui" version.log
           NBTV_SELFTEST_REQUIRE=$require run selftest "$gui" --selftest --work "$work/selftest"
-          run snapshot "$gui" --snapshot "$GITHUB_WORKSPACE/screens" --lang all
+          NBTV_SNAPSHOT_FM=1 run snapshot "$gui" --snapshot "$GITHUB_WORKSPACE/screens" --lang all
           test -s "$GITHUB_WORKSPACE/screens/en/1-receiving.png"
+          test -s "$GITHUB_WORKSPACE/screens/en/extra-fm-receiving.png"
           run demo $window "$gui" --demo --quit-after 3
           grep -q "畫了" demo.log
+          NBTV_SNAPSHOT_FM=1 run demo-fm $window "$gui" --demo --quit-after 3
+          grep -q "畫了" demo-fm.log
           run live $window "$gui" --settings "$work/settings.txt" --quit-after 5
           grep -q "畫了" live.log
           test -s "$work/settings.txt"

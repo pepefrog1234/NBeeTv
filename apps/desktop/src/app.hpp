@@ -159,7 +159,7 @@ public:
     bool is_displayed(const ReceivedFrame& frame) const;
     /// 一張收到的畫面存檔時預設的檔名
     static std::string export_file_name(const ReceivedFrame& frame);
-    /// 把主畫面顯示的那一張存成 96×72 的 PNG。
+    /// 把主畫面顯示的那一張存成 PNG：和收到的畫面一樣大（96×72，模式 5–7 與 15 是 192×144），像素完全相同。
     void save_displayed_frame(const std::string& path);
     /// 那一張畫面所在的「一段」：同一個呼號、一張接一張，中間的空檔都不到 10 秒。回傳的順序由舊到新。
     static std::vector<ReceivedFrame> sequence(std::uint64_t id, const std::deque<ReceivedFrame>& history);
@@ -203,7 +203,11 @@ public:
     /// 或來源已經是圖片序列時拖進來的圖片，當成選了一批圖片序列。發射來源也換過去。
     void open_dropped(const std::vector<std::string>& paths);
     void set_canvas_enabled(bool on);
-    /// 把畫布的字印到一張來源畫面上（畫布沒開就原樣回傳）。
+    /// 送出的畫面多大：跟著發射模式（模式 11–14 是 96×72，模式 5–7 與 15 是 192×144）。
+    /// 沒在發射時是設定裡選的模式，發射中是這一次發射用的模式。
+    PictureSize tx_picture_size() const;
+    /// 把畫布的字印到一張來源畫面上（畫布沒開就原樣回傳）。發射前的每一張與右側欄的預覽都經過這裡。
+    /// 畫面要是送出的大小（tx_picture_size）；大小不對的原樣回傳。
     Picture apply_canvas(const Picture& picture);
     /// 有來源畫面可以發射嗎？
     bool can_transmit() const;
@@ -261,16 +265,18 @@ private:
     };
     /// 取來源的一格的結果（見 capture_source_frame）。
     struct SourceCapture {
-        std::optional<Picture> rgb;         // 縮成 96×72 的畫面，還沒有印上畫布的字；來源沒有畫面時是空的
+        std::optional<Picture> rgb;         // 縮成送出的大小的畫面，還沒有印上畫布的字；來源沒有畫面時是空的
         bool last = false;                  // 來源到此為止：只播一次的影片播完了（這是它的最後一格），或圖片序列已經沒有圖片可以送（這時 rgb 是空的）
         std::optional<std::string> image;   // 圖片序列：這一格是哪一個圖片檔
     };
-    /// 圖片序列的預覽是照什麼算出來的：哪一張、哪一種縮放方式、哪一版的畫布。和現在該有的不同就重算（見 refresh_image_preview）
+    /// 圖片序列的預覽是照什麼算出來的：哪一張、哪一種縮放方式、哪一版的畫布、送出的畫面多大（跟著發射模式）。
+    /// 和現在該有的不同就重算（見 refresh_image_preview）
     struct ImagePreviewKey {
         std::string path;
         ScaleMode scale = ScaleMode::fill;
         int canvas = 0;
-        bool operator==(const ImagePreviewKey& other) const { return path == other.path && scale == other.scale && canvas == other.canvas; }
+        PictureSize size;
+        bool operator==(const ImagePreviewKey& other) const { return path == other.path && scale == other.scale && canvas == other.canvas && size == other.size; }
     };
     struct TransmitDisplay {
         int number = 0;
@@ -343,9 +349,11 @@ private:
     std::uint64_t video_frame_version_ = 0;
     std::uint64_t preview_version_ = static_cast<std::uint64_t>(-1);
     std::optional<ScaleMode> preview_scale_;
-    // 畫布：圖層照設定算好留著，設定改了才重算
+    std::optional<PictureSize> preview_picture_;   // 預覽是照多大的畫面算的：換到畫面大小不同的模式時要重算
+    // 畫布：圖層照設定與畫面的大小算好留著，改了才重算
     std::shared_ptr<const CanvasLayer> canvas_layer_;
     std::optional<CanvasStyle> canvas_built_;
+    PictureSize canvas_built_picture_;
     bool canvas_ever_built_ = false;
     int canvas_version_ = 0;
     int preview_canvas_version_ = 0;

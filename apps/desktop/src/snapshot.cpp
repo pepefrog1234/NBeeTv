@@ -31,9 +31,9 @@ void set_demo_devices(App& app) {
     app.cameras = {CameraInfo{"USB Camera", 0}};
 }
 
-/// 右側欄的預覽：把一張測試圖當成來源的畫面。
+/// 右側欄的預覽：把一張測試圖當成來源的畫面（選的發射模式畫面比較大時，每個像素重複放大成送出的大小）。
 void set_demo_source(App& app, const Picture& picture, int width, int height) {
-    app.source_preview = std::make_shared<Picture>(app.apply_canvas(picture));
+    app.source_preview = std::make_shared<Picture>(app.apply_canvas(replicate_picture(picture, app.tx_picture_size())));
     app.source_size = std::make_pair(width, height);
     app.demo_source_ready = true;
 }
@@ -176,26 +176,33 @@ std::unique_ptr<App> make_receiving_app(bool quick) {
     return app;
 }
 
-std::unique_ptr<App> make_transmitting_app(const std::deque<App::ReceivedFrame>& history) {
-    auto app = std::make_unique<App>(demo_settings(SourceKind::camera), false);
+std::unique_ptr<App> make_transmitting_app(const std::deque<App::ReceivedFrame>& history, int mode_id) {
+    Settings settings = demo_settings(SourceKind::camera);
+    const ModeInfo* mode = modes::find(mode_id);
+    if (mode != nullptr) settings.tx_mode_id = mode->id;
+    auto app = std::make_unique<App>(settings, false);
     set_demo_devices(*app);
     app->history = history;
-    const std::optional<Picture> coffee = demo::test_image("coffee"), rocket = demo::test_image("rocket"), cat = demo::test_image("cat");
-    const ModeInfo* mode = modes::find(11);
-    if (!coffee || !rocket || !cat || mode == nullptr) return app;
+    if (mode == nullptr) return app;
+    // 測試圖是 96×72；畫面比較大的模式每個像素重複放大
+    const std::optional<Picture> coffee = demo::test_image("coffee", mode->picture), rocket = demo::test_image("rocket", mode->picture), cat = demo::test_image("cat", mode->picture);
+    if (!coffee || !rocket || !cat) return app;
     // 共九張；瀑布圖只需要最後四張（前三張整張，加上目前這張的前 1.6 秒），所以只編那四張
     const Picture* cycle[] = {&*rocket, &*cat, &*coffee};
+    app->tx_phase = App::TxPhase::transmitting;   // 先設好：畫布的字要照這個模式的畫面大小印（見 App::tx_picture_size）
+    app->tx_mode_id = mode->id;
     CoreTransmitter tx;
-    tx.set_mode(11);
+    tx.set_mode(mode->id);
     tx.set_callsign(app->settings.callsign);
     std::vector<EncodedFrame> frames;
     for (int i = 5; i < 9; ++i) {
         if (std::optional<EncodedFrame> frame = tx.encode(app->apply_canvas(*cycle[i % 3]))) frames.push_back(std::move(*frame));
     }
-    if (frames.empty()) return app;
+    if (frames.empty()) {
+        app->tx_phase = App::TxPhase::idle;
+        return app;
+    }
     const double progress = 1.6;
-    app->tx_phase = App::TxPhase::transmitting;
-    app->tx_mode_id = 11;
     app->tx_frame_number = 9;
     app->tx_frames_sent = 8;
     app->tx_frame_progress = progress;
@@ -210,6 +217,88 @@ std::unique_ptr<App> make_transmitting_app(const std::deque<App::ReceivedFrame>&
     const auto rows = demo::monitor_rows(sent);
     for (const auto& row : rows) app->waterfall.append(row, WaterfallStore::Reference::transmit);
     say("發射：第 9 張（" + mode->label() + "），瀑布圖 " + std::to_string(rows.size()) + " 列");
+    set_demo_source(*app, *coffee, 1280, 960);
+    return app;
+}
+
+std::unique_ptr<App> make_fm_app(int tx_mode_id, bool quick) {
+    // 哪幾個模式照核心的模式表分的組來挑，不寫死編號：有導頻的大畫面（現在是模式 15）、沒有導頻的大畫面（模式 5、6、7）
+    const modes::MenuGroups groups = modes::menu_groups();
+    if (groups.large.empty() || groups.pilot_free.empty()) return nullptr;
+    const ModeInfo with_pilots = groups.large.front(), pilot_free = groups.pilot_free.front();
+    Settings settings = demo_settings(SourceKind::camera);
+    const ModeInfo* chosen = modes::find(tx_mode_id);
+    settings.tx_mode_id = chosen != nullptr && chosen->large_picture() ? chosen->id : pilot_free.id;
+    auto app = std::make_unique<App>(settings, false);
+    set_demo_devices(*app);
+    const std::optional<Picture> coffee = demo::test_image("coffee"), rocket = demo::test_image("rocket"), cat = demo::test_image("cat");
+    if (!coffee || !rocket || !cat) return nullptr;
+    const std::vector<double> times = {time_today(14, 31, 52), time_today(14, 31, 55), time_today(14, 32, 0), time_today(14, 32, 3), time_today(14, 32, 5)};
+    const auto enlarged = [](const Picture& picture, const ModeInfo& mode) { return replicate_picture(picture, mode.picture); };
+
+    if (quick) {
+        const ModeInfo* modes_sent[] = {&with_pilots, &with_pilots, &pilot_free, &pilot_free, &pilot_free};
+        const Picture* pictures[] = {&*coffee, &*rocket, &*cat, &*coffee, &*rocket};
+        const int sequences[] = {0, 1, 0, 1, 2};
+        for (int i = 0; i < 5; ++i) {
+            DecodedFrame frame;
+            frame.mode_id = modes_sent[i]->id;
+            frame.decoded = true;
+            frame.header_ok = true;
+            frame.callsign = "N0CALL";
+            frame.sequence = sequences[i];
+            frame.snr_db = 24.2 + 0.3 * i;
+            frame.picture = std::make_shared<Picture>(enlarged(*pictures[i], *modes_sent[i]));
+            app->add(frame, times[static_cast<std::size_t>(i)]);
+        }
+        app->synced = true;
+        app->sync_callsign = "N0CALL";
+        app->snr_db = 25.0;
+        app->offset_hz = 0.0;
+        app->rx_mode_id = pilot_free.id;
+        app->input_level_db = -18;
+        const std::vector<float> noise = demo::radio_channel(demo::silence(6), 0, std::nullopt, 0, -32, std::nullopt, 7);
+        for (const auto& row : demo::monitor_rows(noise)) app->waterfall.append(row, WaterfallStore::Reference::noise);
+        set_demo_source(*app, *coffee, 1280, 960);
+        return app;
+    }
+
+    // 同一部發射機一幀接一幀地送：先是有導頻的大畫面兩張，中間不停、直接換成沒有導頻的三張，第四張只送出前六成
+    CoreTransmitter tx;
+    tx.set_callsign("N0CALL");
+    std::vector<float> signal;
+    tx.set_mode(with_pilots.id);
+    for (const Picture* picture : {&*coffee, &*rocket}) {
+        if (const std::optional<EncodedFrame> frame = tx.encode(enlarged(*picture, with_pilots))) append(signal, frame->samples);
+    }
+    tx.set_mode(pilot_free.id);
+    for (const Picture* picture : {&*cat, &*coffee, &*rocket}) {
+        if (const std::optional<EncodedFrame> frame = tx.encode(enlarged(*picture, pilot_free))) append(signal, frame->samples);
+    }
+    if (const std::optional<EncodedFrame> frame = tx.encode(enlarged(*cat, pilot_free))) {
+        signal.insert(signal.end(), frame->samples.begin(), frame->samples.begin() + static_cast<std::ptrdiff_t>(frame->samples.size() * 6 / 10));
+    }
+    std::vector<float> audio = demo::silence(0.6);
+    append(audio, signal);
+
+    // FM 語音通道的樣子：訊雜比 25 dB、沒有頻偏（FM 解調出來的音訊沒有頻偏；沒有導頻的幀也容不下頻偏）、輸入音量約 −18 dB
+    const std::vector<float> received = demo::radio_channel(audio, demo::power(signal), 25.0, 0.0, -32, -18.0);
+    std::size_t decoded = 0;
+    RxUpdate final_update;
+    for (const RxUpdate& update : demo::receive(received)) {
+        RxUpdate status = update;
+        status.frames.clear();
+        app->apply(status);
+        for (const DecodedFrame& frame : update.frames) {
+            app->add(frame, times[std::min(decoded, times.size() - 1)]);
+            if (frame.decoded) ++decoded;
+        }
+        final_update = update;
+    }
+    char text[240];
+    std::snprintf(text, sizeof text, "FM 大畫面的接收：解出 %d 張（預期 %d 張），同步 %s，模式 %d，訊雜比 %.1f dB，頻偏 %+.1f Hz，輸入 %.1f dB；我們選的發射模式是模式 %d", static_cast<int>(decoded),
+                  static_cast<int>(times.size()), final_update.synced ? "是" : "否", final_update.mode_id, final_update.snr_db, final_update.offset_hz, final_update.input_level_db, settings.tx_mode_id);
+    say(text);
     set_demo_source(*app, *coffee, 1280, 960);
     return app;
 }
@@ -304,6 +393,9 @@ int run(const std::string& directory, const std::vector<std::string>& languages)
     }
     const std::string original_language = i18n::language();
     i18n::use(languages.empty() ? original_language : languages.front());
+    // 畫布的字型平常是介面載入字型時順便設定的；示範資料在介面之前就準備好了，所以這裡先設定一次，
+    // 不然 NBTV_SNAPSHOT_CANVAS 要印的字在預覽與送出的畫面上印不出來
+    CanvasLayer::set_fonts(find_fonts(i18n::language()).bold);
     const std::unique_ptr<App> receiving = make_receiving_app();
     const std::unique_ptr<App> transmitting = make_transmitting_app(receiving->history);
     const std::unique_ptr<App> idle = make_idle_app(directory);
@@ -313,17 +405,33 @@ int run(const std::string& directory, const std::vector<std::string>& languages)
     //                               值是一個資料夾或圖片檔的路徑時，序列用那裡的圖片，不用內附的測試圖
     //   NBTV_SNAPSHOT_SAVE_VIDEO=1   多算一張按了「儲存影片」之後、那一小塊選項開著的樣子（extra-save-video.png）
     //   NBTV_SNAPSHOT_SNR=1          另外把「存成影片時印上訊雜比」的一格存成 video-frame-snr.png（影片裡每一格就是這個樣子，960×720）
+    //   NBTV_SNAPSHOT_FM=1           多算三張給 FM 用的大畫面（192×144）：接收中（extra-fm-receiving.png）、它的模式選單開著的樣子
+    //                               （extra-fm-mode-menu.png）、發射中（extra-fm-transmitting.png）。值是某個大畫面模式的編號時，
+    //                               我們這邊選的發射模式用它（不然是沒有導頻的那一組裡最快的）。同時設了 NBTV_SNAPSHOT_EXTRA_SIZE 的話，
+    //                               接收中與選單那兩張再各多算一張那個視窗大小的
     const bool extra_images = std::getenv("NBTV_SNAPSHOT_IMAGES") != nullptr, extra_save_video = std::getenv("NBTV_SNAPSHOT_SAVE_VIDEO") != nullptr;
     const std::unique_ptr<App> images = extra_images ? make_images_app(directory) : nullptr;
+    std::unique_ptr<App> fm, fm_transmitting;
+    if (const char* wanted = std::getenv("NBTV_SNAPSHOT_FM")) {
+        fm = make_fm_app(std::atoi(wanted));
+        if (fm) fm_transmitting = make_transmitting_app(fm->history, fm->settings.tx_mode_id);
+        else say("注意：app 裡沒有給 FM 用的大畫面模式（少了權重檔），那幾張沒有算");
+    }
     int extra_width = 0, extra_height = 0;
     if (const char* size = std::getenv("NBTV_SNAPSHOT_EXTRA_SIZE")) std::sscanf(size, "%dx%d", &extra_width, &extra_height);
-    if (std::getenv("NBTV_SNAPSHOT_SNR") != nullptr && !receiving->history.empty()) {
-        const App::ReceivedFrame& newest = receiving->history.front();
+    // 影片的一格：一般的（96×72 放大十倍），有算 FM 那幾張的話再加一張 192×144 的（放大五倍，字的位置與大小相同）
+    const auto video_frame = [&directory](const App& app, const std::string& name) {
+        if (app.history.empty() || !app.history.front().picture) return;
+        const App::ReceivedFrame& newest = app.history.front();
         const std::string label = "SNR " + App::snr_text(newest.snr_db);
         const std::vector<std::uint8_t> frame = sequence_video::frame_image(*newest.picture, label);
-        if (write_png(directory + "/video-frame-snr.png", frame.data(), sequence_video::kWidth, sequence_video::kHeight, 3)) {
-            say("video-frame-snr.png：影片的一格，左上角印的是「" + label + "」" + (VideoStamp::has_fonts() ? "" : "　注意：找不到字型，沒有印出來"));
+        if (write_png(directory + "/" + name, frame.data(), sequence_video::kWidth, sequence_video::kHeight, 3)) {
+            say(name + "：影片的一格（畫面 " + newest.picture->size.text() + "），左上角印的是「" + label + "」" + (VideoStamp::has_fonts() ? "" : "　注意：找不到字型，沒有印出來"));
         }
+    };
+    if (std::getenv("NBTV_SNAPSHOT_SNR") != nullptr) {
+        video_frame(*receiving, "video-frame-snr.png");
+        if (fm) video_frame(*fm, "video-frame-snr-fm.png");
     }
 
     int failures = 0;
@@ -365,6 +473,16 @@ int run(const std::string& directory, const std::vector<std::string>& languages)
             if (extra_width > 0 && extra_height > 0) render(*images, "extra-images-" + std::to_string(extra_width) + "x" + std::to_string(extra_height) + ".png", nullptr, extra_width, extra_height);
         }
         if (extra_save_video) render(*receiving, "extra-save-video.png", [](UI& ui) { ui.open_save_video_menu(); });
+        if (fm) {
+            render(*fm, "extra-fm-receiving.png", nullptr);
+            render(*fm, "extra-fm-mode-menu.png", [](UI& ui) { ui.open_mode_menu(); });
+            if (extra_width > 0 && extra_height > 0) {
+                const std::string size = std::to_string(extra_width) + "x" + std::to_string(extra_height);
+                render(*fm, "extra-fm-receiving-" + size + ".png", nullptr, extra_width, extra_height);
+                render(*fm, "extra-fm-mode-menu-" + size + ".png", [](UI& ui) { ui.open_mode_menu(); }, extra_width, extra_height);
+            }
+        }
+        if (fm_transmitting) render(*fm_transmitting, "extra-fm-transmitting.png", nullptr);
     }
     i18n::use(original_language);
     say(failures == 0 ? "完成：" + directory : "有 " + std::to_string(failures) + " 張沒有算出來");

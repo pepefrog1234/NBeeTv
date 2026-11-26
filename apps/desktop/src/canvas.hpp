@@ -1,6 +1,8 @@
 // 畫布：疊在送出畫面上的一層字（例如「CQ BX4ACP」），發射前印在每一張畫面上。排法照 macOS 版的 Canvas.swift：
 // 字盡量大（最大 18），放不下才縮，縮到 12 以下還放不下就在空白處拆成兩行，再放不下的結尾截成「…」。
-// 字帶的樣子只跟文字與位置有關，所以先算好一張 96×72 的圖層，之後每一張畫面疊上去就好。
+// 字帶的樣子只跟文字、位置與畫面的大小有關，所以先算好一張圖層，之後每一張畫面疊上去就好。
+// 排版一律照 96×72 來算（字級、留白都是這個大小上的像素）；畫面是 192×144 的模式整個放大兩倍，
+// 字帶佔畫面的比例相同，字的筆畫細一倍。
 // 字型是 fonts.hpp 找到的系統粗體字（用 stb_truetype 畫），所以同一句字在不同的電腦上筆畫會有一點不同。
 #pragma once
 
@@ -42,32 +44,37 @@ public:
     static void set_fonts(const std::vector<FontFile>& fonts);
     static bool has_fonts();
 
-    /// 沒有字可以印（或沒有字型）時回傳空的。
-    static std::shared_ptr<const CanvasLayer> make(const CanvasStyle& style);
+    /// picture 是畫面的大小（預設 96×72；要是它的整數倍）。沒有字可以印（或沒有字型、大小不對）時回傳空的。
+    static std::shared_ptr<const CanvasLayer> make(const CanvasStyle& style, PictureSize picture = kStandardPicture);
 
-    /// 疊到一張畫面上，回傳疊好的畫面。字帶以外的地方一個位元組都不動。
+    /// 疊到一張畫面上（要是這一層的大小），回傳疊好的畫面。字帶以外的地方一個位元組都不動；大小不對的畫面原樣回傳。
     Picture apply(const Picture& picture) const;
 
     const CanvasStyle& style() const { return style_; }
+    /// 這一層是給多大的畫面用的
+    PictureSize size() const { return size_; }
     /// 實際排出來的幾行字（太長時拆成兩行；再放不下的那一行結尾是「…」）
     const std::vector<std::string>& lines() const { return lines_; }
+    /// 字的大小（96×72 的畫面上一點就是一個像素，192×144 的是兩個）
     float font_size() const { return font_size_; }
-    /// 字帶佔畫面的哪幾列（從上往下數，含 first、不含 last）
+    /// 字帶佔畫面的哪幾列（從上往下數，含 first、不含 last；這個大小的畫面上的列）
     int first_row() const { return first_row_; }
     int last_row() const { return last_row_; }
 
 private:
     CanvasLayer() = default;
     CanvasStyle style_;
+    PictureSize size_;
     std::vector<std::string> lines_;
     float font_size_ = 0;
     int first_row_ = 0, last_row_ = 0;
-    std::vector<std::uint8_t> coverage_;   // 96×72：每個像素被字蓋住多少（0–255）
+    std::vector<std::uint8_t> coverage_;   // 和畫面一樣大：每個像素被字蓋住多少（0–255）
 };
 
 /// 存成影片時印在每一張左上角的一小塊字（「SNR 12.3 dB」）。樣子照主畫面上疊的訊雜比標示：半透明的黑底圓角方塊、
 /// 白色的等寬字；大小照影片的像素另外定——影片常常被縮小了看（傳到手機上、貼在聊天室裡），字要比主畫面上的大一點才認得出來。
-/// 整塊約 225×50，只蓋住 960×720 的畫面左上角一小塊。對應 macOS 版 SequenceVideo.swift 的 stamp。
+/// 整塊約 225×50，只蓋住 960×720 的畫面左上角一小塊（畫面是 96×72 或 192×144 都一樣，字的位置與大小不變）。
+/// 對應 macOS 版 SequenceVideo.swift 的 stamp。
 /// 字型是 fonts.hpp 找到的系統等寬粗體字（用 stb_truetype 畫），所以筆畫和 macOS 版、和別台電腦會有一點不同。
 class VideoStamp {
 public:
@@ -95,11 +102,13 @@ public:
 /// 存成影片檔時的畫面（macOS 版的 SequenceVideo）：.mp4、每秒 24 格、960×720。
 namespace sequence_video {
 inline constexpr int kFrameRate = 24;
-/// 96×72 的畫面放大幾倍存：用最近鄰放大，和主畫面上看到的一樣是一格一格的，壓縮之後邊緣也不會糊掉。
+/// 96×72 的畫面放大幾倍存：10 倍是 960×720（192×144 的畫面同樣存成 960×720，放大 5 倍）。
+/// 用最近鄰放大，和主畫面上看到的一樣是一格一格的，壓縮之後邊緣也不會糊掉。
 inline constexpr int kScale = 10;
 inline constexpr int kWidth = kImageWidth * kScale;
 inline constexpr int kHeight = kImageHeight * kScale;
-/// 影片的一格：96×72 的畫面每個像素放大成 10×10（不內插），label 不是空的話印在左上角。回傳 960×720 的 RGB。
+/// 影片的一格：96×72 的畫面每個像素放大成 10×10、192×144 的放大成 5×5（不內插），label 不是空的話印在左上角。
+/// 回傳 960×720 的 RGB。
 std::vector<std::uint8_t> frame_image(const Picture& picture, const std::string& label);
 }  // namespace sequence_video
 

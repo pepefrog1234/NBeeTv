@@ -52,7 +52,7 @@ std::optional<Picture> parse_ppm(const unsigned char* data, std::size_t size) {
     if (fields.size() != 4 || fields[0] != "P6" || fields[1] != std::to_string(kImageWidth) || fields[2] != std::to_string(kImageHeight) || fields[3] != "255") return std::nullopt;
     if (size - index < static_cast<std::size_t>(kRgbBytes)) return std::nullopt;
     Picture picture;
-    std::memcpy(picture.rgb.data(), data + index, kRgbBytes);
+    std::memcpy(picture.rgb.data(), data + index, picture.rgb.size());
     return picture;
 }
 
@@ -88,9 +88,12 @@ void fft(std::vector<std::complex<float>>& a, bool inverse) {
 
 }  // namespace
 
-std::optional<Picture> test_image(const std::string& name) {
+std::optional<Picture> test_image(const std::string& name, PictureSize size) {
     for (int i = 0; i < kEmbeddedImageCount; ++i) {
-        if (name == kEmbeddedImages[i].name) return parse_ppm(kEmbeddedImages[i].data, kEmbeddedImages[i].size);
+        if (name != kEmbeddedImages[i].name) continue;
+        std::optional<Picture> picture = parse_ppm(kEmbeddedImages[i].data, kEmbeddedImages[i].size);
+        if (picture && picture->size != size) picture = replicate_picture(*picture, size);
+        return picture;
     }
     return std::nullopt;
 }
@@ -211,26 +214,14 @@ std::vector<std::array<float, kSpectrumBins>> monitor_rows(const std::vector<flo
 }
 
 bool write_picture_png(const Picture& picture, const std::string& path, int zoom) {
-    const int width = kImageWidth * zoom, height = kImageHeight * zoom;
-    std::vector<std::uint8_t> pixels(static_cast<std::size_t>(width) * height * 3);
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            const std::uint8_t* source = picture.rgb.data() + (static_cast<std::size_t>(y / zoom) * kImageWidth + static_cast<std::size_t>(x / zoom)) * 3;
-            std::memcpy(pixels.data() + (static_cast<std::size_t>(y) * width + x) * 3, source, 3);
-        }
-    }
-    return write_png(path, pixels.data(), width, height, 3);
+    const PictureSize size{picture.width() * zoom, picture.height() * zoom};
+    const Picture large = replicate_picture(picture, size);
+    return write_png(path, large.rgb.data(), size.width, size.height, 3);
 }
 
 bool write_picture_jpeg(const Picture& picture, const std::string& path, int zoom, int orientation, bool little_endian, bool after_jfif) {
-    const int width = kImageWidth * zoom, height = kImageHeight * zoom;
-    std::vector<std::uint8_t> pixels(static_cast<std::size_t>(width) * height * 3);
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            const std::uint8_t* source = picture.rgb.data() + (static_cast<std::size_t>(y / zoom) * kImageWidth + static_cast<std::size_t>(x / zoom)) * 3;
-            std::memcpy(pixels.data() + (static_cast<std::size_t>(y) * width + x) * 3, source, 3);
-        }
-    }
+    const int width = picture.width() * zoom, height = picture.height() * zoom;
+    const std::vector<std::uint8_t> pixels = replicate_picture(picture, PictureSize{width, height}).rgb;
     std::vector<std::uint8_t> bytes = encode_jpeg(pixels.data(), width, height, 95);
     if (bytes.size() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8) return false;
     if (orientation >= 1 && orientation <= 8) {
@@ -295,13 +286,14 @@ void spin(App* app, double seconds) {
 }
 
 double psnr(const Picture& a, const Picture& b) {
+    if (a.size != b.size || a.rgb.size() != b.rgb.size() || a.rgb.empty()) return 0;
     double sum = 0;
-    for (int i = 0; i < kRgbBytes; ++i) {
-        const double d = static_cast<double>(a.rgb[static_cast<std::size_t>(i)]) - static_cast<double>(b.rgb[static_cast<std::size_t>(i)]);
+    for (std::size_t i = 0; i < a.rgb.size(); ++i) {
+        const double d = static_cast<double>(a.rgb[i]) - static_cast<double>(b.rgb[i]);
         sum += d * d;
     }
     if (sum == 0) return 99;
-    return 10 * std::log10(255.0 * 255.0 / (sum / kRgbBytes));
+    return 10 * std::log10(255.0 * 255.0 / (sum / static_cast<double>(a.rgb.size())));
 }
 
 }  // namespace nbtvgui::demo

@@ -31,18 +31,20 @@ namespace nbtvgui {
 
 // ---------------------------------------------------------------- 縮放
 
-Picture scale_frame(const SourceFrame& frame, ScaleMode mode) {
-    Picture out;   // 全黑
+Picture scale_frame(const SourceFrame& frame, ScaleMode mode, PictureSize size) {
+    Picture out(size);   // 全黑
     const int sw = frame.width, sh = frame.height;
+    const int width = size.width, height = size.height;
+    if (width <= 0 || height <= 0) return out;
     if (sw <= 0 || sh <= 0 || frame.rgb.size() < static_cast<std::size_t>(sw) * static_cast<std::size_t>(sh) * 3) return out;
-    const double rx = static_cast<double>(kImageWidth) / sw, ry = static_cast<double>(kImageHeight) / sh;
+    const double rx = static_cast<double>(width) / sw, ry = static_cast<double>(height) / sh;
     const double ratio = mode == ScaleMode::fill ? std::max(rx, ry) : std::min(rx, ry);
     // 輸出的像素 (ox, oy) 蓋到來源的哪一塊：以兩邊的中心對齊
-    const auto source_x = [&](double ox) { return (ox - kImageWidth / 2.0) / ratio + sw / 2.0; };
-    const auto source_y = [&](double oy) { return (oy - kImageHeight / 2.0) / ratio + sh / 2.0; };
-    for (int oy = 0; oy < kImageHeight; ++oy) {
+    const auto source_x = [&](double ox) { return (ox - width / 2.0) / ratio + sw / 2.0; };
+    const auto source_y = [&](double oy) { return (oy - height / 2.0) / ratio + sh / 2.0; };
+    for (int oy = 0; oy < height; ++oy) {
         const double y0 = source_y(oy), y1 = source_y(oy + 1);
-        for (int ox = 0; ox < kImageWidth; ++ox) {
+        for (int ox = 0; ox < width; ++ox) {
             const double x0 = source_x(ox), x1 = source_x(ox + 1);
             double sum[3] = {0, 0, 0}, covered = 0;
             if (ratio < 1.0) {
@@ -82,9 +84,31 @@ Picture scale_frame(const SourceFrame& frame, ScaleMode mode) {
                 }
                 covered = 1;
             }
-            std::uint8_t* dst = out.rgb.data() + (static_cast<std::size_t>(oy) * kImageWidth + static_cast<std::size_t>(ox)) * 3;
+            std::uint8_t* dst = out.rgb.data() + (static_cast<std::size_t>(oy) * static_cast<std::size_t>(width) + static_cast<std::size_t>(ox)) * 3;
             for (int c = 0; c < 3; ++c) dst[c] = static_cast<std::uint8_t>(std::clamp(covered > 0 ? sum[c] / covered + 0.5 : 0.0, 0.0, 255.0));
         }
+    }
+    return out;
+}
+
+Picture resize_picture(const Picture& picture, PictureSize size) {
+    if (picture.size == size) return picture;
+    SourceFrame frame;
+    frame.width = picture.width();
+    frame.height = picture.height();
+    frame.rgb = picture.rgb;
+    return scale_frame(frame, ScaleMode::fill, size);
+}
+
+Picture replicate_picture(const Picture& picture, PictureSize size) {
+    if (picture.size == size) return picture;
+    Picture out(size);
+    const int sw = picture.width(), sh = picture.height();
+    if (sw <= 0 || sh <= 0 || size.width <= 0 || size.height <= 0 || picture.rgb.size() < static_cast<std::size_t>(sw) * static_cast<std::size_t>(sh) * 3) return out;
+    for (int y = 0; y < size.height; ++y) {
+        const std::uint8_t* row = picture.rgb.data() + static_cast<std::size_t>(std::min(sh - 1, y * sh / size.height)) * static_cast<std::size_t>(sw) * 3;
+        std::uint8_t* dst = out.rgb.data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(size.width) * 3;
+        for (int x = 0; x < size.width; ++x) std::memcpy(dst + static_cast<std::size_t>(x) * 3, row + static_cast<std::size_t>(std::min(sw - 1, x * sw / size.width)) * 3, 3);
     }
     return out;
 }
@@ -395,7 +419,7 @@ std::optional<std::string> CameraSource::start(const std::string& name) {
     for (const CameraInfo& camera : cameras) {
         if (camera.name == name) id = camera.id;
     }
-    // 畫面最後要縮成 96×72，不需要鏡頭最大的解析度：挑一個夠用（至少 384×288）而最小的格式，轉換起來省事
+    // 畫面最後要縮成 96×72（大的也只有 192×144），不需要鏡頭最大的解析度：挑一個夠用（至少 384×288）而最小的格式，轉換起來省事
     SDL_CameraSpec chosen{};
     bool have_spec = false;
     int count = 0;

@@ -15,7 +15,9 @@
 namespace nbtvgui::demo {
 
 /// 內附的測試圖（96×72）：coffee、rocket、cat（core/tests/data 裡的那三張，建置時編進執行檔）。
-std::optional<Picture> test_image(const std::string& name);
+/// size 比 96×72 大時每個像素原樣重複放大（模式 5–7 與 15 的 192×144 是兩倍）；核心的測試（core/tests/test_images.hpp）
+/// 也是這樣放大測試圖的。
+std::optional<Picture> test_image(const std::string& name, PictureSize size = kStandardPicture);
 
 /// 可重現的亂數（示範圖每次算出來都一樣）。
 struct Random {
@@ -42,7 +44,7 @@ std::vector<RxUpdate> receive(const std::vector<float>& audio);
 /// 把一段送出去的音訊交給頻譜分析（發射監看），回傳頻譜列。
 std::vector<std::array<float, kSpectrumBins>> monitor_rows(const std::vector<float>& audio);
 
-/// 把一張 96×72 的畫面每個像素放大成 zoom×zoom，存成 PNG。
+/// 把一張畫面每個像素放大成 zoom×zoom，存成 PNG（96×72 的畫面放大十倍是 960×720）。
 bool write_picture_png(const Picture& picture, const std::string& path, int zoom = 10);
 
 /// 同上，存成 JPEG。orientation 不是 0 的話，在檔案裡記下顯示的方向（EXIF 的 1–8；手機直拍的相片是 6：
@@ -59,7 +61,7 @@ bool wait_until(App* app, double timeout, const std::function<bool()>& condition
 /// 讓主執行緒排著的工作跑這麼久。
 void spin(App* app, double seconds);
 
-/// 兩張畫面相差多少（PSNR，dB）；完全一樣是 99。
+/// 兩張一樣大的畫面相差多少（PSNR，dB）；完全一樣是 99。大小不一樣的當成完全不像，是 0。
 double psnr(const Picture& a, const Picture& b);
 
 }  // namespace nbtvgui::demo

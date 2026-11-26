@@ -49,15 +49,15 @@ Los resultados con el canal de ruido blanco y con otras SNR, y cómo se midieron
 
 Hay además un **modo 15** experimental para canales de voz en FM de VHF/UHF: la imagen crece a 192×144 y cada una tarda 2.72 segundos.
 En FM la SNR del audio es alta, y enviar una imagen más grande con la misma cantidad de valores la hace claramente más nítida;
-con señal débil rinde peor que los cuatro modos de arriba, así que no es adecuado para HF. Las herramientas de línea de comandos y la app de macOS
-pueden enviarlo y recibirlo; las apps de Windows y Linux todavía no. Solo se ha comprobado en simulación, aún no con equipos reales.
+con señal débil rinde peor que los cuatro modos de arriba, así que no es adecuado para HF. Las herramientas de línea de comandos, la app de macOS
+y la app de Windows y Linux pueden enviarlo y recibirlo. Solo se ha comprobado en simulación, aún no con equipos reales.
 Los detalles están en las [notas técnicas](docs/TECHNICAL.md).
 
 También para FM hay unos **modos 5, 6 y 7** experimentales: la imagen sigue siendo de 192×144, pero la trama no lleva pilotos.
 El canal de audio de FM no cambia durante una trama, así que los pilotos sobran y en el mismo tiempo cabe un 20 % más de datos.
 El modo 5 usa el mismo modelo que el modo 15 y tarda 2.29 segundos por imagen; el modo 6 tarda 2.88 segundos y mejora la calidad en 1.4 dB;
 el modo 7 tarda 4.43 segundos y la mejora en 3.6 dB. Solo sirven en canales de voz en FM sin desplazamiento de frecuencia y con señal estable
-(no en SSB); también funcionan únicamente con las herramientas de línea de comandos y la app de macOS, y solo se han comprobado en simulación.
+(no en SSB); también funcionan con las herramientas de línea de comandos y con las dos apps, y solo se han comprobado en simulación.
 
 ## Descarga
 

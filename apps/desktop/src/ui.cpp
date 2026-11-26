@@ -515,17 +515,19 @@ SDL_Texture* UI::texture_for(const PicturePtr& picture) {
     if (!picture || renderer_ == nullptr) return nullptr;
     auto found = textures_.find(picture.get());
     if (found == textures_.end()) {
-        SDL_Texture* texture = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STATIC, kImageWidth, kImageHeight);
+        // 貼圖和畫面一樣大（96×72；模式 5–7 與 15 的是 192×144）
+        if (picture->width() <= 0 || picture->height() <= 0 || picture->rgb.size() < static_cast<std::size_t>(picture->size.rgb_bytes())) return nullptr;
+        SDL_Texture* texture = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STATIC, picture->width(), picture->height());
         if (texture == nullptr) return nullptr;
-        SDL_UpdateTexture(texture, nullptr, picture->rgb.data(), kImageWidth * 3);
-        SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_NEAREST);   // 96×72 的像素原樣放大，不內插
+        SDL_UpdateTexture(texture, nullptr, picture->rgb.data(), picture->width() * 3);
+        SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_NEAREST);   // 畫面的像素原樣放大，不內插
         found = textures_.emplace(picture.get(), CachedTexture{texture, frame_counter_, picture}).first;
     }
     found->second.used = frame_counter_;
     return found->second.texture;
 }
 
-/// 畫一張 96×72 的畫面：像素原樣放大，不內插。沒有畫面時畫一塊底色。
+/// 畫一張畫面（96×72 或 192×144）：像素原樣放大，不內插。沒有畫面時畫一塊底色。
 /// Dear ImGui 的 SDL 繪圖後端預設把每一張貼圖都平滑內插，所以前後各放一個它提供的回呼，只有這一張改成不內插。
 void UI::picture(ImDrawList* dl, const PicturePtr& picture, const Rect& rect, float rounding, int round_flags) {
     SDL_Texture* texture = texture_for(picture);
@@ -758,6 +760,7 @@ void UI::draw_picture_panel(const Rect& rect) {
     const float radius = S(10), caption = S(46);
     dl->AddRectFilled(ImVec2(rect.x, rect.y), ImVec2(rect.right(), rect.bottom()), kPanel, radius);
     const Rect image{rect.x + 1, rect.y + 1, rect.w - 2, rect.h - caption - 1};
+    note_hit("##picture", image);   // 不是可以按的元件：測試用它知道主畫面畫在哪裡
     dl->AddRectFilled(ImVec2(image.x, image.y), ImVec2(image.right(), image.bottom()), kWell, radius, ImDrawFlags_RoundTop);
     const float caption_y = rect.bottom() - caption;
     const float text_y = caption_y + (caption - S(17)) / 2 - S(2);
@@ -843,7 +846,15 @@ void UI::draw_signal_panel(const Rect& rect) {
         text(dl, index == 0 ? bold_ : regular_, 13.0f, left, y + (row_h - S(13)) / 2 - S(1.5f), index == 0 ? kText : kSecondary, label);
         ImFont* font = big ? mono_bold_ : mono ? mono_ : regular_;
         const float size = big ? 17.0f : (mono ? 13.5f : 13.0f);
-        text(dl, font, size, right - text_width(font, size, value), y + (row_h - S(size)) / 2 - S(1.5f), color, value);
+        // 右邊的值放不下時截短，不要疊到左邊的名稱上（視窗縮到最小、別的語言的說法又比較長的時候）
+        const std::string shown = fitted(font, size, value, right - left - text_width(index == 0 ? bold_ : regular_, 13.0f, label) - S(10));
+        text(dl, font, size, right - text_width(font, size, shown), y + (row_h - S(size)) / 2 - S(1.5f), color, shown);
+    };
+    /// 「模式」那一列的值：放得下就寫完整的「模式 5 · FM 無導頻」，放不下只寫「模式 5」（大畫面模式的說法比較長）
+    const auto mode_text = [&](const std::string& label, const ModeInfo* info, int id) {
+        if (info == nullptr) return LF("模式 %d", {id});
+        const std::string full = info->label();
+        return text_width(regular_, 13.0f, full) <= right - left - text_width(regular_, 13.0f, label) - S(10) ? full : info->name();
     };
     const auto status = [&](const std::string& label, ImU32 color, bool filled) {
         const float y = rect.y + row_h / 2, w = text_width(regular_, 12, label);
@@ -857,7 +868,7 @@ void UI::draw_signal_panel(const Rect& rect) {
         status(starting ? L("準備中") : app_.settings.ptt_mode == PTTMode::none ? L("發射中（VOX）") : L("PTT 已按下"), kTx, !starting);
         row(1, L("已發射"), App::clock_text(app_.tx_elapsed), true, true);
         row(2, L("已送出"), LF("%d 張", {app_.tx_frames_sent}), false);
-        row(3, L("模式"), app_.tx_mode() != nullptr ? app_.tx_mode()->label() : std::string("—"), false);
+        row(3, L("模式"), app_.tx_mode() != nullptr ? mode_text(L("模式"), app_.tx_mode(), app_.tx_mode_id) : std::string("—"), false);
         row(4, L("接收"), L("暫停，停止發射後自動恢復"), false, false, kSecondary);
         return;
     }
@@ -867,11 +878,7 @@ void UI::draw_signal_panel(const Rect& rect) {
     char offset[32];
     std::snprintf(offset, sizeof offset, "%+.0f Hz", app_.offset_hz.value_or(0));
     row(2, L("頻率偏移"), app_.offset_hz ? std::string(offset) : std::string("—"), true);
-    std::string mode = "—";
-    if (app_.rx_mode_id) {
-        const ModeInfo* info = modes::find(*app_.rx_mode_id);
-        mode = info != nullptr ? info->label() : LF("模式 %d", {*app_.rx_mode_id});
-    }
+    const std::string mode = app_.rx_mode_id ? mode_text(L("模式（自動偵測）"), modes::find(*app_.rx_mode_id), *app_.rx_mode_id) : std::string("—");
     row(3, L("模式（自動偵測）"), mode, false);
     const std::string last = app_.last_result == App::LastResult::ok ? L("解碼成功") : app_.last_result == App::LastResult::failed ? L("解碼失敗")
                              : app_.last_result == App::LastResult::model_missing ? L("模型不符") : std::string("—");
@@ -1094,9 +1101,10 @@ void UI::draw_side_panel(const Rect& rect) {
     }
     y += S(40);
 
-    // ---- 預覽：縮成 96×72、印好畫布的字，就是會送出去的樣子。平常和側欄一樣寬；視窗矮的時候縮小，讓底下的東西都放得下
+    // ---- 預覽：縮成送出的大小（跟著發射模式）、印好畫布的字，就是會送出去的樣子。平常和側欄一樣寬；視窗矮的時候縮小，讓底下的東西都放得下
     const float preview_h = std::clamp(rect.bottom() - bottom_block - below_preview - y, std::min(S(90), width * 3 / 4), width * 3 / 4);
     const Rect preview{left + (width - preview_h * 4 / 3) / 2, y, preview_h * 4 / 3, preview_h};
+    note_hit("##preview", preview);   // 同上：測試用它知道預覽畫在哪裡
     if (app_.source_preview) {
         picture(dl, app_.source_preview, preview, S(6));
     } else {
@@ -1161,9 +1169,9 @@ void UI::draw_side_panel(const Rect& rect) {
         text(dl, mono_, 11.5f, rect.right() - S(16) - place_w, y + S(6), kSecondary, place);
         y += S(34);
     }
-    // 送出的大小：桌面版只有 96×72 的模式（句子和 macOS 版共用，那邊的大小跟著模式）
-    const std::string size_note = app_.source_size ? LF("來源 %d×%d → 送出 %@", {app_.source_size->first, app_.source_size->second, "96×72"})
-                                                   : LF("來源 — → 送出 %@", {"96×72"});
+    // 送出的大小跟著發射模式：96×72，模式 5–7 與 15 是 192×144
+    const std::string sent_size = app_.tx_picture_size().text();
+    const std::string size_note = app_.source_size ? LF("來源 %d×%d → 送出 %@", {app_.source_size->first, app_.source_size->second, sent_size}) : LF("來源 — → 送出 %@", {sent_size});
     text(dl, regular_, 11.5f, left, y, kTertiary, fitted(regular_, 11.5f, size_note, width));
     y += S(26);
 
@@ -1251,10 +1259,40 @@ void UI::draw_mode_menu() {
         ImGui::OpenPopup("##modemenu");
         want_mode_menu_ = false;
     }
-    const std::vector<ModeInfo> list = modes::menu_order();
-    const float w = std::max(S(400), mode_anchor_.w + S(90));
-    ImGui::SetNextWindowPos(ImVec2(mode_anchor_.right() - w, mode_anchor_.bottom() + S(6)));
+    // 三組：標準畫面的、給 FM 用的大畫面、大畫面而且幀裡沒有導頻的。哪個模式在哪一組看核心的模式表，不看編號
+    const modes::MenuGroups groups = modes::menu_groups();
+    struct Section {
+        std::string title, note;
+        const std::vector<ModeInfo>* list;
+    };
+    std::vector<Section> sections;
+    if (!groups.standard.empty()) sections.push_back({L("類神經網路編碼（實驗中）"), L("訊號愈弱畫面愈糊，不會整張收不到；兩邊要用同一份權重"), &groups.standard});
+    // 說明裡的畫面大小取自那一組的第一個模式
+    if (!groups.large.empty()) {
+        sections.push_back({L("FM 語音通道用的大畫面（實驗中）"),
+                            LF("畫面 %@，比較清楚。給 VHF／UHF 的 FM 用：訊號弱時比上面的模式差，不適合短波", {groups.large.front().picture.text()}), &groups.large});
+    }
+    if (!groups.pilot_free.empty()) {
+        sections.push_back({L("FM 大畫面，幀裡沒有導頻（實驗中）"),
+                            LF("畫面 %@。同樣的時間多送 2 成的資料；只給訊號穩定的 FM 用，不適合短波", {groups.pilot_free.front().picture.text()}), &groups.pilot_free});
+    }
+    // 每一組的標題是粗體的一行：別的語言比較長、字型又比較寬的時候（Linux 上的英文、西班牙文），選單跟著加寬到放得下，
+    // 最多加到 480（再長的在下面折成兩行）
+    float w = std::max(S(400), mode_anchor_.w + S(90));
+    for (const Section& section : sections) w = std::max(w, std::min(S(480), text_width(bold_, 12, section.title) + S(44)));
+    w = std::min(w, std::max(S(280), ImGui::GetIO().DisplaySize.x - S(16)));
+    // 平常開在按鈕的下面。三組加起來比較高，下面放不下時改開在按鈕的上面；上面也放不下（視窗很矮）就貼著視窗的下緣，
+    // 蓋住按鈕也沒關係。高度是上一圈畫完量到的：剛打開的那一圈 Dear ImGui 本來就不顯示（它自己也要先量大小），
+    // 所以看得到的第一圈位置就是對的。比視窗還高的話可以捲。
+    const float display_h = ImGui::GetIO().DisplaySize.y, edge = S(8);
+    float menu_top = mode_anchor_.bottom() + S(6);
+    if (mode_menu_height_ > 0 && menu_top + mode_menu_height_ > display_h - edge) {
+        const float above = mode_anchor_.y - S(6) - mode_menu_height_;
+        menu_top = above >= edge ? above : std::max(edge, display_h - edge - mode_menu_height_);
+    }
+    ImGui::SetNextWindowPos(ImVec2(std::max(edge, mode_anchor_.right() - w), menu_top));   // 右邊對齊按鈕，往左長出去
     ImGui::SetNextWindowSize(ImVec2(w, 0));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(w, 0), ImVec2(w, std::max(S(160), display_h - 2 * edge)));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(10), S(12)));
     ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, S(11));
     ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
@@ -1271,16 +1309,18 @@ void UI::draw_mode_menu() {
         text(dl, regular_, 11.5f, col_time - text_width(regular_, 11.5f, L("每張")), y, kTertiary, L("每張"));
         text(dl, regular_, 11.5f, col_content - text_width(regular_, 11.5f, L("內容")), y, kTertiary, L("內容"));
         y += S(24);
-        if (list.empty()) {
-            text(dl, regular_, 12.5f, origin.x + S(12), y, kSecondary, L("沒有可以用的模式"));
-            y += S(22);
-            text(dl, regular_, 11.5f, origin.x + S(12), y, kTertiary, L("app 裡找不到模型的權重檔"));
-            y += S(24);
-        } else {
-            text(dl, bold_, 12, origin.x + S(12), y, kSecondary, L("類神經網路編碼（實驗中）"));
-            y += S(19);
-            y += paragraph(dl, regular_, 11.5f, origin.x + S(12), y, inner - S(24), kTertiary, L("訊號愈弱畫面愈糊，不會整張收不到；兩邊要用同一份權重")) + S(8);
-            for (const ModeInfo& mode : list) {
+        // 一組：標題、一段說明、每個模式一列
+        bool first_group = true;
+        for (const Section& section : sections) {
+            if (!first_group) y += S(8);   // 和上一組隔開
+            first_group = false;
+            for (const std::string& line : wrap(bold_, 12, section.title, inner - S(24))) {
+                text(dl, bold_, 12, origin.x + S(12), y, kSecondary, line);
+                y += S(16);
+            }
+            y += S(3);
+            y += paragraph(dl, regular_, 11.5f, origin.x + S(12), y, inner - S(24), kTertiary, section.note) + S(8);
+            for (const ModeInfo& mode : *section.list) {
                 const Rect row{origin.x, y, inner, S(30)};
                 note_hit("##moderow/" + std::to_string(mode.id), row);
                 ImGui::SetCursorScreenPos(ImVec2(row.x, row.y));
@@ -1292,9 +1332,11 @@ void UI::draw_mode_menu() {
                 if (selected) icon(dl, Icon::check, row.x + S(10), row.y + S(8), S(14), S(14), kRx, 2.0f);
                 const float ty = row.y + S(7);
                 text(dl, bold_, 13, col_name, ty, kText, mode.name());
-                text(dl, regular_, 12.5f, col_quality, ty, kSecondary, mode.quality());
                 const std::string seconds = mode.seconds_text(), content = mode.content_text();
-                text(dl, mono_, 13, col_time - text_width(mono_, 13, seconds), ty, kText, seconds);
+                const float seconds_x = col_time - text_width(mono_, 13, seconds);
+                // 中間那一欄放不下時截短（別的語言的說法比較長），不要蓋到每張幾秒
+                text(dl, regular_, 12.5f, col_quality, ty, kSecondary, fitted(regular_, 12.5f, mode.menu_detail(), seconds_x - S(8) - col_quality));
+                text(dl, mono_, 13, seconds_x, ty, kText, seconds);
                 text(dl, regular_, 12.5f, col_content - text_width(regular_, 12.5f, content), ty, kSecondary, content);
                 if (clicked) {
                     app_.settings.tx_mode_id = mode.id;
@@ -1303,8 +1345,15 @@ void UI::draw_mode_menu() {
                 y += S(32);
             }
         }
+        if (sections.empty()) {
+            text(dl, regular_, 12.5f, origin.x + S(12), y, kSecondary, L("沒有可以用的模式"));
+            y += S(22);
+            text(dl, regular_, 11.5f, origin.x + S(12), y, kTertiary, L("app 裡找不到模型的權重檔"));
+            y += S(24);
+        }
         ImGui::SetCursorScreenPos(origin);
         ImGui::Dummy(ImVec2(inner, y - origin.y));
+        mode_menu_height_ = y - origin.y + 2 * S(12);   // 加上選單上下的留白
         ImGui::EndPopup();
     }
     ImGui::PopStyleColor(2);

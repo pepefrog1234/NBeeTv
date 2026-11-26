@@ -388,8 +388,8 @@ std::string App::export_file_name(const ReceivedFrame& frame) {
 void App::save_displayed_frame(const std::string& path) {
     const ReceivedFrame* frame = displayed_frame();
     if (frame == nullptr || !frame->picture) return;
-    // 96×72 的 PNG，像素和收到的畫面完全相同
-    if (!write_png(path, frame->picture->rgb.data(), kImageWidth, kImageHeight)) notice = LF("存檔失敗：%@", {path});
+    // 和收到的畫面一樣大的 PNG（96×72，模式 5–7 與 15 是 192×144），像素完全相同
+    if (!write_png(path, frame->picture->rgb.data(), frame->picture->width(), frame->picture->height())) notice = LF("存檔失敗：%@", {path});
 }
 
 // 那一張畫面所在的「一段」：同一個呼號、一張接一張，中間的空檔都不到 10 秒。回傳的順序由舊到新。
@@ -463,11 +463,13 @@ App::VideoTimeline App::video_timeline(const std::vector<ReceivedFrame>& frames,
     return timeline;
 }
 
-// 每秒 24 格、960×720（每個像素放大成 10×10，不內插）。編碼交給 ffmpeg：把 96×72 的畫面一格一格從管線送給它，由它放大。
+// 每秒 24 格、960×720（96×72 的畫面每個像素放大成 10×10，192×144 的放大成 5×5，不內插）。
+// 編碼交給 ffmpeg：把畫面照原來的大小一格一格從管線送給它，由它放大。一段裡的畫面大小不一樣時（中途換了模式），
+// 照最大的那一種送：小的先在這裡把每個像素原樣重複成一樣大，影片裡看到的格子和它自己直接放大的相同。
 //
 // 要印訊雜比的時候，字是這裡自己畫的（見 VideoStamp）：字只蓋住影片左上角的一小塊，所以不把 960×720 的整格畫面送過去
-// （一格 2 MB，管線會慢得多），而是把「印好字的那一小塊」接在 96×72 的畫面右邊一起送——送過去的一格是
-// 「96×72 的畫面 ｜ 那一小塊（已經是影片的大小）」，ffmpeg 把左邊放大成 960×720，再把右邊那一塊原樣貼回左上角。
+// （一格 2 MB，管線會慢得多），而是把「印好字的那一小塊」接在畫面右邊一起送——送過去的一格是
+// 「原來大小的畫面 ｜ 那一小塊（已經是影片的大小）」，ffmpeg 把左邊放大成 960×720，再把右邊那一塊原樣貼回左上角。
 // 那一小塊是從 sequence_video::frame_image 切下來的，所以貼上去之後就是那一格該有的樣子。
 void App::export_sequence(const std::vector<ReceivedFrame>& frames, const std::string& path, std::function<void(bool)> completion) {
     if (frames.empty() || exporting_video) return;
@@ -483,6 +485,14 @@ void App::export_sequence(const std::vector<ReceivedFrame>& frames, const std::s
     io_worker_->post([this, timeline, wanted, path, ffmpeg, completion] {
         const double fps = sequence_video::kFrameRate;
         const std::vector<VideoPicture>& pictures = timeline.pictures;
+        // 送給 ffmpeg 的畫面多大：這一段裡最大的那一種
+        PictureSize sent = kStandardPicture;
+        bool sized = false;
+        for (const VideoPicture& picture : pictures) {
+            if (!picture.picture) continue;
+            if (!sized || picture.picture->size.rgb_bytes() > sent.rgb_bytes()) sent = picture.picture->size;
+            sized = true;
+        }
         // 要印的字佔影片畫面的哪一塊：每一張的字不一樣長，取最寬的。邊界對齊到偶數的像素（影片的色度是兩個像素一格）
         int left = 0, top = 0, right = 0, bottom = 0;
         if (wanted) {
@@ -506,15 +516,15 @@ void App::export_sequence(const std::vector<ReceivedFrame>& frames, const std::s
         const int patch_width = right - left, patch_height = bottom - top;
         // 找不到字型（或那一塊放不進畫面）時印不了：影片照存，結果裡說明沒有印
         const bool stamping = wanted && patch_width > 0 && patch_height > 0 && right <= sequence_video::kWidth && bottom <= sequence_video::kHeight;
-        const int frame_width = kImageWidth + (stamping ? patch_width : 0), frame_height = stamping ? std::max(kImageHeight, patch_height) : kImageHeight;
+        const int frame_width = sent.width + (stamping ? patch_width : 0), frame_height = stamping ? std::max(sent.height, patch_height) : sent.height;
 
         Process::Options options;
         options.args = {ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
                         "-s", std::to_string(frame_width) + "x" + std::to_string(frame_height), "-r", std::to_string(sequence_video::kFrameRate), "-i", "pipe:0"};
         const std::string size = std::to_string(sequence_video::kWidth) + ":" + std::to_string(sequence_video::kHeight);
         if (stamping) {
-            const std::string graph = "[0:v]split[picture][corner];[picture]crop=" + std::to_string(kImageWidth) + ":" + std::to_string(kImageHeight) + ":0:0,scale=" + size +
-                                      ":flags=neighbor[large];[corner]crop=" + std::to_string(patch_width) + ":" + std::to_string(patch_height) + ":" + std::to_string(kImageWidth) +
+            const std::string graph = "[0:v]split[picture][corner];[picture]crop=" + std::to_string(sent.width) + ":" + std::to_string(sent.height) + ":0:0,scale=" + size +
+                                      ":flags=neighbor[large];[corner]crop=" + std::to_string(patch_width) + ":" + std::to_string(patch_height) + ":" + std::to_string(sent.width) +
                                       ":0[stamp];[large][stamp]overlay=" + std::to_string(left) + ":" + std::to_string(top) + "[out]";
             options.args.insert(options.args.end(), {"-filter_complex", graph, "-map", "[out]"});
         } else {
@@ -534,21 +544,24 @@ void App::export_sequence(const std::vector<ReceivedFrame>& frames, const std::s
                 if (!pictures[i].picture) continue;
                 const double end = i + 1 < pictures.size() ? pictures[i + 1].start : pictures[i].start + timeline.last_hold;
                 const long target = std::max<long>(written + 1, std::lround(end * fps));
-                const std::uint8_t* data = pictures[i].picture->rgb.data();
+                // 比這一段裡最大的畫面小的那幾張：每個像素原樣重複，放大成一樣大
+                const Picture shown = replicate_picture(*pictures[i].picture, sent);
+                const std::uint8_t* data = shown.rgb.data();
                 if (stamping) {
-                    // 左邊是 96×72 的畫面，右邊是影片那一格（印好字的）左上角的那一塊
+                    // 左邊是原來大小的畫面，右邊是影片那一格（印好字的）左上角的那一塊
                     const std::vector<std::uint8_t> full = sequence_video::frame_image(*pictures[i].picture, pictures[i].label);
-                    for (int y = 0; y < kImageHeight; ++y) {
-                        std::copy_n(data + static_cast<std::size_t>(y) * kImageWidth * 3, kImageWidth * 3, packed.begin() + static_cast<std::ptrdiff_t>(static_cast<std::size_t>(y) * static_cast<std::size_t>(frame_width) * 3));
+                    const std::size_t row = static_cast<std::size_t>(sent.width) * 3;
+                    for (int y = 0; y < sent.height; ++y) {
+                        std::copy_n(data + static_cast<std::size_t>(y) * row, row, packed.begin() + static_cast<std::ptrdiff_t>(static_cast<std::size_t>(y) * static_cast<std::size_t>(frame_width) * 3));
                     }
                     for (int y = 0; y < patch_height; ++y) {
                         std::copy_n(full.begin() + static_cast<std::ptrdiff_t>((static_cast<std::size_t>(top + y) * sequence_video::kWidth + static_cast<std::size_t>(left)) * 3), patch_width * 3,
-                                    packed.begin() + static_cast<std::ptrdiff_t>((static_cast<std::size_t>(y) * static_cast<std::size_t>(frame_width) + kImageWidth) * 3));
+                                    packed.begin() + static_cast<std::ptrdiff_t>((static_cast<std::size_t>(y) * static_cast<std::size_t>(frame_width) + static_cast<std::size_t>(sent.width)) * 3));
                     }
                     data = packed.data();
                 }
                 // 這一張顯示到下一張開始為止：同一格畫面重複送，影片的格率才是固定的每秒 24 格
-                for (; written < target && ok; ++written) ok = write_exact(process->in(), data, stamping ? packed.size() : static_cast<std::size_t>(kRgbBytes));
+                for (; written < target && ok; ++written) ok = write_exact(process->in(), data, stamping ? packed.size() : shown.rgb.size());
             }
             process->close_stdin();
             int code = 0;
@@ -622,13 +635,21 @@ void App::restart_source() {
     }
 }
 
-/// 畫布目前的圖層；沒有打開（或沒有字）時是空的。設定改了就在這裡重算一次（不到一毫秒）。
+PictureSize App::tx_picture_size() const {
+    // tx_mode_id 在沒有發射時由 ui_tick 跟著設定走，會慢一拍（不碰裝置的示範圖裡根本不跑）：直接看設定
+    const ModeInfo* mode = modes::find(tx_phase == TxPhase::idle ? settings.tx_mode_id : tx_mode_id);
+    return mode != nullptr ? mode->picture : kStandardPicture;
+}
+
+/// 畫布目前的圖層；沒有打開（或沒有字）時是空的。設定或畫面的大小改了就在這裡重算一次（不到一毫秒）。
 std::shared_ptr<const CanvasLayer> App::current_canvas() {
     const std::optional<CanvasStyle> style = settings.canvas_style();
-    if (!canvas_ever_built_ || style != canvas_built_) {
+    const PictureSize picture = tx_picture_size();
+    if (!canvas_ever_built_ || style != canvas_built_ || picture != canvas_built_picture_) {
         canvas_ever_built_ = true;
         canvas_built_ = style;
-        canvas_layer_ = style ? CanvasLayer::make(*style) : nullptr;
+        canvas_built_picture_ = picture;
+        canvas_layer_ = style ? CanvasLayer::make(*style, picture) : nullptr;
         ++canvas_version_;
     }
     return canvas_layer_;
@@ -810,14 +831,15 @@ void App::open_dropped(const std::vector<std::string>& paths) {
     open_video(first_file, true);
 }
 
-/// 圖片序列的預覽：「下一張要送的」那一張縮成 96×72、印上畫布的樣子。位置、縮放方式或畫布變了就重算。
+/// 圖片序列的預覽：「下一張要送的」那一張縮成送出的大小（96×72，模式 5–7 與 15 是 192×144）、印上畫布的樣子。
+/// 位置、縮放方式、畫布或送出的大小變了就重算。
 /// 一次只算一張：還在算的時候位置又變了（拖著滑桿），等這一張算完再算最新的那一張，不會越積越多。
 void App::refresh_image_preview() {
     if (image_preview_loading_) return;
     const std::optional<std::string> path = next_image();
     if (!path) return;
     const std::shared_ptr<const CanvasLayer> canvas = current_canvas();
-    const ImagePreviewKey key{*path, settings.scale_mode, canvas_version_};
+    const ImagePreviewKey key{*path, settings.scale_mode, canvas_version_, tx_picture_size()};
     if (image_preview_key_ && key == *image_preview_key_) return;
     image_preview_loading_ = true;
     const int epoch = source_epoch_;
@@ -828,7 +850,7 @@ void App::refresh_image_preview() {
         std::optional<Picture> scaled;
         PicturePtr shown;
         if (frame) {
-            scaled = scale_frame(*frame, key.scale);
+            scaled = scale_frame(*frame, key.scale, key.size);
             shown = std::make_shared<Picture>(canvas ? canvas->apply(*scaled) : *scaled);
         }
         post_main([this, key, epoch, frame, scaled, shown] {
@@ -871,7 +893,7 @@ void App::remove_unreadable_images(const std::vector<std::string>& unreadable) {
     }
 }
 
-/// 圖片序列：讀「下一張要送的」那一張，縮成 96×72。讀不到的從序列裡拿掉，改讀它後面那一張
+/// 圖片序列：讀「下一張要送的」那一張，縮成送出的大小。讀不到的從序列裡拿掉，改讀它後面那一張
 /// （勾了循環播放的話，找到最後一張還沒有，再從第一張找）。都讀不到時 rgb 是空的、last 是 true。
 /// 位置在這一格確定要用的時候才往後移（見 accept）：取了之後才發現這次發射已經取消的話，這一張就不算取走。
 void App::capture_next_image(std::function<void(SourceCapture)> completion) {
@@ -882,12 +904,13 @@ void App::capture_next_image(std::function<void(SourceCapture)> completion) {
         if (settings.loop_images) candidates.insert(candidates.end(), image_files.begin(), image_files.begin() + start);
     }
     const ScaleMode mode = settings.scale_mode;
-    preview_worker_->post([this, candidates, mode, completion] {
+    const PictureSize size = tx_picture_size();
+    preview_worker_->post([this, candidates, mode, size, completion] {
         std::vector<std::string> unreadable;
         SourceCapture capture;
         for (const std::string& path : candidates) {
             if (const SourceFramePtr frame = images_.picture(path)) {
-                capture.rgb = scale_frame(*frame, mode);
+                capture.rgb = scale_frame(*frame, mode, size);
                 capture.image = path;
                 break;
             }
@@ -978,12 +1001,14 @@ void App::publish_transmit_display() {
     tx_elapsed = tx_display_->elapsed;
 }
 
-/// 來源有新的一格（或縮放方式、畫布改了）時，重算 96×72 的預覽。預覽就是會送出去的樣子，畫布的字也印在上面。
+/// 來源有新的一格（或縮放方式、畫布、送出的畫面大小改了）時，重算預覽。預覽就是會送出去的樣子：
+/// 和送出的畫面一樣大（96×72，模式 5–7 與 15 是 192×144），畫布的字也印在上面。
 void App::refresh_preview() {
     const SourceFramePtr frame = latest_frame_;
     const ScaleMode mode = settings.scale_mode;
+    const PictureSize picture = tx_picture_size();
     const std::shared_ptr<const CanvasLayer> canvas = current_canvas();
-    const bool restyled = !preview_scale_ || mode != *preview_scale_ || canvas_version_ != preview_canvas_version_;
+    const bool restyled = !preview_scale_ || mode != *preview_scale_ || canvas_version_ != preview_canvas_version_ || !preview_picture_ || picture != *preview_picture_;
     if (!frame || (latest_version_ == preview_version_ && !restyled)) return;
     // 把整格來源畫面縮小並不便宜：來源一直在動時每秒更新 5 次就夠了；改縮放方式、改畫布或剛換來源時立刻更新
     const double now = uptime_seconds();
@@ -991,10 +1016,11 @@ void App::refresh_preview() {
     preview_time_ = now;
     preview_version_ = latest_version_;
     preview_scale_ = mode;
+    preview_picture_ = picture;
     preview_canvas_version_ = canvas_version_;
     const int epoch = source_epoch_;
-    preview_worker_->post([this, frame, mode, canvas, epoch] {
-        const Picture scaled = scale_frame(*frame, mode);
+    preview_worker_->post([this, frame, mode, picture, canvas, epoch] {
+        const Picture scaled = scale_frame(*frame, mode, picture);
         auto shown = std::make_shared<Picture>(canvas ? canvas->apply(scaled) : scaled);
         post_main([this, scaled, shown, epoch, width = frame->shown_width(), height = frame->shown_height()] {
             if (epoch != source_epoch_) return;   // 這段時間裡換了來源
@@ -1005,7 +1031,8 @@ void App::refresh_preview() {
     });
 }
 
-/// 取來源當下那一格（縮成 96×72，還沒有印上畫布的字）。鏡頭與影片檔沒有新的畫面時沿用上一格；
+/// 取來源當下那一格（縮成送出的大小，還沒有印上畫布的字）。鏡頭與影片檔沒有新的畫面時沿用上一格
+/// （上一格是照另一種畫面大小縮的話，換成現在的大小）；
 /// 圖片序列取的是「下一張要送的」那一張（見 capture_next_image）。取到之後確定要用，再呼叫 accept。
 void App::capture_source_frame(std::function<void(SourceCapture)> completion) {
     if (settings.source_kind == SourceKind::images) {
@@ -1025,10 +1052,12 @@ void App::capture_source_frame(std::function<void(SourceCapture)> completion) {
     }
     const SourceFramePtr frame = latest_frame_;
     const ScaleMode mode = settings.scale_mode;
+    const PictureSize size = tx_picture_size();
     const std::optional<Picture> fallback = last_source_rgb_;
-    preview_worker_->post([this, frame, mode, fallback, last, completion] {
+    preview_worker_->post([this, frame, mode, size, fallback, last, completion] {
         SourceCapture capture;
-        capture.rgb = frame ? std::optional<Picture>(scale_frame(*frame, mode)) : fallback;
+        if (frame) capture.rgb = scale_frame(*frame, mode, size);
+        else if (fallback) capture.rgb = resize_picture(*fallback, size);
         capture.last = last;
         post_main([completion, capture] { completion(capture); });
     });
@@ -1047,7 +1076,7 @@ std::uint64_t App::demo_video_frame_version() const {
 bool App::demo_grab_video_frame() {
     const SourceFramePtr frame = video_.current_frame();
     if (!frame) return false;
-    const Picture scaled = scale_frame(*frame, settings.scale_mode);
+    const Picture scaled = scale_frame(*frame, settings.scale_mode, tx_picture_size());
     last_source_rgb_ = scaled;
     source_preview = std::make_shared<Picture>(apply_canvas(scaled));
     source_size = std::make_pair(frame->shown_width(), frame->shown_height());
@@ -1059,7 +1088,7 @@ bool App::demo_load_image() {
     const std::optional<std::string> path = next_image();
     const SourceFramePtr frame = path ? ImageSequence::load(*path) : nullptr;
     if (!frame) return false;
-    const Picture scaled = scale_frame(*frame, settings.scale_mode);
+    const Picture scaled = scale_frame(*frame, settings.scale_mode, tx_picture_size());
     last_source_rgb_ = scaled;
     source_preview = std::make_shared<Picture>(apply_canvas(scaled));
     source_size = std::make_pair(frame->shown_width(), frame->shown_height());
@@ -1208,6 +1237,7 @@ void App::debug_use_simulated_output(std::function<void(const std::vector<float>
 void App::first_frame_ready(std::optional<EncodedFrame> frame, int session) {
     if (session != tx_session_ || tx_phase != TxPhase::starting) return;
     if (!frame) {
+        // 畫面編碼失敗：畫面的大小和這個模式的不一樣時核心不收（不應該發生：來源的畫面都是照這個模式的大小縮的）
         fail_transmit(modes::find(tx_mode_id) == nullptr ? L("app 裡沒有這個模式的模型，不能發射") : L("畫面編碼失敗"));
         return;
     }
@@ -1387,7 +1417,9 @@ void App::prepare_next_frame() {
             return;
         }
         // 來源一時沒有畫面（剛切換來源）：重送上一格，不要讓電台空著發射
-        const std::optional<Picture> rgb = capture.rgb ? capture.rgb : tx_last_rgb_;
+        // （上一格是照另一種畫面大小縮的話，換成現在這個模式的大小）
+        std::optional<Picture> rgb = capture.rgb;
+        if (!rgb && tx_last_rgb_) rgb = resize_picture(*tx_last_rgb_, tx_picture_size());
         if (!rgb) {
             tx_preparing_ = false;
             return;

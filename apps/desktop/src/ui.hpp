@@ -49,6 +49,7 @@ public:
     bool has_any_font() const { return !fonts_found_.regular.empty(); }
 
     /// 測試用：打開之後，每一圈記下可以按的元件畫在哪裡，rect_of 查得到（查的是元件的代號，例如「##transmit」）。
+    /// 另外有兩個不是元件的：主畫面（「##picture」）與右側欄的預覽（「##preview」）畫在哪裡。
     bool record_hits = false;
     struct HitRect {
         float x = 0, y = 0, w = 0, h = 0;
@@ -143,6 +144,7 @@ private:
     bool want_schedule_menu_ = false;
     bool want_save_video_menu_ = false;
     Rect mode_anchor_;
+    float mode_menu_height_ = 0;   // 發射模式的選單上一圈畫出來多高（決定它開在按鈕的下面還是上面）
     Rect schedule_anchor_;
     Rect save_video_anchor_;
     std::string canvas_buffer_;

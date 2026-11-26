@@ -184,12 +184,12 @@ struct Rig {
             stall_after);
     }
 
-    /// 把一張 96×72 的畫面直接當成來源目前的那一格。
+    /// 把一張畫面直接當成來源目前的那一格（來源多大就是這張畫面多大，送出去之前照發射模式的大小縮放）。
     void set_still(const Picture& picture) {
         auto frame = std::make_shared<SourceFrame>();
-        frame->width = kImageWidth;
-        frame->height = kImageHeight;
-        frame->rgb.assign(picture.rgb.begin(), picture.rgb.end());
+        frame->width = picture.width();
+        frame->height = picture.height();
+        frame->rgb = picture.rgb;
         app->debug_set_source_frame(frame);
     }
 
@@ -210,11 +210,10 @@ std::vector<DecodedFrame> decode(std::vector<float> audio) {
     return frames;
 }
 
-Picture picture_or_gray(const char* name) {
-    if (const std::optional<Picture> picture = demo::test_image(name)) return *picture;
-    Picture gray;
-    gray.rgb.fill(128);
-    return gray;
+/// 內附的測試圖；size 比 96×72 大時每個像素重複放大（模式 5–7 與 15 的 192×144）。
+Picture picture_or_gray(const char* name, PictureSize size = kStandardPicture) {
+    if (const std::optional<Picture> picture = demo::test_image(name, size)) return *picture;
+    return Picture(size, 128);
 }
 
 // ---------------------------------------------------------------- 各項測試
@@ -230,6 +229,20 @@ void test_i18n(Check& c) {
                      contains(LF("來源 %d×%d → 送出 %@", {1920, 1080, "96×72"}), "96×72"),
                  language + "：%d 沒有填進去");
         c.expect(contains(LF("%d 張", {3}), "3"), language + "：數量沒有填進去");
+        // 給 FM 用的大畫面那幾句：兩個要填的值都填得進去（有的語言順序不同）
+        const std::string large_summary = LF("每張 %@ · %@ 的大畫面，給 FM 用，實驗中", {"2.72 秒", "192×144"});
+        const std::string free_summary = LF("每張 %@ · %@ 的大畫面，幀裡沒有導頻，只給 FM 用，實驗中", {"2.29 秒", "192×144"});
+        c.expect(contains(large_summary, "2.72 秒") && contains(large_summary, "192×144") && contains(free_summary, "2.29 秒") && contains(free_summary, "192×144") && large_summary != free_summary &&
+                     !contains(large_summary, "%") && !contains(free_summary, "%"),
+                 language + "：大畫面模式的說明沒有填好：「" + large_summary + "」「" + free_summary + "」");
+        const std::string large_note = LF("畫面 %@，比較清楚。給 VHF／UHF 的 FM 用：訊號弱時比上面的模式差，不適合短波", {"192×144"});
+        const std::string free_note = LF("畫面 %@。同樣的時間多送 2 成的資料；只給訊號穩定的 FM 用，不適合短波", {"192×144"});
+        c.expect(contains(large_note, "192×144") && contains(free_note, "192×144") && !contains(large_note, "%@") && !contains(free_note, "%@"), language + "：模式選單那兩組的說明沒有填好");
+        // 英文、西班牙文的說明裡寫的是「20%」：百分號要原樣留著，不能被當成要填值的記號吃掉
+        if (language == "en" || language == "es") c.expect(contains(free_note, "20") && contains(free_note, "%"), language + "：「20%」的百分號不見了：「" + free_note + "」");
+        for (const char* key : {"FM 大畫面", "FM 無導頻", "標準", "較細", "細緻", "FM 語音通道用的大畫面（實驗中）", "FM 大畫面，幀裡沒有導頻（實驗中）"}) {
+            c.expect(i18n::has_translation(language, key), language + "：「" + key + "」沒有翻譯");
+        }
         if (language != "zh-Hant") c.expect(L("設定") != "設定" || language == "ja", language + "：「設定」沒有翻譯");
     }
     i18n::use("en");
@@ -336,27 +349,86 @@ void test_schedule(Check& c) {
 }
 
 void test_models(Check& c) {
-    std::string ids;
-    for (const ModeInfo& mode : modes::all()) ids += std::to_string(mode.id) + " ";
-    c.expect(modes::all().size() == 4, "應該有四個模式，實際：" + ids);
-    c.expect(modes::find(11) != nullptr && modes::find(12) != nullptr && modes::find(13) != nullptr && modes::find(14) != nullptr, "模式 11、12、13、14");
+    const auto joined = [](const std::vector<int>& ids) {
+        std::string text;
+        for (const int id : ids) text += std::to_string(id) + " ";
+        return text.empty() ? std::string("（沒有）") : text;
+    };
+    const auto ids_of = [](const std::vector<ModeInfo>& list) {
+        std::vector<int> ids;
+        for (const ModeInfo& mode : list) ids.push_back(mode.id);
+        return ids;
+    };
+    // 有幾個模式以核心的模式表為準，這裡不寫死：表裡的每一個都要有模型。之後表裡多了模式而這裡沒有它的權重檔，這一項就會指出來
+    const std::vector<int> missing = modes::without_model();
+    c.expect(missing.empty() && static_cast<int>(modes::all().size()) == nbtv_mode_count(),
+             "核心的模式表有 " + std::to_string(nbtv_mode_count()) + " 個模式，這裡有模型的是 " + joined(ids_of(modes::all())) + "；沒有模型的：" + joined(missing) +
+                 "（權重檔要在 models/ 裡，哪個模式用哪一份寫在 tools/model_file.hpp）");
+    for (const int id : {11, 12, 13, 14, 15, 5, 6, 7}) c.expect(modes::find(id) != nullptr, "少了模式 " + std::to_string(id));
     c.expect(modes::default_id() == 11, "預設是模式 11");
-    std::string order;
-    for (const ModeInfo& mode : modes::menu_order()) order += std::to_string(mode.id) + " ";
-    c.expect(order == "14 12 11 13 ", "選單的順序應該是 14 12 11 13，得到 " + order);
+    // 選單的順序與分組：只看現在這八個模式之間的先後與各自在哪一組。之後模式表多了別的模式，夾在裡面不影響這幾條
+    const auto known = [&ids_of](const std::vector<ModeInfo>& list) {
+        std::vector<int> ids;
+        for (const int id : ids_of(list)) {
+            for (const int wanted : {11, 12, 13, 14, 15, 5, 6, 7}) {
+                if (id == wanted) ids.push_back(id);
+            }
+        }
+        return ids;
+    };
+    const std::vector<int> order = known(modes::menu_order());
+    c.expect(order == std::vector<int>({14, 12, 11, 13, 15, 5, 6, 7}), "選單的順序應該是 14 12 11 13 15 5 6 7，得到 " + joined(order));
+    // 選單的三組：每個模式剛好在其中一組，接起來就是選單的順序；分組只看畫面的大小與有沒有導頻
+    const modes::MenuGroups groups = modes::menu_groups();
+    std::vector<int> grouped = ids_of(groups.standard);
+    for (const int id : ids_of(groups.large)) grouped.push_back(id);
+    for (const int id : ids_of(groups.pilot_free)) grouped.push_back(id);
+    c.expect(grouped == ids_of(modes::menu_order()), "三組接起來是 " + joined(grouped) + "，選單的順序是 " + joined(ids_of(modes::menu_order())));
+    for (const ModeInfo& mode : groups.standard) c.expect(!mode.large_picture(), "模式 " + std::to_string(mode.id) + " 的畫面不是 96×72，卻在第一組");
+    for (const ModeInfo& mode : groups.large) c.expect(mode.large_picture() && !mode.pilot_free(), "模式 " + std::to_string(mode.id) + " 不該在「FM 大畫面」那一組");
+    for (const ModeInfo& mode : groups.pilot_free) c.expect(mode.large_picture() && mode.pilot_free(), "模式 " + std::to_string(mode.id) + " 不該在「沒有導頻」那一組");
+    c.expect(known(groups.standard) == std::vector<int>({14, 12, 11, 13}) && known(groups.large) == std::vector<int>({15}) && known(groups.pilot_free) == std::vector<int>({5, 6, 7}),
+             "三組應該是 14 12 11 13｜15｜5 6 7，得到 " + joined(ids_of(groups.standard)) + "｜" + joined(ids_of(groups.large)) + "｜" + joined(ids_of(groups.pilot_free)));
+    std::vector<std::string> used;
     for (const ModeInfo& mode : modes::all()) {
-        c.expect(mode.frame_seconds > 0.3 && mode.frame_seconds < 10 && !mode.model_name.empty() && !mode.label().empty() && !mode.summary().empty(), "模式 " + std::to_string(mode.id) + " 的資料不完整");
+        c.expect(mode.frame_seconds > 0.3 && mode.frame_seconds < 10 && !mode.model_name.empty() && !mode.label().empty() && !mode.summary().empty() && !mode.content_text().empty() &&
+                     !mode.menu_detail().empty() && mode.picture.width > 0 && mode.picture.width <= NBTV_IMAGE_MAX_WIDTH && mode.picture.height > 0 && mode.picture.height <= NBTV_IMAGE_MAX_HEIGHT,
+                 "模式 " + std::to_string(mode.id) + " 的資料不完整");
+        // 這個模式用的模型：實數個數、寬度、畫面大小三樣都和模式的相同
+        const LoadedModel* model = Models::shared().find(mode.learned_values, mode.learned_width, mode.picture);
+        c.expect(model != nullptr && model->name == mode.model_name && nbtv_model_image_width(model->handle) == mode.picture.width && nbtv_model_image_height(model->handle) == mode.picture.height,
+                 "模式 " + std::to_string(mode.id) + " 配到的模型不對");
+        if (std::find(used.begin(), used.end(), mode.model_name) == used.end()) used.push_back(mode.model_name);
+        // 「合併最近幾幀」用的權重：命令列工具的那一份對照（tools/model_file.hpp）說這個模式有配的，就要載入而且配得上這個模型；
+        // 沒有配的不能有。現在是模式 11–14 各配一份，192×144 的大畫面沒有
+        const bool expects_merge = !nbtv::tools::default_merge_path(mode.id).empty();
+        if (mode.id >= 11 && mode.id <= 14) c.expect(expects_merge, "模式 " + std::to_string(mode.id) + " 應該配有合併用的權重");
+        if (mode.id == 15 || (mode.id >= 5 && mode.id <= 7)) c.expect(!expects_merge, "模式 " + std::to_string(mode.id) + " 不應該配有合併用的權重");
+        if (model != nullptr) {
+            c.expect(Models::shared().merge_covers(nbtv_model_id(model->handle)) == expects_merge,
+                     "模式 " + std::to_string(mode.id) + (expects_merge ? " 的模型沒有配到合併用的權重" : " 的模型不應該配到合併用的權重"));
+        }
     }
+    // 載入的每一份模型都有模式在用（模式 5 和 15 共用一份，所以比的是用到的模型有幾種）
+    c.expect(used.size() == Models::shared().models().size() && used.size() >= 7,
+             "載入了 " + std::to_string(Models::shared().models().size()) + " 份模型，用到的有 " + std::to_string(used.size()) + " 種（現在的八個模式用七份）");
+    c.expect(Models::shared().merges().size() >= 4, "合併用的權重載入了 " + std::to_string(Models::shared().merges().size()) + " 份（模式 11–14 各一份）");
+    std::string names;
+    for (const LoadedModel& model : Models::shared().models()) names += (names.empty() ? "" : "、") + model.name;
+    c.info("模型 " + names);
     c.expect(normalize_callsign(" bx4acp/p ") == "BX4ACP/P" && normalize_callsign("abcdefghijkl").size() == 9, "呼號的整理");
 }
 
 void test_loopback(Check& c) {
-    const Picture coffee = picture_or_gray("coffee");
     for (const ModeInfo& mode : modes::menu_order()) {
+        // 畫面的大小跟著模式：測試圖是 96×72，畫面比較大的模式每個像素重複放大
+        const Picture coffee = picture_or_gray("coffee", mode.picture);
         CoreTransmitter tx;
-        c.expect(tx.set_mode(mode.id), "模式 " + std::to_string(mode.id) + " 設定不了");
+        c.expect(tx.set_mode(mode.id) && tx.picture_size() == mode.picture, "模式 " + std::to_string(mode.id) + " 設定不了");
         tx.set_callsign("BX4ACP");
+        const double encode_began = uptime_seconds();
         const std::optional<EncodedFrame> first = tx.encode(coffee), second = tx.encode(coffee);
+        const double encode_seconds = (uptime_seconds() - encode_began) / 2;
         if (!first || !second) {
             c.expect(false, "模式 " + std::to_string(mode.id) + " 編碼失敗");
             continue;
@@ -367,16 +439,25 @@ void test_loopback(Check& c) {
         audio.insert(audio.end(), second->samples.begin(), second->samples.end());
         const std::vector<float> tail = tx.finish();
         audio.insert(audio.end(), tail.begin(), tail.end());
+        const double receive_began = uptime_seconds();
         const std::vector<DecodedFrame> frames = decode(audio);
+        const double receive_seconds = (uptime_seconds() - receive_began) / 2;
         c.expect(frames.size() == 2, "模式 " + std::to_string(mode.id) + "：送兩幀應該收到兩幀，收到 " + std::to_string(frames.size()));
+        c.expect(first->preview != nullptr && first->preview->size == mode.picture, "模式 " + std::to_string(mode.id) + "：發射端的預覽不是 " + mode.picture.text());
         for (std::size_t i = 0; i < frames.size(); ++i) {
             const DecodedFrame& frame = frames[i];
             c.expect(frame.decoded && frame.picture != nullptr && frame.header_ok && frame.callsign == "BX4ACP" && frame.mode_id == mode.id && frame.sequence == static_cast<int>(i),
                      "模式 " + std::to_string(mode.id) + " 第 " + std::to_string(i + 1) + " 幀的內容不對");
             if (frame.picture) {
+                c.expect(frame.picture->size == mode.picture, "模式 " + std::to_string(mode.id) + "：收到的畫面是 " + frame.picture->size.text() + "，應該是 " + mode.picture.text());
                 const double same = demo::psnr(*frame.picture, *first->preview), like = demo::psnr(*frame.picture, coffee);
                 c.expect(same > 30, "模式 " + std::to_string(mode.id) + "：沒有雜訊時收到的應該和發射端的預覽幾乎一樣，PSNR " + number(same, 1));
-                if (i == 0) c.info("模式 " + std::to_string(mode.id) + "（" + number(mode.frame_seconds) + " 秒）：和預覽 " + number(same, 1) + " dB，和原圖 " + number(like, 1) + " dB");
+                // 每一幀要算多久也印出來（這台電腦上）：發射端是編碼加上算預覽，接收端是解調加上解碼。
+                // 算一幀的時間比一幀的長度還長的話，連續發射時會接不上、接收會愈落愈後
+                if (i == 0) {
+                    c.info("模式 " + std::to_string(mode.id) + "（" + mode.picture.text() + "，每張 " + number(mode.frame_seconds) + " 秒）：和預覽 " + number(same, 1) + " dB，和原圖 " + number(like, 1) +
+                           " dB；發射端算一幀 " + number(encode_seconds * 1000, 0) + " 毫秒，接收端 " + number(receive_seconds * 1000, 0) + " 毫秒");
+                }
             }
         }
     }
@@ -466,8 +547,7 @@ void test_fonts(Check& c) {
 void test_canvas(Check& c) {
     CanvasLayer::set_fonts(find_fonts(i18n::language()).bold);
     if (!CanvasLayer::has_fonts()) return c.skip("找不到字型，畫布印不了字", "fonts");
-    Picture gray;
-    gray.rgb.fill(120);
+    const Picture gray(kStandardPicture, 120);
     const std::shared_ptr<const CanvasLayer> top = CanvasLayer::make(CanvasStyle{"CQ BX4ACP", CanvasPosition::top});
     c.expect(top != nullptr, "畫布的圖層做不出來");
     if (!top) return;
@@ -1041,8 +1121,7 @@ void test_video_stamp(Check& c, const std::string& work) {
     if (labels.size() != 3) return;
 
     // 找不到字型：印不了，畫面原樣
-    Picture gray;
-    gray.rgb.fill(120);
+    const Picture gray(kStandardPicture, 120);
     const std::vector<std::uint8_t> plain_gray = sequence_video::frame_image(gray, "");
     VideoStamp::set_fonts({});
     c.expect(!VideoStamp::has_fonts() && VideoStamp::rect_for(labels[0]).width == 0 && sequence_video::frame_image(gray, labels[0]) == plain_gray, "沒有字型時不能動到畫面");
@@ -1262,8 +1341,7 @@ void write_text(const std::string& path, const std::string& text) {
 /// 四個角各有一塊不同顏色的畫面（其餘是灰的）：左上紅、右上綠、左下藍、右下白。看一張圖被轉成什麼方向用。
 const std::uint8_t kCornerColors[4][3] = {{230, 30, 30}, {30, 200, 30}, {40, 60, 230}, {240, 240, 240}};
 Picture corner_marks() {
-    Picture picture;
-    picture.rgb.fill(128);
+    Picture picture(kStandardPicture, 128);
     const int block_w = kImageWidth / 4, block_h = kImageHeight / 4;
     for (int corner = 0; corner < 4; ++corner) {
         const int x0 = corner % 2 == 0 ? 0 : kImageWidth - block_w, y0 = corner < 2 ? 0 : kImageHeight - block_h;
@@ -1782,11 +1860,554 @@ void test_image_transmit(Check& c, const std::string& work) {
     }
 }
 
+// ---------------------------------------------------------------- 給 FM 用的大畫面（192×144）
+
+/// 一張灰底（128）的畫面印上畫布的字之後，字帶裡的字有多少：墨量（每個像素被白字蓋住幾成，全部加起來）
+/// 與最左、最右有墨的那一行。字帶裡沒有字的地方是壓暗的灰（49），字是白的。
+struct Ink {
+    double amount = 0;
+    int left = -1, right = -1;
+};
+Ink canvas_ink(const Picture& stamped, int first_row, int last_row) {
+    Ink ink;
+    const int dark = 49;   // 128 ×（1 − 0.62）
+    for (int y = std::max(0, first_row); y < std::min(stamped.height(), last_row); ++y) {
+        for (int x = 0; x < stamped.width(); ++x) {
+            const int value = stamped.rgb[(static_cast<std::size_t>(y) * static_cast<std::size_t>(stamped.width()) + static_cast<std::size_t>(x)) * 3];
+            if (value <= dark) continue;
+            ink.amount += static_cast<double>(value - dark) / (255 - dark);
+            if (value > dark + 60) {
+                ink.left = ink.left < 0 ? x : std::min(ink.left, x);
+                ink.right = std::max(ink.right, x);
+            }
+        }
+    }
+    return ink;
+}
+
+/// 一張相鄰的像素都不一樣的畫面：每隔一個像素調暗。內附的測試圖放大兩倍之後每 2×2 個像素是同一個顏色，
+/// 看不出一張 192×144 的畫面有沒有被當成 96×72 處理；加上這層格紋就看得出來。
+Picture checkered(const Picture& picture) {
+    Picture out = picture;
+    for (int y = 0; y < out.height(); ++y) {
+        for (int x = (y + 1) % 2; x < out.width(); x += 2) {
+            std::uint8_t* pixel = out.rgb.data() + (static_cast<std::size_t>(y) * static_cast<std::size_t>(out.width()) + static_cast<std::size_t>(x)) * 3;
+            for (int k = 0; k < 3; ++k) pixel[k] = static_cast<std::uint8_t>(pixel[k] * 5 / 8);
+        }
+    }
+    return out;
+}
+
+/// 模式 15：給 VHF／UHF 的 FM 語音通道用的大畫面（192×144）。畫面的大小跟著模式走的每一段都要對：
+///   * 模式表：模式 15 的畫面是 192×144，模式 11–14 是 96×72；它的幀和模式 11 相同，用的卻是另一個模型（只差在畫面的大小）
+///   * 編碼器只收目前這個模式的大小
+///   * 來源畫面縮成 192×144；兩種大小之間互換
+///   * 字印在 192×144 的畫面上：字帶佔的比例和 96×72 的相同，字是照兩倍的字級重新畫的
+///   * 收到的 192×144 畫面進了「最近收到」，存成圖檔也是 192×144、像素相同
+///   * 整個發射流程（app 的狀態物件、模擬的音訊輸出、記錄用的 PTT）：選了模式 15，預覽就是 192×144；
+///     送出去的幀解回來是模式 15、192×144，而且就是預覽的樣子；換回模式 11，預覽變回 96×72
+void test_large_picture(Check& c, const std::string& work) {
+    const ModeInfo* mode = modes::find(15);
+    if (mode == nullptr) return c.expect(false, "app 裡沒有模式 15（少了它的權重檔）");
+    const PictureSize large = mode->picture;
+    c.expect(large == PictureSize{192, 144} && mode->large_picture() && !mode->pilot_free(), "模式 15 的畫面是 " + large.text());
+    for (const int id : {11, 12, 13, 14}) {
+        const ModeInfo* standard = modes::find(id);
+        c.expect(standard != nullptr && standard->picture == kStandardPicture && !standard->large_picture() && !standard->pilot_free(), "模式 " + std::to_string(id) + " 的畫面應該是 96×72、有導頻");
+    }
+    c.expect(mode->label() == "模式 15 · FM 大畫面" && mode->menu_detail() == "FM 大畫面" && mode->content_text() == "192×144" && contains(mode->summary(), "192×144") && contains(mode->summary(), mode->model_name),
+             "說明是「" + mode->label() + "」「" + mode->content_text() + "」「" + mode->summary() + "」");
+    if (const ModeInfo* eleven = modes::find(11)) {
+        c.expect(eleven->learned_values == mode->learned_values && eleven->learned_width == mode->learned_width && std::fabs(eleven->frame_seconds - mode->frame_seconds) < 1e-9 &&
+                     eleven->model_name != mode->model_name,
+                 "模式 15 的幀應該和模式 11 相同、模型不同（模式 11 用 " + eleven->model_name + "，模式 15 用 " + mode->model_name + "）");
+    }
+    const Picture small = picture_or_gray("coffee"), big = picture_or_gray("coffee", large);
+    const Picture other = picture_or_gray("rocket"), other_big = picture_or_gray("rocket", large);
+    bool doubled = big.size == large && big.rgb.size() == static_cast<std::size_t>(large.rgb_bytes());
+    for (int y = 0; y < large.height && doubled; y += 7) {
+        for (int x = 0; x < large.width && doubled; x += 5) {
+            doubled = std::equal(big.rgb.begin() + (static_cast<std::ptrdiff_t>(y) * large.width + x) * 3, big.rgb.begin() + (static_cast<std::ptrdiff_t>(y) * large.width + x) * 3 + 3,
+                                 small.rgb.begin() + (static_cast<std::ptrdiff_t>(y / 2) * kImageWidth + x / 2) * 3);
+        }
+    }
+    c.expect(doubled, "測試圖放大成 192×144 應該是每個像素重複 2×2");
+
+    // ---- 編碼器只收目前這個模式的大小
+    {
+        CoreTransmitter tx;
+        tx.set_callsign("N0CALL");
+        c.expect(tx.set_mode(15) && tx.picture_size() == large && !tx.encode(small).has_value(), "模式 15 收下了 96×72 的畫面");
+        c.expect(tx.set_mode(11) && tx.picture_size() == kStandardPicture && !tx.encode(big).has_value(), "模式 11 收下了 192×144 的畫面");
+        c.expect(!tx.set_mode(99) && tx.picture_size() == kStandardPicture, "換到不存在的模式之後，畫面的大小變了");
+        // 大小不對而被拒絕的那幾次不算數：接著編出來的還是第 0 幀
+        const std::optional<EncodedFrame> first = tx.encode(small);
+        c.expect(first && first->sequence == 0 && first->mode_id == 11 && first->preview && first->preview->size == kStandardPicture, "被拒絕的畫面不應該動到發射機的狀態");
+    }
+
+    // ---- 縮放：任意大小 → 192×144；兩種大小之間互換
+    {
+        const auto pixel = [](const Picture& picture, int x, int y) { return picture.rgb[(static_cast<std::size_t>(y) * static_cast<std::size_t>(picture.width()) + static_cast<std::size_t>(x)) * 3]; };
+        SourceFrame same;   // 來源剛好是 192×144：原樣
+        same.width = large.width;
+        same.height = large.height;
+        same.rgb = big.rgb;
+        c.expect(demo::psnr(scale_frame(same, ScaleMode::fill, large), big) > 60 && demo::psnr(scale_frame(same, ScaleMode::fit, large), big) > 60, "192×144 的來源縮成 192×144 應該原樣");
+        // 來源是 384×288（測試圖每個像素重複 4×4）：縮成 192×144 是放大兩倍的那一張，縮成 96×72 是原來那一張
+        const Picture quad = replicate_picture(small, PictureSize{kImageWidth * 4, kImageHeight * 4});
+        SourceFrame four;
+        four.width = quad.width();
+        four.height = quad.height();
+        four.rgb = quad.rgb;
+        const Picture to_large = scale_frame(four, ScaleMode::fill, large), to_small = scale_frame(four, ScaleMode::fill);
+        c.expect(to_large.size == large && demo::psnr(to_large, big) > 60 && to_small.size == kStandardPicture && demo::psnr(to_small, small) > 60, "384×288 的來源縮成兩種大小，應該各自就是那個大小的測試圖");
+        // 16:9 的白色畫面：填滿時整張都是白的，完整時上下補黑（192×144 裡上下各 18 列）
+        SourceFrame wide;
+        wide.width = 320;
+        wide.height = 180;
+        wide.rgb.assign(static_cast<std::size_t>(wide.width) * wide.height * 3, 255);
+        const Picture filled = scale_frame(wide, ScaleMode::fill, large), fitted = scale_frame(wide, ScaleMode::fit, large);
+        c.expect(filled.size == large && pixel(filled, 96, 0) == 255 && pixel(filled, 96, 143) == 255 && pixel(filled, 0, 72) == 255 && pixel(filled, 191, 72) == 255, "192×144 填滿：16:9 的畫面要蓋滿整張");
+        c.expect(pixel(fitted, 96, 0) == 0 && pixel(fitted, 96, 17) == 0 && pixel(fitted, 96, 18) == 255 && pixel(fitted, 96, 125) == 255 && pixel(fitted, 96, 126) == 0 && pixel(fitted, 96, 143) == 0 &&
+                     pixel(fitted, 0, 72) == 255 && pixel(fitted, 191, 72) == 255,
+                 "192×144 完整：16:9 的畫面上下各補 18 列黑、左右到邊");
+        const Picture up = resize_picture(small, large), down = resize_picture(big, kStandardPicture);
+        c.expect(up.size == large && down.size == kStandardPicture && demo::psnr(down, small) > 60, "192×144 的畫面換成 96×72 應該就是原來那一張（PSNR " + number(demo::psnr(down, small), 1) + "）");
+        // 96×72 放大成 192×144 是內插的，縮回來不會逐位元相同（量到約 29 dB）；換成別張圖的話差得很遠（約 9 dB）
+        const double back = demo::psnr(resize_picture(up, kStandardPicture), small), wrong = demo::psnr(resize_picture(up, kStandardPicture), other);
+        c.expect(back > 25 && back > wrong + 10, "96×72 放大成 192×144 再縮回來：和原圖 " + number(back, 1) + " dB，和另一張圖 " + number(wrong, 1) + " dB");
+        c.expect(resize_picture(small, kStandardPicture).rgb == small.rgb && resize_picture(big, large).rgb == big.rgb, "已經是那個大小的畫面要原樣回傳");
+        c.expect(demo::psnr(small, big) == 0, "大小不一樣的兩張畫面不能拿來比");
+    }
+
+    // ---- 畫布：192×144 的字帶是 96×72 的兩倍高（佔畫面的比例相同），字帶以外一個位元組都不動
+    CanvasLayer::set_fonts(find_fonts(i18n::language()).bold);
+    const bool fonts = CanvasLayer::has_fonts();
+    if (fonts) {
+        const CanvasStyle style{"CQ N0CALL", CanvasPosition::bottom};
+        const std::shared_ptr<const CanvasLayer> small_layer = CanvasLayer::make(style), layer = CanvasLayer::make(style, large);
+        c.expect(small_layer != nullptr && layer != nullptr, "做不出 192×144 的圖層");
+        if (small_layer && layer) {
+            c.expect(layer->size() == large && small_layer->size() == kStandardPicture && layer->lines() == small_layer->lines() && layer->font_size() == small_layer->font_size() &&
+                         layer->first_row() == 2 * small_layer->first_row() && layer->last_row() == 2 * small_layer->last_row() && layer->last_row() == large.height,
+                     "192×144 的字帶在第 " + std::to_string(layer->first_row()) + "–" + std::to_string(layer->last_row() - 1) + " 列（96×72 的是 " + std::to_string(small_layer->first_row()) + "–" +
+                         std::to_string(small_layer->last_row() - 1) + "）");
+            const Picture gray(large, 128), small_gray(kStandardPicture, 128);
+            const Picture stamped = layer->apply(gray), small_stamped = small_layer->apply(small_gray);
+            bool outside_untouched = stamped.size == large;
+            for (std::size_t i = 0; outside_untouched && i < static_cast<std::size_t>(layer->first_row()) * static_cast<std::size_t>(large.width) * 3; ++i) outside_untouched = stamped.rgb[i] == 128;
+            c.expect(outside_untouched, "192×144：字帶以外的畫面被改了");
+            // 字是照兩倍的字級重新畫的（不是把 96×72 的點陣放大，也不是照原來的字級畫在角落）：墨量大約四倍，左右的範圍是兩倍
+            const Ink ink = canvas_ink(stamped, layer->first_row(), layer->last_row()), small_ink = canvas_ink(small_stamped, small_layer->first_row(), small_layer->last_row());
+            const double ratio = small_ink.amount > 0 ? ink.amount / small_ink.amount : 0;
+            c.expect(small_ink.amount > 60 && ratio > 3.4 && ratio < 4.6, "192×144 的字的墨量是 96×72 的 " + number(ratio, 2) + " 倍（預期約 4 倍；96×72 的是 " + number(small_ink.amount, 0) + "）");
+            c.expect(small_ink.left >= 0 && std::abs(ink.left - 2 * small_ink.left) <= 4 && std::abs(ink.right - 2 * small_ink.right) <= 4,
+                     "192×144 的字在第 " + std::to_string(ink.left) + "–" + std::to_string(ink.right) + " 行，96×72 的在第 " + std::to_string(small_ink.left) + "–" + std::to_string(small_ink.right) + " 行（應該是兩倍）");
+            // 大小不對的畫面原樣回傳，不會印歪
+            c.expect(layer->apply(small).rgb == small.rgb && small_layer->apply(big).rgb == big.rgb, "圖層印到了大小不對的畫面上");
+            c.info("畫布：192×144 的字帶 " + std::to_string(layer->last_row() - layer->first_row()) + " 列（96×72 的是 " + std::to_string(small_layer->last_row() - small_layer->first_row()) + " 列），墨量 " +
+                   number(ratio, 2) + " 倍");
+        }
+        const std::shared_ptr<const CanvasLayer> top = CanvasLayer::make(CanvasStyle{"CQ N0CALL", CanvasPosition::top}, large);
+        c.expect(top && top->first_row() == 0 && top->last_row() > 16 && top->last_row() < large.height / 2, "192×144：印在上緣");
+        c.expect(CanvasLayer::make(style, PictureSize{100, 80}) == nullptr && CanvasLayer::make(style, PictureSize{192, 100}) == nullptr, "不是 96×72 整數倍的畫面不能印字");
+    } else {
+        c.info("找不到字型，畫布的部分沒有測");
+    }
+
+    // ---- 收到的 192×144 畫面：進「最近收到」，存成圖檔也是 192×144、像素相同
+    {
+        CoreTransmitter tx;
+        tx.set_mode(15);
+        tx.set_callsign("N0CALL");
+        std::vector<float> audio = demo::silence(0.3);
+        const std::optional<EncodedFrame> frame = tx.encode(big);
+        if (frame) audio.insert(audio.end(), frame->samples.begin(), frame->samples.end());
+        const std::vector<float> tail = tx.finish();
+        audio.insert(audio.end(), tail.begin(), tail.end());
+        App history(Settings::load(""), false);
+        for (const DecodedFrame& decoded : decode(audio)) history.add(decoded, snapshot::time_today(10, 0, 0));
+        const App::ReceivedFrame* shown = history.displayed_frame();
+        c.expect(shown != nullptr && shown->mode_id == 15 && shown->callsign == "N0CALL" && shown->picture && shown->picture->size == large && history.last_result == App::LastResult::ok,
+                 "模式 15 的幀沒有進「最近收到」，或大小不是 192×144");
+        if (shown != nullptr && shown->picture) {
+            if (frame && frame->preview) c.expect(demo::psnr(*shown->picture, *frame->preview) > 30, "收到的 192×144 畫面應該和發射端的預覽幾乎一樣");
+            const std::string png = work + "/大畫面 large.png";
+            history.save_displayed_frame(png);
+            const SourceFramePtr saved = load_image_file(png);
+            c.expect(saved && saved->width == large.width && saved->height == large.height && saved->rgb == shown->picture->rgb && !history.notice.has_value(),
+                     "存出來的 PNG 應該是 192×144，而且和收到的畫面一模一樣" + (saved ? "（存成 " + std::to_string(saved->width) + "×" + std::to_string(saved->height) + "）" : std::string("（讀不回來）")));
+        }
+    }
+
+    // ---- 整個發射流程
+    Rig rig(15);
+    App& app = *rig.app;
+    // 來源是 384×288（測試圖每個像素重複 4×4）：縮成 192×144 剛好是放大兩倍的那一張，縮成 96×72 是原來那一張
+    rig.set_still(replicate_picture(other, PictureSize{kImageWidth * 4, kImageHeight * 4}));
+    c.expect(rig.wait(5, [&] { return app.source_preview != nullptr && app.source_preview->size == large && app.can_transmit(); }), "選了模式 15，預覽卻不是 192×144");
+    c.expect(app.tx_picture_size() == large, "送出的大小是 " + app.tx_picture_size().text());
+    if (app.source_preview) c.expect(demo::psnr(*app.source_preview, other_big) > 45, "預覽應該是來源縮成 192×144 的樣子");
+    Picture expected = other_big;
+    if (fonts) {
+        // 畫布開著：預覽上的字是照 192×144 印的
+        app.settings.canvas_text = "CQ TEST";
+        app.set_canvas_enabled(true);
+        expected = app.apply_canvas(other_big);
+        c.expect(expected.size == large && demo::psnr(expected, other_big) < 40, "畫布打開時 192×144 的畫面上要有字");
+        c.expect(rig.wait(5, [&] { return app.source_preview != nullptr && app.source_preview->size == large && demo::psnr(*app.source_preview, expected) > 45; }), "打開畫布之後，預覽不是印好字的 192×144");
+    }
+    app.start_transmit();
+    c.expect(rig.wait(40, [&] { return app.tx_frames_sent >= 1 || app.tx_phase == App::TxPhase::idle; }) && app.tx_phase != App::TxPhase::idle, "模式 15 沒有送出畫面：" + app.notice.value_or(""));
+    c.expect(app.tx_preview != nullptr && app.tx_preview->size == large && app.tx_mode_id == 15 && app.tx_picture_size() == large, "發射中的預覽不是 192×144");
+    app.stop_transmit();
+    c.expect(rig.wait_idle(20), "要回到待機");
+    c.expect(rig.ptt->keys() == std::vector<bool>({true, false}) && !app.notice.has_value(), "模式 15 的發射要正常結束：" + app.notice.value_or(""));
+    const std::vector<DecodedFrame> frames = decode(rig.sink->take());
+    c.expect(!frames.empty() && static_cast<int>(frames.size()) == app.tx_frames_sent, "送出 " + std::to_string(app.tx_frames_sent) + " 張，解回來 " + std::to_string(frames.size()) + " 張");
+    for (std::size_t i = 0; i < frames.size(); ++i) {
+        const DecodedFrame& frame = frames[i];
+        c.expect(frame.decoded && frame.header_ok && frame.callsign == "BX4ACP" && frame.mode_id == 15 && frame.picture && frame.picture->size == large,
+                 "送出去的第 " + std::to_string(i + 1) + " 張不是模式 15、192×144" + (frame.picture ? "（" + frame.picture->size.text() + "）" : std::string()));
+    }
+    if (!frames.empty() && frames[0].picture) {
+        // 編碼有損失，和預覽不會完全一樣；但要比沒印字的、比另一張圖都像
+        const double own = demo::psnr(*frames[0].picture, expected), plain = demo::psnr(*frames[0].picture, other_big), wrong = demo::psnr(*frames[0].picture, big);
+        c.expect(own > 20 && own > wrong + 5 && (!fonts || own > plain), "送出去的第一張解回來：和預覽 " + number(own, 1) + " dB、和沒印字的 " + number(plain, 1) + " dB、和另一張圖 " + number(wrong, 1) + " dB");
+        c.info("發射：送出 " + std::to_string(frames.size()) + " 張都是模式 15、192×144，第一張解回來和預覽 " + number(own, 1) + " dB（和沒印字的 " + number(plain, 1) + " dB）");
+    }
+    // 換回模式 11：預覽變回 96×72，字也照 96×72 重新印
+    app.settings.tx_mode_id = 11;
+    c.expect(rig.wait(5, [&] { return app.source_preview != nullptr && app.source_preview->size == kStandardPicture; }) && app.tx_picture_size() == kStandardPicture, "換回模式 11 之後預覽沒有變回 96×72");
+    c.expect(rig.wait(5, [&] { return app.source_preview != nullptr && demo::psnr(*app.source_preview, app.apply_canvas(other)) > 45; }), "換回模式 11 之後，預覽應該是來源縮成 96×72、字照 96×72 印的樣子");
+}
+
+/// 模式 5、6、7：給 FM 用的大畫面，幀裡沒有導頻（同樣的時間多送 2 成的資料）。
+///   * 模式表：三個都是 192×144、沒有導頻，每張 2.29、2.88、4.43 秒；模式 5 和 15 用的是同一個模型
+///   * 選單：排在模式 15 後面自成一組，由快到慢；各處的說明寫得出它是哪一種
+///   * 一幀接一幀地送，中間換模式（15 → 5 → 7，最後換回畫面是 96×72 的模式 12）：每一幀都要收到，模式與畫面都對
+///     （核心的收發在「每個模式的收發」那一項每個模式各跑過一次；這裡看的是連續發射中換成另一種幀、另一種畫面大小）
+///   * 收到的這一串進了「最近收到」，是同一段（存成影片時一起存），裡面的畫面大小不只一種
+void test_pilot_free(Check& c) {
+    struct Expected {
+        int id;
+        double seconds;
+        const char* tier;
+    };
+    const Expected expected[] = {{5, 2.293, "標準"}, {6, 2.880, "較細"}, {7, 4.427, "細緻"}};
+    const PictureSize large{192, 144};
+    bool complete = true;
+    std::string details;
+    for (const Expected& item : expected) {
+        const ModeInfo* mode = modes::find(item.id);
+        if (mode == nullptr) {
+            c.expect(false, "app 裡沒有模式 " + std::to_string(item.id) + "（少了它的權重檔）");
+            complete = false;
+            continue;
+        }
+        c.expect(mode->pilot_free() && mode->large_picture() && mode->picture == large, "模式 " + std::to_string(item.id) + " 不是沒有導頻的大畫面");
+        c.expect(std::fabs(mode->frame_seconds - item.seconds) < 0.001, "模式 " + std::to_string(item.id) + " 每張 " + number(mode->frame_seconds, 3) + " 秒，預期 " + number(item.seconds, 3));
+        c.expect(mode->label() == "模式 " + std::to_string(item.id) + " · FM 無導頻" && mode->menu_detail() == item.tier && mode->content_text() == "192×144" && contains(mode->summary(), "沒有導頻") &&
+                     contains(mode->summary(), "192×144") && contains(mode->summary(), mode->model_name),
+                 "模式 " + std::to_string(item.id) + " 的說明是「" + mode->label() + "」「" + mode->menu_detail() + "」「" + mode->content_text() + "」「" + mode->summary() + "」");
+        details += (details.empty() ? "" : "；") + mode->label() + "：" + mode->seconds_text() + "、" + mode->menu_detail() + "、模型 " + mode->model_name;
+    }
+    // 有導頻的模式都不能被當成這一類
+    for (const int id : {11, 12, 13, 14, 15}) {
+        if (const ModeInfo* mode = modes::find(id)) c.expect(!mode->pilot_free(), "模式 " + std::to_string(id) + " 被當成沒有導頻的");
+    }
+    const ModeInfo* five = modes::find(5);
+    const ModeInfo* fifteen = modes::find(15);
+    if (five != nullptr && fifteen != nullptr) {
+        c.expect(five->model_name == fifteen->model_name && five->learned_values == fifteen->learned_values, "模式 5 和 15 用的應該是同一個模型（" + five->model_name + "、" + fifteen->model_name + "）");
+        c.expect(five->frame_seconds < fifteen->frame_seconds, "模式 5 應該比模式 15 快");
+    }
+    if (!complete || fifteen == nullptr || modes::find(12) == nullptr) return;
+    c.info(details);
+
+    // 連續發射中換模式：15（有導頻）→ 5 → 7（都沒有導頻）→ 12（有導頻，畫面是 96×72），各兩幀，中間沒有空檔
+    CoreTransmitter tx;
+    tx.set_callsign("n0call");
+    std::vector<float> audio = demo::silence(0.3);
+    struct Sent {
+        int mode_id;
+        PicturePtr preview;
+    };
+    std::vector<Sent> sent;
+    for (const int id : {15, 5, 7, 12}) {
+        const ModeInfo* mode = modes::find(id);
+        c.expect(tx.set_mode(id) && tx.picture_size() == mode->picture, "模式 " + std::to_string(id) + " 設定不了");
+        for (const char* name : {"coffee", "rocket"}) {
+            const std::optional<EncodedFrame> frame = tx.encode(picture_or_gray(name, mode->picture));
+            if (!frame) {
+                c.expect(false, "模式 " + std::to_string(id) + " 編碼失敗");
+                continue;
+            }
+            audio.insert(audio.end(), frame->samples.begin(), frame->samples.end());
+            sent.push_back({id, frame->preview});
+        }
+    }
+    const std::vector<float> tail = tx.finish();
+    audio.insert(audio.end(), tail.begin(), tail.end());
+    const std::vector<DecodedFrame> got = decode(audio);
+    std::string sent_ids, got_ids;
+    for (const Sent& frame : sent) sent_ids += std::to_string(frame.mode_id) + " ";
+    for (const DecodedFrame& frame : got) got_ids += std::to_string(frame.mode_id) + (frame.decoded ? " " : "✗ ");
+    c.expect(got.size() == sent.size() && got_ids == sent_ids, "送的是模式 " + sent_ids + "，收到的是 " + got_ids);
+    double worst = 99;
+    for (std::size_t i = 0; i < got.size() && i < sent.size(); ++i) {
+        const DecodedFrame& frame = got[i];
+        const ModeInfo* mode = modes::find(sent[i].mode_id);
+        const bool ok = frame.decoded && frame.header_ok && frame.callsign == "N0CALL" && frame.mode_id == sent[i].mode_id && frame.sequence == static_cast<int>(i) && frame.picture &&
+                        frame.picture->size == mode->picture;
+        c.expect(ok, "第 " + std::to_string(i + 1) + " 幀（模式 " + std::to_string(sent[i].mode_id) + "）的內容不對" + (frame.picture ? "：畫面 " + frame.picture->size.text() : std::string("：沒有畫面")) +
+                         "、幀序號 " + std::to_string(frame.sequence));
+        if (ok && sent[i].preview) {
+            const double same = demo::psnr(*frame.picture, *sent[i].preview);
+            worst = std::min(worst, same);
+            c.expect(same > 30, "第 " + std::to_string(i + 1) + " 幀（模式 " + std::to_string(sent[i].mode_id) + "）：收到的應該和發射端的預覽幾乎一樣，PSNR " + number(same, 1));
+        }
+    }
+    c.info("連續送模式 " + sent_ids + "：收到 " + std::to_string(got.size()) + "/" + std::to_string(sent.size()) + " 張，和各自的預覽最少 " + number(worst, 1) + " dB");
+
+    // 收到的這一串進了「最近收到」：一張接一張、同一個呼號，是同一段；裡面有兩種畫面大小
+    App app(Settings::load(""), false);
+    double time = snapshot::time_today(10, 0, 0);
+    for (const DecodedFrame& frame : got) {
+        const ModeInfo* mode = modes::find(frame.mode_id);
+        time += mode != nullptr ? mode->frame_seconds : 1.0;
+        app.add(frame, time);
+    }
+    const std::vector<App::ReceivedFrame> sequence = app.displayed_sequence();
+    bool has_large = false, has_standard = false;
+    for (const App::ReceivedFrame& frame : sequence) {
+        if (!frame.picture) continue;
+        has_large = has_large || frame.picture->size == large;
+        has_standard = has_standard || frame.picture->size == kStandardPicture;
+    }
+    c.expect(app.history.size() == sent.size() && sequence.size() == sent.size() && has_large && has_standard, "換了模式的這一串應該是同一段（" + std::to_string(sequence.size()) + "／" + std::to_string(sent.size()) + " 張），裡面有兩種畫面大小");
+    const App::VideoTimeline timeline = App::video_timeline(sequence, true);
+    const ModeInfo* last = modes::find(12);
+    c.expect(timeline.pictures.size() == sequence.size() && std::fabs(timeline.last_hold - std::max(1.0, last->frame_seconds)) < 1e-6, "影片的時間軸：最後一張停留它那個模式一張的長度");
+}
+
+/// 圖片序列與「存成影片時印上訊雜比」配上畫面是 192×144 的模式（用模式 5）：這兩樣原本是照 96×72 寫的，
+/// 這裡確認它們跟著模式的畫面大小。
+///   * 預覽：模式 12 時是那張圖縮成 96×72 的樣子；換成模式 5，重算成 192×144；移到下一張也是
+///   * 發射：兩張依序各送一次、自動停止；解回來是模式 5、192×144，各自就是那一張圖縮成 192×144 的樣子
+///   * 影片的一格：192×144 的畫面一樣是 960×720（每個像素放大五倍），字印在同一個位置、一樣大，那一塊以外不受影響
+///   * 影片實際寫出來再讀回：一段裡有 96×72 也有 192×144 的畫面時，每一張都是它自己放大的樣子，192×144 的細節還在；
+///     左上角是各自的訊雜比；沒勾的時候左上角是原來的畫面
+void test_large_image_sequence(Check& c, const std::string& work) {
+    const ModeInfo* mode = modes::find(5);
+    if (mode == nullptr || !mode->large_picture()) return c.expect(false, "app 裡沒有模式 5（少了它的權重檔）");
+    const PictureSize large = mode->picture;
+    const std::string folder = work + "/大畫面 sequence-fm";
+    SDL_CreateDirectory(folder.c_str());
+    const std::vector<Picture> pictures = {picture_or_gray("coffee"), picture_or_gray("rocket")};
+    std::vector<Picture> references, small;   // 各張圖縮成 192×144、縮成 96×72 的樣子
+    for (std::size_t i = 0; i < pictures.size(); ++i) {
+        const std::string path = folder + "/pic" + std::to_string(i + 1) + ".png";
+        const SourceFramePtr loaded = demo::write_picture_png(pictures[i], path, 4) ? ImageSequence::load(path) : nullptr;
+        if (!loaded) return c.expect(false, "測試用的圖片檔做不出來");
+        references.push_back(scale_frame(*loaded, ScaleMode::fill, large));
+        small.push_back(scale_frame(*loaded, ScaleMode::fill));
+    }
+    c.expect(references[0].size == large && small[0].size == kStandardPicture, "兩種大小的對照圖");
+
+    Rig rig(12);   // 先用畫面是 96×72 的模式
+    App& app = *rig.app;
+    app.set_source_kind(SourceKind::images);
+    c.expect(app.open_images({folder}, false) == 2, "選資料夾之後有 " + std::to_string(app.image_files.size()) + " 張");
+    const auto preview_is = [&app](const Picture& wanted) { return app.source_preview != nullptr && app.source_preview->size == wanted.size && demo::psnr(*app.source_preview, wanted) > 45; };
+    c.expect(rig.wait(10, [&] { return preview_is(small[0]) && app.can_transmit(); }), "模式 12：預覽不是第一張縮成 96×72 的樣子");
+    // 換成畫面是 192×144 的模式：預覽重算成那個大小
+    app.settings.tx_mode_id = mode->id;
+    c.expect(rig.wait(10, [&] { return preview_is(references[0]); }), "換成模式 5 之後，預覽沒有變成第一張縮成 192×144 的樣子");
+    c.expect(app.tx_picture_size() == large, "送出的大小是 " + app.tx_picture_size().text());
+    app.select_image(1);
+    c.expect(rig.wait(10, [&] { return preview_is(references[1]); }), "位置移到第二張，預覽不是第二張縮成 192×144 的樣子");
+    app.select_image(0);
+    c.expect(rig.wait(10, [&] { return preview_is(references[0]); }), "位置移回第一張，預覽沒有跟著換");
+
+    // 兩張依序各送一次，送完自己停
+    app.start_transmit();
+    c.expect(app.tx_phase != App::TxPhase::idle && rig.wait(40, [&] { return app.tx_phase == App::TxPhase::idle; }), "發射沒有結束：" + app.notice.value_or(""));
+    if (app.tx_phase != App::TxPhase::idle) {
+        app.abort_transmit();
+        rig.wait(10, [&] { return app.tx_phase == App::TxPhase::idle; });
+    }
+    c.expect(rig.wait(3, [&] { return rig.ptt->keys().size() == 2; }) && rig.ptt->keys() == std::vector<bool>({true, false}), "PTT 不是「按下一次、放開一次」");
+    c.expect(!app.notice.has_value(), "正常結束不應該有訊息：" + app.notice.value_or(""));
+    const std::vector<DecodedFrame> frames = decode(rig.sink->take());
+    int good = 0;
+    for (const DecodedFrame& frame : frames) {
+        if (frame.decoded && frame.header_ok && frame.callsign == "BX4ACP" && frame.mode_id == mode->id && frame.picture && frame.picture->size == large) ++good;
+    }
+    c.expect(good == 2 && frames.size() == 2 && app.tx_frames_sent == 2,
+             "送出 " + std::to_string(app.tx_frames_sent) + " 張，收到 " + std::to_string(frames.size()) + " 張，其中是模式 5、192×144 而且解得出來的有 " + std::to_string(good) + " 張，預期都是 2");
+    if (good == 2 && frames.size() == 2) {
+        double worst = 99;
+        for (std::size_t i = 0; i < 2; ++i) {
+            // 編碼有損失，和原圖不會完全一樣；但要比另一張像得多
+            const double own = demo::psnr(*frames[i].picture, references[i]), wrong = demo::psnr(*frames[i].picture, references[1 - i]);
+            worst = std::min(worst, own);
+            c.expect(own > 20 && own > wrong + 5, "第 " + std::to_string(i + 1) + " 張解回來和自己那張圖 " + number(own, 1) + " dB、和另一張 " + number(wrong, 1) + " dB");
+        }
+        c.info("兩張依序送出、自動停止，解回來是模式 5、192×144，和原圖最少 " + number(worst, 1) + " dB");
+    }
+    c.expect(app.image_index == 0, "送完之後位置沒有回到第一張（在第 " + std::to_string(app.image_index + 1) + " 張）");
+
+    // ---- 影片的一格：192×144 的畫面
+    const Picture fine = checkered(references[1]);   // 相鄰的像素都不一樣：看得出細節有沒有留著
+    const int video_w = sequence_video::kWidth, video_h = sequence_video::kHeight;
+    const std::vector<std::uint8_t> bare = sequence_video::frame_image(fine, "");
+    {
+        bool exact = bare.size() == static_cast<std::size_t>(video_w) * video_h * 3;
+        for (int y = 0; y < video_h && exact; y += 3) {
+            for (int x = 0; x < video_w && exact; x += 2) {
+                exact = std::equal(bare.begin() + (static_cast<std::ptrdiff_t>(y) * video_w + x) * 3, bare.begin() + (static_cast<std::ptrdiff_t>(y) * video_w + x) * 3 + 3,
+                                   fine.rgb.begin() + (static_cast<std::ptrdiff_t>(y / 5) * large.width + x / 5) * 3);
+            }
+        }
+        c.expect(exact, "192×144 的畫面在影片的一格裡應該是每個像素放大成 5×5");
+    }
+    VideoStamp::set_fonts(find_fonts(i18n::language()).mono_bold);
+    if (!VideoStamp::has_fonts()) return c.skip("找不到字型，訊雜比印不出來，存影片印字的部分沒有測", "fonts");
+    {
+        const std::string label = "SNR 12.3 dB";
+        const VideoStamp::Rect rect = VideoStamp::rect_for(label);
+        const std::vector<std::uint8_t> stamped = sequence_video::frame_image(fine, label), standard = sequence_video::frame_image(pictures[1], label);
+        // 那一塊裡有字；那一塊以外和沒印的一模一樣；白字落在哪些點，和印在 96×72 的畫面上完全相同（字的位置與大小不跟著畫面的大小變）
+        bool outside_same = stamped.size() == bare.size(), same_glyphs = stamped.size() == standard.size();
+        int white = 0;
+        for (int y = 0; y < video_h && (outside_same || same_glyphs); ++y) {
+            for (int x = 0; x < video_w; ++x) {
+                const std::size_t at = (static_cast<std::size_t>(y) * video_w + static_cast<std::size_t>(x)) * 3;
+                const bool inside = x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height;
+                if (!inside) {
+                    outside_same = outside_same && std::equal(stamped.begin() + static_cast<std::ptrdiff_t>(at), stamped.begin() + static_cast<std::ptrdiff_t>(at) + 3, bare.begin() + static_cast<std::ptrdiff_t>(at));
+                    continue;
+                }
+                // 方塊裡沒有字的地方最亮也只有 255 × 0.38，所以夠亮的一定是字
+                const bool here = stamped[at + 1] >= 250, there = standard[at + 1] >= 250;
+                same_glyphs = same_glyphs && here == there;
+                white += here ? 1 : 0;
+            }
+        }
+        const double inside = region_difference(stamped, bare, video_w, rect.x, rect.y, rect.width, rect.height);
+        c.expect(outside_same && inside >= 20, "192×144 的畫面印字：那一塊和沒印的平均差 " + number(inside, 1) + "，那一塊以外" + (outside_same ? "沒有動" : "被動到了"));
+        c.expect(same_glyphs && white > 300, "字的位置或大小跟著畫面的大小變了（白字 " + std::to_string(white) + " 點）");
+        c.info("影片的一格 " + std::to_string(video_w) + "×" + std::to_string(video_h) + "，192×144 的畫面放大 5 倍，印字的那一塊和沒印的平均差 " + number(inside, 0) + "／255");
+    }
+
+    // ---- 影片實際寫出來再讀回：一段裡畫面大小不一樣（中途換了模式）
+    if (!FileSource::ffmpeg_available()) return c.skip("這台電腦沒有 ffmpeg，寫成影片檔的部分沒有測", "ffmpeg");
+    const std::vector<Picture> shots = {picture_or_gray("cat"), fine, references[0]};   // 96×72、192×144（有格紋）、192×144
+    const int shot_modes[3] = {12, 5, 15};
+    const double levels[3] = {12.3, -4.7, 28.0};
+    const double base = snapshot::time_today(10, 0, 0);
+    std::vector<App::ReceivedFrame> received;
+    for (int i = 0; i < 3; ++i) {
+        App::ReceivedFrame frame;
+        frame.id = static_cast<std::uint64_t>(i + 1);
+        frame.picture = std::make_shared<Picture>(shots[static_cast<std::size_t>(i)]);
+        frame.mode_id = shot_modes[i];
+        frame.callsign = "N0CALL";
+        frame.sequence = i;
+        frame.time = base + i;
+        frame.snr_db = levels[i];
+        received.push_back(frame);
+    }
+    std::vector<std::string> labels;
+    const App::VideoTimeline timeline = App::video_timeline(received, true);
+    for (const App::VideoPicture& picture : timeline.pictures) labels.push_back(picture.label);
+    if (labels.size() != 3) return c.expect(false, "時間軸的張數不對");
+    // 三張各隔一秒，最後一張停留它那個模式（模式 15）一張的長度
+    const double expected_seconds = 2.0 + timeline.last_hold;
+    App exporter(Settings::load(""), false);
+    const auto save = [&](bool stamp, const std::string& path) {
+        exporter.settings.stamp_video_snr = stamp;
+        exporter.notice.reset();
+        std::optional<bool> done;
+        exporter.export_sequence(received, path, [&done](bool ok) { done = ok; });
+        return demo::wait_until(&exporter, 60, [&] { return done.has_value(); }) && done.value_or(false);
+    };
+    const std::string stamped_path = work + "/大畫面 印訊雜比 stamped.mp4", plain_path = work + "/大畫面 不印 plain.mp4";
+    if (!save(true, stamped_path) || !save(false, plain_path)) return c.expect(false, "影片存不出來：" + exporter.notice.value_or(""));
+    {
+        FileSource file;
+        const std::optional<std::string> error = file.open(stamped_path);
+        const SourceFramePtr still = file.current_frame();
+        c.expect(!error && still && still->shown_width() == video_w && still->shown_height() == video_h && std::fabs(file.duration() - expected_seconds) < 0.3,
+                 "有 192×144 畫面的影片也應該是 960×720、長 " + number(expected_seconds) + " 秒，得到 " +
+                     (still ? std::to_string(still->shown_width()) + "×" + std::to_string(still->shown_height()) : std::string("—")) + "、" + number(file.duration()) + " 秒");
+    }
+    const int corner_w = 400, corner_h = 100;
+    const std::string corner_filter = "crop=" + std::to_string(corner_w) + ":" + std::to_string(corner_h) + ":0:0";
+    const std::string small_filter = "scale=" + std::to_string(large.width) + ":" + std::to_string(large.height) + ":flags=neighbor";
+    std::string summary;
+    for (int index = 0; index < 3; ++index) {
+        const double when = index + 0.5;   // 這一張顯示到一半的時候
+        const std::vector<std::uint8_t> stamped_corner = video_frame_at(stamped_path, when, corner_filter, corner_w, corner_h), plain_corner = video_frame_at(plain_path, when, corner_filter, corner_w, corner_h);
+        const std::vector<std::uint8_t> stamped_small = video_frame_at(stamped_path, when, small_filter, large.width, large.height), plain_small = video_frame_at(plain_path, when, small_filter, large.width, large.height);
+        if (stamped_corner.empty() || plain_corner.empty() || stamped_small.empty() || plain_small.empty()) {
+            c.expect(false, "第 " + std::to_string(index + 1) + " 張的那一格讀不回來");
+            continue;
+        }
+        const Picture& shot = shots[static_cast<std::size_t>(index)];
+        const std::string what = "第 " + std::to_string(index + 1) + " 張（" + shot.size.text() + "）";
+        // 影片的一格縮回 192×144（每 5×5 取一點）：就是那一張畫面；96×72 的那一張是每個像素重複 2×2。
+        // 印字的那一塊在 192×144 裡不超過最上面 14 列
+        const std::vector<std::uint8_t> wanted = replicate_picture(shot, large).rgb;
+        const double rest = region_difference(stamped_small, wanted, large.width, 0, 16, large.width, large.height - 16);
+        const double whole = region_difference(plain_small, wanted, large.width, 0, 0, large.width, large.height);
+        const double same = region_difference(stamped_small, plain_small, large.width, 0, 16, large.width, large.height - 16);
+        c.expect(rest <= 10 && whole <= 10 && same <= 3, what + "在影片裡不是它自己放大的樣子（印字的那一份和原圖平均差 " + number(rest, 1) + "、沒印的差 " + number(whole, 1) + "、兩份之間差 " + number(same, 1) + "）");
+        // 左上角：它自己的訊雜比；沒勾的那一份是原來的畫面
+        const std::vector<std::uint8_t> own = top_left(sequence_video::frame_image(shot, labels[static_cast<std::size_t>(index)]), video_w, corner_w, corner_h);
+        const std::vector<std::uint8_t> clean = top_left(sequence_video::frame_image(shot, ""), video_w, corner_w, corner_h);
+        const VideoStamp::Rect rect = VideoStamp::rect_for(labels[static_cast<std::size_t>(index)]);
+        const double match = region_difference(stamped_corner, own, corner_w, rect.x, rect.y, rect.width, rect.height);
+        const double unstamped = region_difference(stamped_corner, clean, corner_w, rect.x, rect.y, rect.width, rect.height);
+        const double untouched = region_difference(plain_corner, clean, corner_w, rect.x, rect.y, rect.width, rect.height);
+        c.expect(match <= 12 && unstamped >= 20 && untouched <= 12,
+                 what + "左上角不是「" + labels[static_cast<std::size_t>(index)] + "」（和預期的平均差 " + number(match, 1) + "、和沒印字的差 " + number(unstamped, 1) + "；沒勾的那一份和原來的畫面差 " + number(untouched, 1) + "）");
+        if (index == 1) {
+            // 有格紋的那一張：192×144 的細節要留著。要是畫面先被縮成 96×72 才放大，格紋會被抹平，和沒有格紋的那一張一樣
+            const double smoothed = region_difference(plain_small, references[1].rgb, large.width, 0, 0, large.width, large.height);
+            c.expect(smoothed >= whole + 6, "192×144 的細節在影片裡不見了（和有格紋的原圖平均差 " + number(whole, 1) + "，和沒有格紋的差 " + number(smoothed, 1) + "）");
+            summary += "；有格紋的那一張和原圖平均差 " + number(whole, 1) + "／255（和抹平的差 " + number(smoothed, 1) + "）";
+        }
+        summary += (index == 0 ? "" : "；") + std::string() + what + "左上角和預期的平均差 " + number(match, 1);
+    }
+    if (!summary.empty()) c.info("一段裡有 96×72 與 192×144 的畫面存成影片：" + summary);
+}
+
 void test_ui_render(Check& c, const std::string& work) {
     const std::string original = i18n::language();
     const std::unique_ptr<App> receiving = snapshot::make_receiving_app(true);
     const std::unique_ptr<App> images = snapshot::make_images_app(work);   // 待機，來源是圖片序列（三張，下一張要送的是第二張）
     c.expect(images->image_files.size() == 3 && images->image_index == 1 && images->source_preview != nullptr, "示範用的圖片序列沒有準備好");
+    // 給 FM 用的大畫面：收到的五張與右側欄的預覽都是 192×144，選的發射模式是幀裡沒有導頻的那一種
+    const std::unique_ptr<App> fm = snapshot::make_fm_app(0, true);
+    c.expect(fm != nullptr && fm->history.size() == 5 && fm->history.front().picture && fm->history.front().picture->size == PictureSize{192, 144} && fm->source_preview != nullptr &&
+                 fm->source_preview->size == PictureSize{192, 144} && fm->tx_picture_size() == PictureSize{192, 144},
+             "示範用的 FM 大畫面沒有準備好");
+    /// 把發射模式的選單打開：每個模式各有一列，而且整列都在視窗裡面。三組加起來比較高，按鈕下面放不下時要改開在上面，
+    /// 視窗很矮時貼著視窗的下緣
+    const auto menu_rows_inside = [&c](OffscreenUI& screen, int width, int height, const std::string& where) {
+        screen.ui().open_mode_menu();
+        screen.frames(3);
+        for (const ModeInfo& mode : modes::all()) {
+            const std::optional<UI::HitRect> row = screen.ui().rect_of("##moderow/" + std::to_string(mode.id));
+            c.expect(row && row->x >= 0 && row->y >= 0 && row->x + row->w <= static_cast<float>(width) && row->y + row->h <= static_cast<float>(height),
+                     where + "：模式選單裡沒有模式 " + std::to_string(mode.id) + " 的那一列，或跑出視窗" + (row ? "（第 " + number(row->y, 0) + "–" + number(row->y + row->h, 0) + " 點）" : std::string()));
+        }
+        keep_screen(screen, "mode-menu-" + where);
+        screen.press_escape();
+        screen.frames(2);
+    };
     {
         OffscreenUI screen(*receiving, 1280, 840, 1.0f);
         if (!screen.ok()) return c.expect(false, "離屏繪圖起不來：" + screen.error());
@@ -1805,10 +2426,7 @@ void test_ui_render(Check& c, const std::string& work) {
             c.expect(screen.ui().rect_of("##closesettings").has_value() && screen.ui().rect_of("##pttmode/serial").has_value(), language + "：設定沒有畫出來");
             screen.ui().show_settings = false;
             screen.frames(2);
-            screen.ui().open_mode_menu();
-            screen.frames(3);
-            c.expect(screen.ui().rect_of("##moderow/11").has_value(), language + "：模式選單沒有畫出來");
-            screen.press_escape();
+            menu_rows_inside(screen, 1280, 840, language + "-1280x840");
             screen.ui().open_schedule_menu();
             screen.frames(3);
             c.expect(screen.ui().rect_of("##armed").has_value(), language + "：定時發射的面板沒有畫出來");
@@ -1834,6 +2452,8 @@ void test_ui_render(Check& c, const std::string& work) {
                          where + "：圖片序列的那幾列太擠或跑出視窗");
                 c.expect(previous->y + previous->h <= loop->y && loop->y + loop->h <= level->y && loop->x + loop->w <= scale->x && level->y + level->h <= button->y + 1 && button->y + button->h < static_cast<float>(height),
                          where + "：右側欄的東西疊在一起或跑出視窗");
+                // 視窗縮到最小時，模式選單的每一列也都要在視窗裡
+                if (width == 1040) menu_rows_inside(side, width, height, language + "-1040x700");
             }
         }
         i18n::use(original);
@@ -1848,8 +2468,12 @@ void test_ui_render(Check& c, const std::string& work) {
         int width, height;
         float density;
     };
+    // 發射中的大畫面：正在送出的那一張是 192×144
+    const std::unique_ptr<App> fm_transmitting = fm ? snapshot::make_transmitting_app(fm->history, fm->settings.tx_mode_id) : nullptr;
+    if (fm_transmitting) c.expect(fm_transmitting->tx_preview != nullptr && fm_transmitting->tx_preview->size == PictureSize{192, 144}, "示範用的「發射中」不是 192×144 的畫面");
     for (const Size size : {Size{1040, 700, 1.0f}, Size{1280, 840, 1.0f}, Size{1920, 1200, 1.5f}}) {
-        for (App* app : {transmitting.get(), idle.get(), receiving.get(), images.get()}) {
+        for (App* app : {transmitting.get(), idle.get(), receiving.get(), images.get(), fm.get(), fm_transmitting.get()}) {
+            if (app == nullptr) continue;
             OffscreenUI screen(*app, size.width, size.height, size.density);
             screen.frames(3);
             const std::optional<UI::HitRect> button = screen.ui().rect_of("##transmit"), level = screen.ui().rect_of("##level");
@@ -1873,6 +2497,73 @@ void test_ui_render(Check& c, const std::string& work) {
     OffscreenUI crowded(*receiving, 1280, 840, 1.0f);
     crowded.frames(3);
     c.expect(crowded.ui().rect_of("##thumb/0").has_value() && !crowded.ui().rect_of("##thumb/200").has_value(), "306 張時只畫看得到的那幾列");
+}
+
+/// 介面上的畫面（主畫面、右側欄的預覽）就是那一張畫面的每個像素原樣放大、不內插：照畫面的每一格在螢幕上的正中間取一點，
+/// 要和那個像素一樣。96×72 與 192×144 的畫面都看——貼圖的大小要跟著畫面，不然大畫面畫出來會是錯的。
+/// 一般的螢幕（一點一個像素）與高解析度的螢幕（一點兩個像素）各算一次。
+///
+/// 比的時候容許差一格：不開視窗算圖用的是 SDL 的軟體繪圖，它把貼圖座標在每個頂點上取成整數的像素
+/// （SDL_render_sw.c 的 SW_QueueGeometry），圓角的畫面是一圈小三角形拼的，所以有些地方會錯開最多一格。
+/// 真的視窗用的是顯示卡的繪圖，座標是小數，沒有這回事。貼圖大小不對時畫出來的是另一回事，差一格救不回來。
+void test_ui_pictures(Check& c) {
+    const std::unique_ptr<App> standard = snapshot::make_receiving_app(true), fm = snapshot::make_fm_app(0, true);
+    struct Shown {
+        App* app;
+        PictureSize size;
+    };
+    for (const Shown shown : {Shown{standard.get(), kStandardPicture}, Shown{fm.get(), PictureSize{192, 144}}}) {
+        if (shown.app == nullptr) {
+            c.expect(false, "示範用的 " + shown.size.text() + " 畫面沒有準備好");
+            continue;
+        }
+        App& app = *shown.app;
+        app.settings.show_frame_snr = false;   // 主畫面左上角不要疊訊雜比的標示
+        const App::ReceivedFrame* frame = app.displayed_frame();
+        c.expect(frame != nullptr && frame->picture && frame->picture->size == shown.size && app.source_preview && app.source_preview->size == shown.size, "示範的畫面不是 " + shown.size.text());
+        if (frame == nullptr || !frame->picture || !app.source_preview) continue;
+        for (const float density : {1.0f, 2.0f}) {
+            OffscreenUI screen(app, 1280, 840, density);
+            if (!screen.ok()) return c.expect(false, "離屏繪圖起不來：" + screen.error());
+            screen.frames(3);
+            const std::vector<std::uint8_t> pixels = screen.pixels();
+            const int screen_w = screen.pixel_width(), screen_h = screen.pixel_height();
+            /// 畫在 id 那一塊的畫面和 picture 平均每個值差多少；那一塊沒有畫出來是 255
+            const auto difference = [&](const char* id, const Picture& picture) {
+                const std::optional<UI::HitRect> rect = screen.ui().rect_of(id);
+                if (!rect || pixels.size() != static_cast<std::size_t>(screen_w) * static_cast<std::size_t>(screen_h) * 3) return 255.0;
+                long long total = 0;
+                int count = 0;
+                // 每隔幾格取一格；離邊緣近的不取（四個角是圓的）
+                for (int py = 6; py < picture.height() - 6; py += 3) {
+                    for (int px = 6; px < picture.width() - 6; px += 3) {
+                        const int sx = static_cast<int>((rect->x + (static_cast<float>(px) + 0.5f) * rect->w / static_cast<float>(picture.width())) * density);
+                        const int sy = static_cast<int>((rect->y + (static_cast<float>(py) + 0.5f) * rect->h / static_cast<float>(picture.height())) * density);
+                        if (sx < 0 || sy < 0 || sx >= screen_w || sy >= screen_h) return 255.0;
+                        const std::uint8_t* got = pixels.data() + (static_cast<std::size_t>(sy) * static_cast<std::size_t>(screen_w) + static_cast<std::size_t>(sx)) * 3;
+                        // 這一格或它旁邊的八格裡最像的那一格
+                        int best = 3 * 255;
+                        for (int dy = -1; dy <= 1; ++dy) {
+                            for (int dx = -1; dx <= 1; ++dx) {
+                                const std::uint8_t* want = picture.rgb.data() + (static_cast<std::size_t>(py + dy) * static_cast<std::size_t>(picture.width()) + static_cast<std::size_t>(px + dx)) * 3;
+                                best = std::min(best, std::abs(static_cast<int>(got[0]) - want[0]) + std::abs(static_cast<int>(got[1]) - want[1]) + std::abs(static_cast<int>(got[2]) - want[2]));
+                            }
+                        }
+                        total += best;
+                        ++count;
+                    }
+                }
+                return count > 0 ? static_cast<double>(total) / (count * 3.0) : 255.0;
+            };
+            const double main_picture = difference("##picture", *frame->picture), preview = difference("##preview", *app.source_preview);
+            // 換一張別的畫面來比，差得很遠：確認比的真的是畫面的內容
+            const double other = difference("##picture", *app.source_preview);
+            const std::string where = shown.size.text() + "、一點 " + number(density, 0) + " 個像素";
+            c.expect(main_picture < 2.0 && preview < 2.0, where + "：畫出來的不是那一張畫面原樣放大（主畫面平均差 " + number(main_picture, 1) + "、預覽差 " + number(preview, 1) + "）");
+            c.expect(other > 20.0, where + "：拿另一張畫面來比也對得上（差 " + number(other, 1) + "），這個檢查沒有在看內容");
+            if (density == 1.0f) c.info(shown.size.text() + "：主畫面和那一張畫面平均差 " + number(main_picture, 2) + "／255、預覽差 " + number(preview, 2) + "（換成別張的話差 " + number(other, 0) + "）");
+        }
+    }
 }
 
 void test_ui_click(Check& c) {
@@ -1913,6 +2604,23 @@ void test_ui_click(Check& c) {
     c.expect(screen.click("##moderow/12") && app->settings.tx_mode_id == 12, "在選單裡選模式 12");
     screen.frames(2);
     c.expect(!screen.ui().rect_of("##moderow/12").has_value(), "選了之後選單要關掉");
+    // 另外兩組（給 FM 用的大畫面、幀裡沒有導頻的）也選得到；選了之後送出的大小跟著變
+    c.expect(app->tx_picture_size() == kStandardPicture, "模式 12 送出的是 96×72");
+    for (const int id : {15, 7, 5}) {
+        if (modes::find(id) == nullptr) continue;   // 少了權重檔：「模型與模式」那一項會指出來
+        c.expect(screen.click("##mode"), "再按一次發射模式的鈕");
+        screen.frames(2);
+        if (id == 15) keep_screen(screen, "mode-menu");
+        c.expect(screen.click("##moderow/" + std::to_string(id)) && app->settings.tx_mode_id == id && app->tx_picture_size() == PictureSize{192, 144},
+                 "在選單裡選模式 " + std::to_string(id) + "：送出的大小要變成 192×144（選到的是模式 " + std::to_string(app->settings.tx_mode_id) + "，大小 " + app->tx_picture_size().text() + "）");
+        screen.frames(2);
+        c.expect(!screen.ui().rect_of("##moderow/" + std::to_string(id)).has_value(), "選了之後選單要關掉");
+    }
+    keep_screen(screen, "mode-chosen-large");
+    c.expect(screen.click("##mode"), "再按一次發射模式的鈕");
+    screen.frames(2);
+    c.expect(screen.click("##moderow/12") && app->settings.tx_mode_id == 12 && app->tx_picture_size() == kStandardPicture, "換回模式 12：送出的大小變回 96×72");
+    screen.frames(2);
     // 右側欄
     c.expect(screen.click("##scale/1") && app->settings.scale_mode == ScaleMode::fit, "縮放方式：完整");
     c.expect(screen.click("##canvas") && app->settings.canvas_enabled && app->settings.canvas_text == "CQ BX4ACPX", "打開畫布，自動填上「CQ 呼號」：「" + app->settings.canvas_text + "」");
@@ -2153,6 +2861,8 @@ int run(const Options& options) {
         {"models", "模型與模式", test_models},
         {"loopback", "每個模式的收發", test_loopback},
         {"channel", "有雜訊、有頻偏的收訊", test_channel},
+        {"fm", "FM 大畫面（模式 15）：畫面的大小跟著模式", [&work](Check& c) { test_large_picture(c, work); }},
+        {"fm-pilotfree", "FM 無導頻（模式 5、6、7）：模式表與選單、連續發射中換模式", test_pilot_free},
         {"scale", "來源畫面的縮放", test_scale},
         {"png", "圖片檔的讀寫", [&work](Check& c) { test_png(c, work); }},
         {"fonts", "系統的字型", test_fonts},
@@ -2175,7 +2885,9 @@ int run(const Options& options) {
         {"schedule-run", "定時發射實際跑一次", [&work](Check& c) { test_schedule_run(c, work); }},
         {"images", "圖片序列：挑出圖片檔、照檔名排、照記載的方向轉正", [&work](Check& c) { test_image_files(c, work); }},
         {"images-transmit", "圖片序列：依序一張一張送、送完自動停止、沒送出去的下次再送", [&work](Check& c) { test_image_transmit(c, work); }},
+        {"images-fm", "圖片序列與存影片印訊雜比：配上 192×144 的模式", [&work](Check& c) { test_large_image_sequence(c, work); }},
         {"ui-render", "介面：各語言、各面板、各種視窗大小", [&work](Check& c) { test_ui_render(c, work); }},
+        {"ui-pictures", "介面：主畫面與預覽照原樣放大（96×72 與 192×144）", test_ui_pictures},
         {"ui-click", "介面：按鈕、選單、輸入框", test_ui_click},
         {"ui-images", "介面：圖片序列的上一張、下一張、滑桿，從按鈕發射", [&work](Check& c) { test_ui_images(c, work); }},
         {"ui-transmit", "介面：從按鈕發射", test_ui_transmit},

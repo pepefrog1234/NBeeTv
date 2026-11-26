@@ -49,15 +49,15 @@ Results for the white-noise channel and other SNRs, and how they were measured, 
 
 There is also an experimental **mode 15** for FM voice channels on VHF/UHF: the picture grows to 192×144, at 2.72 seconds per picture.
 Audio SNR on FM is high, and sending a larger picture with the same number of values makes it clearly sharper; with a weak signal it does
-worse than the four modes above, so it is not suited to HF. The command-line tools and the macOS app can send and receive it; the Windows
-and Linux apps do not support it yet. It has only been checked in simulation, not yet on real radios.
+worse than the four modes above, so it is not suited to HF. The command-line tools, the macOS app and the Windows and Linux app
+can all send and receive it. It has only been checked in simulation, not yet on real radios.
 Details are in the [technical notes](docs/TECHNICAL.md).
 
 Also for FM, there are experimental **modes 5, 6 and 7**: the picture is still 192×144, but the frame carries no pilots.
 The FM audio channel does not change during a frame, so the pilots can go, and the same time carries 20% more data.
 Mode 5 uses the same model as mode 15 at 2.29 seconds per picture; mode 6 takes 2.88 seconds and is 1.4 dB better;
 mode 7 takes 4.43 seconds and is 3.6 dB better. They only work on FM voice channels with no frequency offset and a steady signal
-(not on SSB); they too are supported only by the command-line tools and the macOS app, and have only been checked in simulation.
+(not on SSB); they too are supported by the command-line tools and both apps, and have only been checked in simulation.
 
 ## Download
 

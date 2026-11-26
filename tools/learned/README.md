@@ -217,7 +217,7 @@ python3 export.py run12/model.pt ../../models/261122-3.bin \
 `core/tests/test_learned.cpp` 裡的識別碼與對照的 PSNR；收發兩端也必須一起換
 （幀的標頭帶著識別碼的最低 8 位元，兩邊不同時接收端不會交出畫面）。
 檔名也換了的話，還要改 `tools/model_file.hpp`、`core/tests/test_c_api.cpp`、
-`apps/macos/CMakeLists.txt` 與 `apps/macos/Sources/CoreBridge.swift` 裡的檔名（模式 11 到 14 的還有 `apps/desktop/src/core_bridge.cpp`）。
+`apps/macos/CMakeLists.txt` 與 `apps/macos/Sources/CoreBridge.swift` 裡的檔名（Windows 與 Linux 的桌面 app 照 `tools/model_file.hpp` 的對照載入，不必另外改）。
 
 權重存成 float16（模式 11、12、15 的各約 11.8 MB，模式 13、14 的各約 46 MB）：第一版在 800 張測試小圖、各訊雜比下的 PSNR 和 float32 到小數第三位都相同。
 每個輸出通道各自量化成 int8 可以再小一半，但 PSNR 會掉 0.02–0.14 dB，沒有採用。
@@ -1098,7 +1098,7 @@ python3 eval_merge.py --model ../../models/261123-4.bin --gate run_mg14/ema.pt -
 
 - 還沒有實機驗證模式 11 的第三版（第二版也沒有）與模式 12、13、14、15：以上都是模擬。模式 15 要的是 VHF／UHF 的 FM 電台，
   只經過自己寫的、理想化的 FM 語音通道模擬。第一版在實機上看到的問題（衰落時的黑塊與點陣）在模擬裡重現、
-  也在模擬裡消失了，但空中的情形還要再測。macOS 的 app 支援模式 11 到 15，只用內附的測試圖驗證過（Windows 與 Linux 的桌面 app 沒有模式 15）。
+  也在模擬裡消失了，但空中的情形還要再測。macOS 的 app 與 Windows、Linux 的桌面 app 支援模式 11 到 15，只用內附的測試圖驗證過。
 - 訓練時的衰落是「每個值各自獨立」，靠幀裡的打散來成立；實際的通道估測誤差、頻率選擇性衰落的細節只在 `nbtv-sim` 裡驗證過。
 - 模型小、訓練短（模式 11：三版合計 10.6 萬步；模式 12：從模式 11 第二版的權重接著 4 萬步）。模式 11 多訓練 5.2 萬步
   就高了 0.3–1.2 dB（第三版）；再多訓練還能高多少，還沒試。模式 14 的模型同樣多訓練 5.2 萬步卻只高了 0–0.2 dB（261123-4）。

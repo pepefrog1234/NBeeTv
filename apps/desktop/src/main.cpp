@@ -187,7 +187,10 @@ int run_window(const Options& options) {
     std::string audio_problem;
     if (options.demo) {
         i18n::use(options.language.empty() ? i18n::system_language() : options.language);
-        loop.app = snapshot::make_receiving_app(true);
+        // 開發用：設了 NBTV_SNAPSHOT_FM 時，示範資料換成給 FM 用的大畫面（192×144）那一份，在真的視窗裡看得到大畫面的樣子
+        // （值是某個大畫面模式的編號時，示範裡選的發射模式用它）。app 裡沒有那幾個模式的模型時照平常的示範資料
+        if (const char* fm = std::getenv("NBTV_SNAPSHOT_FM")) loop.app = snapshot::make_fm_app(std::atoi(fm), true);
+        if (!loop.app) loop.app = snapshot::make_receiving_app(true);
         loop.app->settings.language = options.language;
     } else {
         // 音訊或鏡頭的子系統起不來，視窗還是要開：問題寫在底列

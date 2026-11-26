@@ -244,7 +244,10 @@ bool CanvasLayer::has_fonts() {
     return false;
 }
 
-std::shared_ptr<const CanvasLayer> CanvasLayer::make(const CanvasStyle& style) {
+std::shared_ptr<const CanvasLayer> CanvasLayer::make(const CanvasStyle& style, PictureSize picture) {
+    // 排版用的座標是 96×72；實際的像素是它的 times 倍
+    const int times = picture.scale();
+    if (picture.width != kImageWidth * times || picture.height != kImageHeight * times) return nullptr;
     std::vector<char32_t> text = trimmed(decode(style.text));
     if (text.size() > static_cast<std::size_t>(kMaximumCharacters)) text.resize(static_cast<std::size_t>(kMaximumCharacters));
     text = trimmed(text);
@@ -298,21 +301,31 @@ std::shared_ptr<const CanvasLayer> CanvasLayer::make(const CanvasStyle& style) {
     ink_height += static_cast<float>(typeset.size() - 1) * kLineGap;
     const int band = static_cast<int>(std::min(static_cast<float>(kImageHeight), std::ceil(ink_height + 2 * kPadding)));
 
-    // 3. 畫字（每個像素被字蓋住多少）
+    // 3. 畫字（每個像素被字蓋住多少）。字帶佔哪幾列照上面 96×72 的排法放大 times 倍；
+    //    字則照放大之後的字級重新排一次再畫（不是把 96×72 的點陣放大），筆畫才是細的
     auto layer = std::shared_ptr<CanvasLayer>(new CanvasLayer());
     layer->style_ = style;
+    layer->size_ = picture;
     for (const auto& line : chosen) layer->lines_.push_back(encode(line));
     layer->font_size_ = font_size;
-    layer->first_row_ = style.position == CanvasPosition::top ? 0 : kImageHeight - band;
-    layer->last_row_ = layer->first_row_ + band;
-    layer->coverage_.assign(static_cast<std::size_t>(kImageWidth) * kImageHeight, 0);
+    layer->first_row_ = (style.position == CanvasPosition::top ? 0 : kImageHeight - band) * times;
+    layer->last_row_ = layer->first_row_ + band * times;
+    layer->coverage_.assign(static_cast<std::size_t>(picture.width) * static_cast<std::size_t>(picture.height), 0);
+    if (times > 1) {
+        ink_height = 0;
+        for (std::size_t i = 0; i < chosen.size(); ++i) {
+            typeset[i] = layout(chosen[i], font_size * static_cast<float>(times));
+            ink_height += std::ceil(typeset[i].height());
+        }
+        ink_height += static_cast<float>(typeset.size() - 1) * kLineGap * static_cast<float>(times);
+    }
 
-    float top = static_cast<float>(layer->first_row_) + (static_cast<float>(band) - ink_height) / 2;   // 第一行有墨範圍的上緣
+    float top = static_cast<float>(layer->first_row_) + (static_cast<float>(band * times) - ink_height) / 2;   // 第一行有墨範圍的上緣
     std::vector<std::uint8_t> bitmap;
     for (const Line& line : typeset) {
         // 基線放在整數的像素上，橫的筆畫才不會糊成兩列
         const int baseline = static_cast<int>(std::lround(top - line.min_y));
-        const float origin = std::round((static_cast<float>(kImageWidth) - line.width()) / 2 - line.min_x);
+        const float origin = std::round((static_cast<float>(picture.width) - line.width()) / 2 - line.min_x);
         for (const PlacedGlyph& placed : line.glyphs) {
             const float pen = origin + placed.x;
             const float shift = pen - std::floor(pen);
@@ -328,22 +341,25 @@ std::shared_ptr<const CanvasLayer> CanvasLayer::make(const CanvasStyle& style) {
                 if (py < layer->first_row_ || py >= layer->last_row_) continue;
                 for (int x = 0; x < w; ++x) {
                     const int px = left + x;
-                    if (px < 0 || px >= kImageWidth) continue;
-                    std::uint8_t& cell = layer->coverage_[static_cast<std::size_t>(py) * kImageWidth + static_cast<std::size_t>(px)];
+                    if (px < 0 || px >= picture.width) continue;
+                    std::uint8_t& cell = layer->coverage_[static_cast<std::size_t>(py) * static_cast<std::size_t>(picture.width) + static_cast<std::size_t>(px)];
                     cell = static_cast<std::uint8_t>(std::min(255, cell + bitmap[static_cast<std::size_t>(y) * static_cast<std::size_t>(w) + static_cast<std::size_t>(x)]));
                 }
             }
         }
-        top += std::ceil(line.height()) + kLineGap;
+        top += std::ceil(line.height()) + kLineGap * static_cast<float>(times);
     }
     return layer;
 }
 
 Picture CanvasLayer::apply(const Picture& picture) const {
+    // 大小不對的畫面原樣回傳：這一層的字帶是照另一種大小算的，印上去位置會歪
+    if (picture.size != size_ || picture.rgb.size() != static_cast<std::size_t>(size_.rgb_bytes())) return picture;
     Picture out = picture;
+    const std::size_t width = static_cast<std::size_t>(size_.width);
     for (int y = first_row_; y < last_row_; ++y) {
-        for (int x = 0; x < kImageWidth; ++x) {
-            const std::size_t index = static_cast<std::size_t>(y) * kImageWidth + static_cast<std::size_t>(x);
+        for (std::size_t x = 0; x < width; ++x) {
+            const std::size_t index = static_cast<std::size_t>(y) * width + x;
             // 這一層是「半透明的黑帶上面疊白字」：字蓋住 c 的地方，白色佔 c、底下的畫面只剩 (1 − c)·(1 − 0.62)
             const float c = static_cast<float>(coverage_[index]) / 255.0f;
             const int alpha = static_cast<int>(std::lround(255.0f * (c + (1 - c) * kBandOpacity)));
@@ -496,15 +512,24 @@ namespace sequence_video {
 
 std::vector<std::uint8_t> frame_image(const Picture& picture, const std::string& label) {
     std::vector<std::uint8_t> frame(static_cast<std::size_t>(kWidth) * kHeight * 3);
-    // 一個像素變成 kScale×kScale 的一格：先做好一列，再原樣抄 kScale 次
-    const std::size_t row_bytes = static_cast<std::size_t>(kWidth) * 3;
-    for (int y = 0; y < kImageHeight; ++y) {
-        std::uint8_t* row = frame.data() + static_cast<std::size_t>(y) * kScale * row_bytes;
-        const std::uint8_t* source = picture.rgb.data() + static_cast<std::size_t>(y) * kImageWidth * 3;
-        for (int x = 0; x < kImageWidth; ++x) {
-            for (int k = 0; k < kScale; ++k) std::memcpy(row + (static_cast<std::size_t>(x) * kScale + static_cast<std::size_t>(k)) * 3, source + static_cast<std::size_t>(x) * 3, 3);
+    const int pw = picture.width(), ph = picture.height();
+    if (pw > 0 && ph > 0 && picture.rgb.size() >= static_cast<std::size_t>(pw) * static_cast<std::size_t>(ph) * 3) {
+        // 影片的每一行取畫面的哪一行（最近鄰）：96×72 的畫面一個像素變成 10×10 的一格，192×144 的是 5×5
+        std::vector<std::size_t> column(static_cast<std::size_t>(kWidth));
+        for (int x = 0; x < kWidth; ++x) column[static_cast<std::size_t>(x)] = static_cast<std::size_t>(std::min(pw - 1, x * pw / kWidth)) * 3;
+        const std::size_t row_bytes = static_cast<std::size_t>(kWidth) * 3;
+        int previous = -1;
+        for (int y = 0; y < kHeight; ++y) {
+            const int source_y = std::min(ph - 1, y * ph / kHeight);
+            std::uint8_t* row = frame.data() + static_cast<std::size_t>(y) * row_bytes;
+            if (source_y == previous) {
+                std::memcpy(row, row - row_bytes, row_bytes);   // 和上一列取的是畫面的同一列：原樣抄
+                continue;
+            }
+            previous = source_y;
+            const std::uint8_t* source = picture.rgb.data() + static_cast<std::size_t>(source_y) * static_cast<std::size_t>(pw) * 3;
+            for (int x = 0; x < kWidth; ++x) std::memcpy(row + static_cast<std::size_t>(x) * 3, source + column[static_cast<std::size_t>(x)], 3);
         }
-        for (int k = 1; k < kScale; ++k) std::memcpy(row + static_cast<std::size_t>(k) * row_bytes, row, row_bytes);
     }
     if (!label.empty()) VideoStamp::draw(label, frame.data(), kWidth, kHeight);
     return frame;
