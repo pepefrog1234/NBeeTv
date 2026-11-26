@@ -162,7 +162,7 @@ void test_undefined_ids() {
 }
 
 void test_c_api() {
-    CHECK(std::strcmp(nbtv_version_string(), "0.1.0") == 0);
+    CHECK(std::strcmp(nbtv_version_string(), "0.2.0") == 0);
     CHECK_EQ(nbtv_mode_count(), 10);
     CHECK_EQ(NBTV_IMAGE_MAX_RGB_BYTES, kMaxImageRgbBytes);
     for (int i = 0; i < nbtv_mode_count(); ++i) {
