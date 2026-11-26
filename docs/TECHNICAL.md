@@ -141,7 +141,7 @@ build/tools/nbtv-rx --out-dir out fm.wav
 | 通道模擬與命令列工具 | 完成 |
 | Linux、macOS、Windows（x86_64 與 arm64）的建置與下載包 | 完成：GitHub Actions 在六種平台上各自建置、跑完測試、用下載包實際收發一次；macOS 另外建置 NBTV.app 並跑它的自我測試；Windows 與 Linux 另外建置桌面 app 並跑它的自我測試、開視窗幾秒鐘 |
 | macOS 外殼（SwiftUI） | 第一版完成：五張版面、收發流程、PTT（VOX／序列埠／rigctld）。以內附測試圖的模擬收發驗證過；鏡頭擷取與真的序列埠控制線還沒測，細節見 [apps/macos/README.md](../apps/macos/README.md) |
-| Windows 與 Linux 的桌面 app（`apps/desktop/`） | 第一版完成：把 macOS 外殼的版面與收發流程搬過來（SDL 3 與 Dear ImGui），五種語言。29 項自我測試在 Windows、Linux 的 x86_64、arm64 上都跑過（模擬的輸出、只做紀錄的 PTT、SDL 的假音訊驅動、Hamlib 的假電台）。2026-11-26 補上 macOS 版同一天加的兩樣（發射來源的「圖片序列」、存成影片時印上訊雜比），自我測試變成 33 項；新增的部分只在開發用的 Mac 與 Docker 裡的 Ubuntu 22.04（arm64）上跑過，Windows 上還沒有執行過。**真的音效裝置、鏡頭、序列埠、電台都還沒有實機驗證**，也還沒有人在 Windows、Linux 上實際操作過，細節見 [apps/desktop/README.md](../apps/desktop/README.md) |
+| Windows 與 Linux 的桌面 app（`apps/desktop/`） | 第一版完成：把 macOS 外殼的版面與收發流程搬過來（SDL 3 與 Dear ImGui），五種語言。2026-11-26 補上 macOS 版同一天加的兩樣（發射來源的「圖片序列」、存成影片時印上訊雜比）。包含這兩樣在內的 33 項自我測試在 Windows、Linux 的 x86_64、arm64 上都跑過（模擬的輸出、只做紀錄的 PTT、SDL 的假音訊驅動、Hamlib 的假電台；Windows 的機器上沒有裝 Hamlib，用它的那一項略過）。**真的音效裝置、鏡頭、序列埠、電台都還沒有實機驗證**，也還沒有人在 Windows、Linux 上實際操作過，細節見 [apps/desktop/README.md](../apps/desktop/README.md) |
 | 收聽卡網站（`apps/web/`） | 第一版完成，含測試：上傳、解碼、發卡、數位簽章（自己簽發的根憑證與簽章憑證）、C2PA、序號與離線查驗、Cloudflare Turnstile。自動測試用的是合成的錄音與假的查證服務；正式的網域上（經過 Cloudflare Tunnel 與 Turnstile）實際上傳、出卡、查驗走過一次。見 [apps/web/README.md](../apps/web/README.md) |
 | 數位模式（LDPC＋AV1）、相干類比模式 | 做完之後在 2026-11-23 移除（見最上面的說明） |
 | 實機測試（音訊線迴路、假負載、空中） | 未開始 |
