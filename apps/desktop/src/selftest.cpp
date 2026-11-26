@@ -2308,7 +2308,9 @@ void test_fast_fm(Check& c) {
     PicturePtr on_air;
     const bool sent_enough = rig.wait(fast_enough ? 60 : 240, [&] {
         if (rig.app->tx_preview && rig.app->tx_preview->size == large) on_air = rig.app->tx_preview;
-        return rig.app->tx_frames_sent >= wanted || rig.app->tx_phase == App::TxPhase::idle;
+        // 太慢的電腦上另外解的預覽要好幾秒，可能比第 2 張送完還晚（CI 的 Windows arm64 上編一張要 3 秒）：
+        // 那就繼續送，等到看見預覽為止。夠快的電腦照原來的要求：送完 4 張之前就要看見
+        return (rig.app->tx_frames_sent >= wanted && (fast_enough || on_air != nullptr)) || rig.app->tx_phase == App::TxPhase::idle;
     });
     c.expect(sent_enough && rig.app->is_on_air(), "模式 4 沒有連續送出 " + std::to_string(wanted) + " 張：" + rig.app->notice.value_or(""));
     c.expect(on_air != nullptr, "模式 4 發射中一直沒有預覽");
@@ -3054,8 +3056,25 @@ void test_receive_threads(Check& c) {
     c.expect(demo::wait_until(&app, 20, [&] { return app.debug_receive_backlog() == 0 && app.skipped_frames == 5; }),
              "積下來的五張應該略過：略過 " + std::to_string(app.skipped_frames) + " 張，還排著 " + number(app.debug_receive_backlog(), 1) + " 秒");
     c.expect(app.history.size() == history_before + 1, "停住之前解出來的那一張要在：多了 " + std::to_string(app.history.size() - history_before) + " 張");
-    c.expect(app.last_result == App::LastResult::skipped && app.notice == L("這台電腦解一張畫面比收一張還久，來不及的畫面會略過"), "略過的時候要告訴使用者");
-    c.expect(app.sync_callsign == "BX4ACP", "略過的那幾張，呼號照樣要認得");
+    // 底列的說明在第一次略過時寫上，之後沒有別的訊息蓋掉它，消化完再看也一樣
+    c.expect(app.notice == L("這台電腦解一張畫面比收一張還久，來不及的畫面會略過"), "略過的時候要告訴使用者");
+    // 「上一張」那一列與認得的呼號，對方一停止發射（接收機回報不再同步）就清掉了；消化完的那一刻清掉了沒有，
+    // 要看這台電腦解得多快（CI 的 Linux x86-64 上就已經清掉了）。所以這兩樣另外用一個不開接收的 App，直接交給它略過的幀來看
+    {
+        App plain(Settings::load(""), false);
+        DecodedFrame skipped;
+        skipped.mode_id = mode->id;
+        skipped.skipped = true;
+        skipped.header_ok = true;
+        skipped.callsign = "BX4ACP";
+        skipped.sequence = 2;
+        skipped.snr_db = 12;
+        plain.add(skipped, 0);
+        plain.add(skipped, 0);
+        c.expect(plain.last_result == App::LastResult::skipped && plain.sync_callsign == "BX4ACP" && plain.skipped_frames == 2 && plain.history.empty() &&
+                     plain.notice == L("這台電腦解一張畫面比收一張還久，來不及的畫面會略過"),
+                 "略過的幀：「上一張」要寫來不及解、呼號照樣要認得、不進「最近收到」、底列要說明");
+    }
     // 開發用（NBTV_SELFTEST_SCREENS）：這時候主視窗的樣子，五種語言、最小的視窗各存一張——看「上一張」那一列與底列的說明放不放得下
     if (const char* keep = std::getenv("NBTV_SELFTEST_SCREENS"); keep != nullptr && *keep != '\0') {
         const std::string original = i18n::language();
