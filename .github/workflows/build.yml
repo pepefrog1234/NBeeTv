@@ -10,6 +10,12 @@
 #
 # 什麼時候跑：推到 main、開 PR、手動執行時，下載包留在那一次執行的 Artifacts 裡（7 天）；
 # 推版本標籤（v 開頭，例如 v0.1.0）時，另外把全部的下載包放上 GitHub Releases。
+#
+# macOS 的 NBTV.app：建置出來的是 ad-hoc 簽章，下載之後 macOS 會擋。推版本標籤時，另外一個工作（sign-macos）把兩份 app
+# 用 Developer ID 憑證重新簽章、送 Apple 公證、釘上票據，發佈的是那一份（做法在 apps/macos/sign-and-notarize.sh）。
+# 憑證與公證的登入資料放在「release-signing」這個 Environment 的 secrets 裡（名稱見 sign-macos 的說明）；
+# 沒有設定的話（例如別人的 fork）那個工作什麼都不做，照舊發佈 ad-hoc 簽章的。
+# 手動執行時勾選 sign 可以只試簽章與公證、不發佈：簽好的那兩份在那一次執行的 Artifacts 裡（signed-macos-apps）。
 name: build
 
 on:
@@ -18,6 +24,11 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      sign:
+        description: "也把 NBTV.app 用 Developer ID 簽章並送 Apple 公證（只是試，不會發佈）"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -363,11 +374,152 @@ jobs:
           retention-days: 7
           compression-level: 0
 
+  # macOS 的 NBTV.app 的簽章與公證。推版本標籤時跑；手動執行並勾選 sign 時也跑（用來試，不發佈）。
+  # 兩份 app（x86_64 與 arm64）都在這一台 arm64 的機器上處理：簽章與公證和處理器無關，程式本身不重新編譯。
+  #
+  # 用到的 secrets 都放在「release-signing」這個 Environment 裡（Settings → Environments；建議限制只有 v* 標籤與 main 能用）：
+  #   MACOS_CERTIFICATE_P12        Developer ID Application 憑證連同私鑰匯出的 .p12，轉成 base64（base64 -i 檔名.p12）
+  #   MACOS_CERTIFICATE_PASSWORD   匯出 .p12 時設的密碼
+  # 公證的登入方式二選一：
+  #   NOTARY_KEY_P8、NOTARY_KEY_ID、NOTARY_ISSUER    App Store Connect 的 API 金鑰（.p8 的內容或它的 base64；個人金鑰不給 NOTARY_ISSUER）
+  #   NOTARY_APPLE_ID、NOTARY_TEAM_ID、NOTARY_PASSWORD   Apple ID、Team ID 與 App 專用密碼（不是帳號的密碼）
+  # 沒有設定 MACOS_CERTIFICATE_P12 的話這個工作什麼都不做（別人的 fork 就是這樣），發佈的仍然是 ad-hoc 簽章的 app。
+  # 簽章身分的名稱不會印在紀錄裡（紀錄是公開的）。
+  sign-macos:
+    name: sign-macos
+    if: github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.sign)
+    needs: build
+    runs-on: macos-26
+    timeout-minutes: 60
+    environment: release-signing
+    outputs:
+      signed: ${{ steps.sign.outputs.signed }}
+    env:
+      HAVE_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: packages
+          pattern: NBeeTv-*-macos-*
+          merge-multiple: true
+
+      - name: 沒有設定憑證
+        if: env.HAVE_CERTIFICATE != 'true'
+        run: echo "::notice::release-signing 裡沒有 MACOS_CERTIFICATE_P12：NBTV.app 維持 ad-hoc 簽章，沒有公證。"
+
+      # 憑證放進一個只在這次執行存在的鑰匙圈。Apple 的中繼憑證也放進去（機器上不一定有，少了它 codesign 接不出完整的憑證鏈）：
+      # G1 是 2027-02-01 到期的舊中繼憑證，G2 是現在的。這兩個檔案不核對 SHA-256，和這份流程別處下載的東西不一樣——
+      # 它們只用來接憑證鏈，鏈要能一路驗到系統內建的 Apple 根憑證才算數，拿到別的檔案只會簽不出來。
+      - name: 匯入憑證
+        if: env.HAVE_CERTIFICATE == 'true'
+        env:
+          CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          echo "$CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -P "$CERTIFICATE_PASSWORD" -f pkcs12 -k "$keychain" -T /usr/bin/codesign > /dev/null
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          for file in DeveloperIDCA.cer DeveloperIDG2CA.cer; do
+            curl -fsSL --retry 3 "https://www.apple.com/certificateauthority/$file" -o "$RUNNER_TEMP/$file"
+            security import "$RUNNER_TEMP/$file" -k "$keychain" > /dev/null
+          done
+          # 讓 codesign 不必經過詢問視窗就能用這把私鑰
+          security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$keychain" > /dev/null
+          # 加進搜尋清單，原來的留著
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | sed -e 's/^ *"//' -e 's/"$//')
+          identity="$(security find-identity -v -p codesigning "$keychain" | awk '/Developer ID Application/ { print $2; exit }')"
+          if [ -z "$identity" ]; then
+            echo "::error::MACOS_CERTIFICATE_P12 裡沒有可以用的 Developer ID Application 身分（憑證過期、少了私鑰，或密碼不對）"
+            exit 1
+          fi
+          echo "SIGN_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+          echo "SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+
+      - name: 簽章、公證、釘上票據
+        id: sign
+        if: env.HAVE_CERTIFICATE == 'true'
+        env:
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+        run: |
+          export NBTV_SIGN_IDENTITY="$SIGN_IDENTITY" NBTV_SIGN_KEYCHAIN="$SIGN_KEYCHAIN"
+          if [ -n "$NOTARY_KEY_P8" ]; then
+            # API 金鑰：secret 裡放的是 .p8 的內容，或它的 base64
+            case "$NOTARY_KEY_P8" in
+              -----BEGIN*) printf '%s\n' "$NOTARY_KEY_P8" > "$RUNNER_TEMP/notary-key.p8" ;;
+              *) echo "$NOTARY_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary-key.p8" ;;
+            esac
+            export NBTV_NOTARY_KEY="$RUNNER_TEMP/notary-key.p8" NBTV_NOTARY_KEY_ID="$NOTARY_KEY_ID" NBTV_NOTARY_ISSUER="$NOTARY_ISSUER"
+          else
+            export NBTV_NOTARY_APPLE_ID="$NOTARY_APPLE_ID" NBTV_NOTARY_TEAM_ID="$NOTARY_TEAM_ID" NBTV_NOTARY_PASSWORD="$NOTARY_PASSWORD"
+          fi
+          mkdir -p signed
+          count=0
+          for zip in packages/*-app.zip; do
+            name="$(basename "$zip")"
+            work="$RUNNER_TEMP/unsigned/$name"
+            mkdir -p "$work"
+            ditto -x -k "$zip" "$work"
+            apps/macos/sign-and-notarize.sh "$work/NBTV.app" "signed/$name"
+            count=$((count + 1))
+          done
+          rm -f "$RUNNER_TEMP/notary-key.p8"
+          if [ "$count" -ne 2 ]; then
+            echo "::error::應該有兩份 NBTV.app（x86_64 與 arm64），找到 $count 份"
+            exit 1
+          fi
+          ls -l signed
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      # 對著「使用者會拿到的那個 zip」再檢查一次：解開、簽章有效、票據釘著。arm64 的那一份在這台機器上跑它的自我測試
+      # （和建置時跑的一樣，不碰音訊裝置與鏡頭），確認開了 Hardened Runtime、換了簽章之後照樣能用。
+      - name: 解開簽過的 NBTV.app 再檢查
+        if: steps.sign.outputs.signed == 'true'
+        run: |
+          for zip in signed/*-app.zip; do
+            work="$RUNNER_TEMP/signed trial/$(basename "$zip" .zip)"
+            mkdir -p "$work"
+            ditto -x -k "$zip" "$work"
+            codesign --verify --deep --strict --verbose=2 "$work/NBTV.app"
+            xcrun stapler validate "$work/NBTV.app"
+            case "$zip" in
+              *-arm64-app.zip) "$work/NBTV.app/Contents/MacOS/NBTV" --selftest --no-devices ;;
+            esac
+          done
+
+      - uses: actions/upload-artifact@v7
+        if: steps.sign.outputs.signed == 'true'
+        with:
+          name: signed-macos-apps
+          path: signed/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: 刪掉暫時的鑰匙圈
+        if: always() && env.HAVE_CERTIFICATE == 'true'
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
+
   # 推版本標籤時：把六個平台的下載包、Windows 的包裡那個 ffmpeg.exe 的原始碼，與一份 SHA-256 清單放上 GitHub Releases。
+  # macOS 的 NBTV.app 用 sign-macos 簽過、公證過的那兩份；那個工作失敗的話不發佈。
   release:
     name: release
     if: github.ref_type == 'tag'
-    needs: build
+    needs: [build, sign-macos]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -377,6 +529,21 @@ jobs:
           path: dist
           pattern: NBeeTv-*
           merge-multiple: true
+
+      # 簽過、公證過的 NBTV.app 取代建置時 ad-hoc 簽章的那兩份（檔名相同）。沒有設定憑證時沒有這一份，照舊發佈 ad-hoc 的。
+      - uses: actions/download-artifact@v8
+        if: needs.sign-macos.outputs.signed == 'true'
+        with:
+          name: signed-macos-apps
+          path: signed
+
+      - name: 換成簽過的 NBTV.app
+        if: needs.sign-macos.outputs.signed == 'true'
+        run: |
+          for zip in signed/*-app.zip; do
+            test -f "dist/$(basename "$zip")"
+            cp -fv "$zip" dist/
+          done
 
       - name: SHA-256 清單
         run: |

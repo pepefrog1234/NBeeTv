@@ -23,6 +23,30 @@ cmake --build build-app
   不指定時，以建置這台機器的系統版本為準。
 - ad-hoc 簽章每次重新建置都會變，系統可能會再問一次相機與麥克風的權限。
 
+### 發佈用的簽章與公證
+
+建置出來的 app 只有 ad-hoc 簽章，別人從網路下載之後會被 macOS 擋下來。要給人下載的版本另外用
+[`sign-and-notarize.sh`](sign-and-notarize.sh) 處理：用 Developer ID Application 憑證重新簽章（開 Hardened Runtime、帶安全時間戳記；
+權限宣告在 [`NBTV.entitlements`](NBTV.entitlements)，只有鏡頭與音訊輸入兩項）、送 Apple 公證、把票據釘在 app 上，再壓成 zip。
+簽的是複製出來的那一份，建置目錄裡的 app 不會被改到。
+
+```sh
+NBTV_SIGN_IDENTITY="Developer ID Application: 名稱 (Team ID)" NBTV_NOTARY_PROFILE=設定檔名稱 \
+  apps/macos/sign-and-notarize.sh build-app/apps/macos/NBTV.app NBTV-app.zip
+```
+
+- 需要付費的 Apple Developer Program 會員資格，以及一張連同私鑰都在鑰匙圈裡的 Developer ID Application 憑證。
+- 公證的登入資料先存進鑰匙圈：`xcrun notarytool store-credentials 設定檔名稱 --apple-id … --team-id …`（它會問 App 專用密碼）。
+  也可以改用 App Store Connect 的 API 金鑰；用哪些環境變數寫在指令稿的開頭。
+- GitHub 上推版本標籤時，CI 的 `sign-macos` 工作對兩種處理器的 app 各做一次，發佈頁放的是簽過的那兩份。
+  憑證與登入資料放在 repo 的 `release-signing` 這個 Environment 的 secrets 裡，名稱列在 `.github/workflows/build.yml` 那個工作的說明；
+  沒有設定時那個工作什麼都不做，發佈的仍然是 ad-hoc 簽章的。手動執行那份流程並勾選 sign，可以只試簽章與公證、不發佈。
+- 憑證上的名稱（個人會員是法定姓名）會留在每一份簽過的 app 裡，用 `codesign -dv` 看得到。
+- 沒有開沙盒，也沒有用到別的 Hardened Runtime 例外。以後 bundle 裡如果加了內嵌的程式或程式庫，要先由內而外各自簽過，指令稿要跟著改。
+- 2026-11-27 在開發用的 Mac 上實際走過：簽章、公證（從上傳到通過約一分鐘）、釘票據之後，Gatekeeper 的評估是「Notarized Developer ID」，
+  簽過的那一份跑 `--selftest --no-devices` 沒有失敗的項目。**還沒有驗證的**：CI 上的 `sign-macos` 還沒有實際跑過；
+  Hardened Runtime 下實際開鏡頭與收音；下載之後第一次開啟時系統顯示的畫面。
+
 ## 執行
 
 ```sh
