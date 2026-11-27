@@ -1068,6 +1068,204 @@ void test_free_follow_through_damage() {
 
 }  // namespace
 
+namespace {
+
+// ───── 音訊中途斷開、幀尾的判斷（有散佈導頻的幀；依據是 2026-11 幾段經過網路 SDR 的短波錄音）─────
+
+// 一次發射（frames 幀）在第 broken 幀的中途斷開：step > 0 是訊號停了 step 個取樣再原樣接續（發射端的音訊輸出卡了一下），
+// step < 0 是少了 −step 個取樣（接收這一頭掉了一段）。where 是斷在那一幀的幾成的地方（另外偏 37 個取樣，不要剛好在符號的邊界上）。
+std::vector<float> broken_burst(const Mode& m, int frames, int broken, double where, int step) {
+    std::vector<float> signal = burst(m, frames, "N0CALL");
+    const std::size_t at = static_cast<std::size_t>(broken) * static_cast<std::size_t>(m.frame_samples()) +
+                           static_cast<std::size_t>(where * m.frame_samples()) + 37;
+    if (step > 0) signal.insert(signal.begin() + static_cast<std::ptrdiff_t>(at), static_cast<std::size_t>(step), 0.0f);
+    else signal.erase(signal.begin() + static_cast<std::ptrdiff_t>(at), signal.begin() + static_cast<std::ptrdiff_t>(at) - step);
+    return signal;
+}
+
+struct BreakRun {
+    int good = 0;          // 有畫面、標頭正確、呼號與模式都對的幀數
+    int other = 0;         // 其餘交出來的（沒有標頭的畫面、「沒解出來」的通知）
+    bool repeated = false; // 同一個幀序號交出來不只一次
+    double psnr = 0.0;     // 斷開的那一幀（序號 broken）對原圖的 PSNR；沒收到是 0
+};
+
+BreakRun receive_broken(const Mode& m, const std::vector<float>& signal, int frames, int broken, double snr_db, bool mend, std::size_t chunk,
+                        std::uint64_t seed) {
+    std::vector<float> audio(3000, 0.0f);
+    audio.insert(audio.end(), signal.begin(), signal.end());
+    audio.insert(audio.end(), 9000, 0.0f);
+    sim::ChannelParams params;
+    params.snr_db = snr_db;
+    params.freq_offset_hz = 0.7;   // 單邊帶的電台兩邊差一點，取樣時脈也差一點，和實際收到的一樣
+    params.clock_ppm = -100.0;
+    params.seed = seed;
+    sim::Channel channel(params, mean_power(burst(m, frames, "N0CALL")));
+    std::vector<float> received;
+    channel.process(audio, received);
+    Receiver rx;
+    rx.tuning().mend_steps = mend;
+    attach_models(rx);
+    BreakRun out;
+    std::vector<int> seen(static_cast<std::size_t>(frames), 0);
+    for (const RxFrame& f : run_receiver(rx, received, chunk)) {
+        const bool mine = f.decoded && f.header_ok && f.callsign == "N0CALL" && f.mode_id == m.id && f.sequence >= 0 && f.sequence < frames;
+        ++(mine ? out.good : out.other);
+        if (!mine) continue;
+        if (++seen[static_cast<std::size_t>(f.sequence)] > 1) out.repeated = true;
+        if (f.sequence == broken) {
+            out.psnr = test_images::psnr(f.rgb, test_images::load(test_images::kNames[broken % 3], m.image_width, m.image_height));
+        }
+    }
+    return out;
+}
+
+// 一幀收到一半，音訊斷開過：下一幀的前導符號出現在不是整數幀的位置時，接收機要回頭把那一幀接回去（RxTuning::mend_steps）。
+// 長度與位置照錄音裡看到的取：停 5.33 毫秒的整數倍（64 個取樣的倍數），或少一包（512 個取樣上下）。
+void test_audio_break() {
+    struct Case {
+        int mode;
+        double where;  // 斷在那一幀的幾成的地方
+        int step;
+        double snr_db;
+    };
+    const Case cases[] = {
+        {14, 0.45, 576, 10.0},   // 停了 48 毫秒（錄音裡的那一次）
+        {14, 0.70, 64, 10.0},    // 停了 5.33 毫秒，剛好一個循環字首
+        {14, 0.30, -132, 10.0},  // 少了 11 毫秒
+        {14, 0.55, -512, 10.0},  // 少了一包
+        {12, 0.50, 192, 8.0},
+        {12, 0.60, -516, 8.0},
+        {13, 0.75, 320, 6.0},    // 剛好一個符號的長度：導頻的位置每個符號不同，照樣分得出來
+        {11, 0.25, 704, 6.0},
+        {14, 0.45, 576, 2.0},    // 訊號弱的時候
+        {12, 0.35, -260, 2.0},
+    };
+    const int frames = 5, broken = 2;
+    int runs = 0, bad = 0;
+    for (const Case& c : cases) {
+        const Mode& m = *find_mode(c.mode);
+        const std::vector<float> signal = broken_burst(m, frames, broken, c.where, c.step);
+        // 不補救的話，那一張不是沒有，就是有一截是壞的（標頭有重複與迴旋碼保護，訊號強的時候少了後半幀也解得出來）
+        const BreakRun off = receive_broken(m, signal, frames, broken, c.snr_db, false, 1024, 515);
+        // 斷開之後的畫面不該比其他幀差多少：少掉的只是斷開的那一兩個符號
+        const LinkResult whole = [&] {
+            sim::ChannelParams p;
+            p.snr_db = c.snr_db;
+            p.seed = 515;
+            return run_link(m, 1, test_images::load(test_images::kNames[broken % 3], m.image_width, m.image_height), p);
+        }();
+        const double reference = mean_psnr(whole.frames, test_images::load(test_images::kNames[broken % 3], m.image_width, m.image_height));
+        // 音訊一次給多少個取樣不該影響結果（緩衝區要留著那一幀的取樣，等下一幀的前導符號出現）
+        for (std::size_t chunk : {480u, 1024u, 4800u}) {
+            const BreakRun on = receive_broken(m, signal, frames, broken, c.snr_db, true, chunk, 515);
+            const bool ok = on.good == frames && !on.repeated && on.other == 0 && on.psnr > reference - 1.5 && on.psnr > off.psnr + 1.0;
+            CHECK(ok);
+            ++runs;
+            if (!ok) ++bad;
+            if (!ok || chunk == 1024u) {
+                std::printf("  模式 %d、訊雜比 %.0f dB、第三幀的 %.0f%% 處%s %d 個取樣（一次給 %zu 個）：收到 %d/%d 張%s%s，那一幀 %.2f dB（沒有斷開時 %.2f dB）；"
+                            "不補救 %d 張、那一幀 %.2f dB\n",
+                            c.mode, c.snr_db, 100.0 * c.where, c.step > 0 ? "停了" : "少了", std::abs(c.step), chunk, on.good, frames,
+                            on.repeated ? "，有重複的" : "", on.other > 0 ? "，另外多交出了東西" : "", on.psnr, reference, off.good, off.psnr);
+            }
+        }
+    }
+    std::printf("  一幀收到一半音訊斷開：%d 種情形，%d 種有問題\n", runs, bad);
+}
+
+// 不該補救的情形：下一幀的前導符號同樣出現在不是整數幀的位置，但上一幀並沒有中途斷開。
+//   - 兩幀之間多了一段空檔（發射端來不及排下一幀）：前後的幀本來就都收得到，不能多交、不能重複。
+//   - 上一幀整個被雜訊蓋掉，下一幀又晚了一點：那一幀救不回來，也不能交出一張假的。
+void test_late_next_frame() {
+    const int frames = 5;
+    int runs = 0, bad = 0;
+    for (int mode : {14, 12}) {
+        const Mode& m = *find_mode(mode);
+        const std::vector<float> clean = burst(m, frames, "N0CALL");
+        const std::size_t length = static_cast<std::size_t>(m.frame_samples());
+        for (int gap : {64, 300, 576, 1500}) {
+            // 空檔在第二幀與第三幀之間
+            std::vector<float> between = clean;
+            between.insert(between.begin() + static_cast<std::ptrdiff_t>(2 * length), static_cast<std::size_t>(gap), 0.0f);
+            // 第三幀（從 S1 起）換成雜訊，後面再多一段空檔
+            std::vector<float> wiped = clean;
+            Rng rng(900 + static_cast<std::uint64_t>(gap));
+            const double sigma = std::sqrt(mean_power(clean));
+            for (std::size_t n = 2 * length + kSymbolSamples; n < 3 * length; ++n) wiped[n] = static_cast<float>(sigma * rng.gauss());
+            wiped.insert(wiped.begin() + static_cast<std::ptrdiff_t>(3 * length), static_cast<std::size_t>(gap), 0.0f);
+            for (double snr_db : {10.0, 2.0}) {
+                const BreakRun a = receive_broken(m, between, frames, 2, snr_db, true, 1024, 616);
+                const BreakRun a_off = receive_broken(m, between, frames, 2, snr_db, false, 1024, 616);
+                const BreakRun b = receive_broken(m, wiped, frames, 2, snr_db, true, 1024, 616);
+                const bool ok = a.good == a_off.good && a.other == a_off.other && !a.repeated && a.good >= frames - 1 &&
+                                b.psnr == 0.0 && b.good == frames - 1 && b.other == 0 && !b.repeated;
+                CHECK(ok);
+                ++runs;
+                if (!ok) {
+                    ++bad;
+                    std::printf("  模式 %d、訊雜比 %.0f dB、空檔 %d 個取樣：兩幀之間多了空檔時收到 %d 張（不補救 %d 張）、另外 %d 件；"
+                                "第三幀被雜訊蓋掉時收到 %d 張、另外 %d 件、那一幀 %.1f dB\n",
+                                mode, snr_db, gap, a.good, a_off.good, a.other, b.good, b.other, b.psnr);
+                }
+            }
+        }
+    }
+    std::printf("  下一幀晚到、但上一幀沒有斷開：%d 種情形，%d 種有問題\n", runs, bad);
+}
+
+// 一幀完不完整，不再看「幀尾有沒有像 S0、還來不及判定的東西」（RxTuning::tail_candidate_veto，預設關）。
+// 差別在訊號弱、標頭解不出來的時候：畫面的值小的符號裡，導頻佔的比例高，本身就像 S0（偶數格相隔 128 個取樣會重複），
+// 照原來的規則那一幀不算完整，標頭一沒解出來整張就不交出去。這裡的畫面是全黑的（編碼器輸出的值小），幀尾幾乎每次都像 S0；
+// 訊雜比取標頭開始解不出來的兩個點。差的張數不多（實際的錄音也是每段多幾張），所以只要求確實比較多、而且沒有多出不該有的。
+void test_tail_candidate() {
+    const Mode& m = *find_mode(12);
+    const std::vector<std::uint8_t> black(static_cast<std::size_t>(m.image_rgb_bytes()), 0);
+    const int frames = 24;
+    Transmitter tx;
+    tx.set_callsign("N0CALL");
+    attach_models(tx);
+    std::vector<float> signal;
+    for (int i = 0; i < frames; ++i) {
+        const auto f = tx.learned_frame(m, black);
+        signal.insert(signal.end(), f.begin(), f.end());
+    }
+    std::vector<float> audio(3000, 0.0f);
+    audio.insert(audio.end(), signal.begin(), signal.end());
+    audio.insert(audio.end(), 9000, 0.0f);
+    int pictures[2] = {0, 0}, extra[2] = {0, 0}, sent = 0;
+    for (double snr_db : {-4.0, -6.0}) {
+        for (std::uint64_t seed : {31u, 32u, 33u}) {
+            sim::ChannelParams params;
+            params.snr_db = snr_db;
+            params.seed = seed;
+            sim::Channel channel(params, mean_power(signal));
+            std::vector<float> received;
+            channel.process(audio, received);
+            sent += frames;
+            for (int k = 0; k < 2; ++k) {
+                Receiver rx;
+                rx.tuning().tail_candidate_veto = k == 1;
+                attach_models(rx);
+                for (const RxFrame& f : run_receiver(rx, received)) {
+                    // 送的那幾幀的位置上交出來的畫面才算；其他地方的是多出來的
+                    const std::int64_t offset = f.start_sample - 3000;
+                    const std::int64_t slot = (offset + m.frame_samples() / 2) / m.frame_samples();
+                    const bool placed = offset > -kSymbolSamples && slot < frames && std::llabs(offset - slot * m.frame_samples()) < kSymbolSamples;
+                    if (f.decoded && placed) ++pictures[k];
+                    else if (f.decoded) ++extra[k];
+                }
+            }
+        }
+    }
+    CHECK(pictures[0] >= pictures[1] + 4);
+    CHECK_EQ(extra[0], 0);
+    std::printf("  模式 12、全黑的畫面、訊雜比 −4 與 −6 dB、共 %d 幀：交出 %d 張，照原來的規則（幀尾像 S0 就不算完整）%d 張（不在幀的位置上的：%d、%d）\n", sent,
+                pictures[0], pictures[1], extra[0], extra[1]);
+}
+
+}  // namespace
+
 int main() {
     test_noise_only();
     if (!have_models()) {
@@ -1096,5 +1294,8 @@ int main() {
     test_free_low_heavy_noise();
     test_free_noise_bursts();
     test_free_follow_through_damage();
+    test_audio_break();
+    test_late_next_frame();
+    test_tail_candidate();
     return check::finish("link");
 }

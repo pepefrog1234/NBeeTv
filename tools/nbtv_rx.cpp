@@ -152,6 +152,9 @@ int main(int argc, char** argv) {
         rx.push(std::span<const float>(audio).subspan(pos, std::min<std::size_t>(1200, audio.size() - pos)));
         drain();
     }
+    // 錄音到此為止：留著等下一幀的那一幀（如果有）現在交出來
+    rx.finish();
+    drain();
     if (json) std::printf("{\"end\":true,\"frames\":%d,\"pictures\":%d}\n", index, good);
     else std::printf("共 %d 幀，%d 幀有畫面\n", index, good);
     return 0;

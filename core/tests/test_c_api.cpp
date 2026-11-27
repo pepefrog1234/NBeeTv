@@ -442,6 +442,60 @@ void test_discard_last() {
     nbtv_model_destroy(model);
 }
 
+// 音訊到此為止（nbtv_rx_finish）：接收機把可疑的一幀留著、等下一幀的位置確定才交；錄音在那之後馬上結束的話，
+// 要呼叫它才拿得到。這裡的最後一幀在八成的地方停了 48 毫秒再接續（發射端的音訊輸出卡了一下的樣子）：標頭照樣解得出來，
+// 但導頻前後對不上，所以被留著；後面只有 0.1 秒的靜音，等不到下一幀。
+void test_finish() {
+    nbtv_rx_finish(nullptr);  // 空指標不會出事
+    const std::vector<std::uint8_t> rgb = test_images::load("cat");
+    nbtv_model* model = load_model("261123-4");
+    if (model == nullptr) return;
+    for (int rate : {12000, 48000}) {
+        nbtv_tx* tx = nbtv_tx_create(rate);
+        nbtv_tx_set_mode(tx, 14);
+        nbtv_tx_set_callsign(tx, "N0CALL");
+        nbtv_tx_set_model(tx, model);
+        const int n = nbtv_tx_frame_samples(tx);
+        const std::size_t scale = static_cast<std::size_t>(rate / 12000);
+        std::vector<float> audio(static_cast<std::size_t>(rate / 4), 0.0f), frame(static_cast<std::size_t>(n));
+        for (int i = 0; i < 3; ++i) {
+            CHECK_EQ(nbtv_tx_encode_image(tx, rgb.data(), frame.data(), n, nullptr, nullptr), n);
+            audio.insert(audio.end(), frame.begin(), frame.end());
+        }
+        std::vector<float> tail(256);
+        const int tail_n = nbtv_tx_finish(tx, tail.data(), 256);
+        audio.insert(audio.end(), tail.begin(), tail.begin() + tail_n);
+        // 第三幀的八成處插進 576 個取樣（12 kHz 的刻度）的靜音
+        const std::size_t at = static_cast<std::size_t>(rate / 4) + 2 * static_cast<std::size_t>(n) + static_cast<std::size_t>(0.8 * n) + 37 * scale;
+        audio.insert(audio.begin() + static_cast<std::ptrdiff_t>(at), 576 * scale, 0.0f);
+        audio.insert(audio.end(), static_cast<std::size_t>(rate / 10), 0.0f);
+
+        nbtv_rx* rx = nbtv_rx_create(rate);
+        nbtv_rx_set_model(rx, model);
+        std::vector<nbtv_rx_frame> frames;
+        nbtv_rx_frame f;
+        nbtv_rx_finish(rx);  // 什麼都還沒收：沒有東西可以交
+        CHECK_EQ(nbtv_rx_poll_frame(rx, &f), 0);
+        const std::size_t chunk = static_cast<std::size_t>(rate / 50);
+        for (std::size_t pos = 0; pos < audio.size(); pos += chunk) {
+            nbtv_rx_push(rx, audio.data() + pos, static_cast<int>(std::min(chunk, audio.size() - pos)));
+            while (nbtv_rx_poll_frame(rx, &f)) frames.push_back(f);
+        }
+        CHECK_EQ(static_cast<int>(frames.size()), 2);  // 前兩幀一收完就交了；第三幀留著
+        nbtv_rx_finish(rx);
+        while (nbtv_rx_poll_frame(rx, &f)) frames.push_back(f);
+        CHECK_EQ(static_cast<int>(frames.size()), 3);
+        if (frames.size() == 3) {
+            CHECK(frames[2].decoded && frames[2].header_ok && frames[2].sequence == 2);
+        }
+        nbtv_rx_finish(rx);  // 再呼叫一次：沒有東西了
+        CHECK_EQ(nbtv_rx_poll_frame(rx, &f), 0);
+        nbtv_rx_destroy(rx);
+        nbtv_tx_destroy(tx);
+    }
+    nbtv_model_destroy(model);
+}
+
 // 模型的各種狀況：還沒設定、設定之後、取消一幀、接收端沒有模型、重設、拿掉。min_psnr 是「貓」那張圖編了再解回來的下限。
 void test_model_handling(int mode_id, const char* weights, double min_psnr) {
     // 沒有模型、不是模型
@@ -1143,6 +1197,7 @@ int main() {
     test_skip_pictures(12, "261122-3", "261124-8", 23.5);
     test_skip_pictures(5, "261125-3", nullptr, 26.0);  // 幀裡沒有導頻的模式
     test_discard_last();
+    test_finish();
     // 下限：各個模型對那張圖不加雜訊時的 PSNR（test_learned.cpp 的對照表）減 0.3 dB
     loopback(12000, 11, "261123-1", "coffee", 28.3);
     loopback(48000, 12, "261122-3", "rocket", 24.8);

@@ -116,23 +116,30 @@ double ChannelEstimator::residual_phase_per_symbol(const Mode& mode, const Symbo
     return std::abs(acc) > 0.0 ? std::arg(acc) / 3.0 : 0.0;
 }
 
-ChannelEstimator::TimeWeights ChannelEstimator::time_weights(const Mode& mode) const {
+ChannelEstimator::TimeWeights ChannelEstimator::time_weights(const Mode& mode, int cut_from, int cut_to) const {
     TimeWeights tw;
     tw.row_count = mode.frame_symbols();
     tw.entries.resize(static_cast<std::size_t>(tw.row_count) * 3);
     // 遠離幀頭幀尾的列，參考格點的相對位置只有三種，解過的就重複使用。
     std::map<std::vector<int>, std::vector<double>> cache;
     for (int row = kPreambleSymbols; row < tw.row_count; ++row) {
+        // 這一列可以參考的範圍：整幀；斷開過的幀（見 estimate）只參考自己那一段
+        int lo = 0, hi = tw.row_count - 1;
+        if (cut_from >= 0) {
+            if (row < cut_from) hi = cut_from - 1;
+            else lo = cut_to;
+        }
         for (int cls = 0; cls < 3; ++cls) {
             TimeWeights::Entry& e = tw.entries[static_cast<std::size_t>(row * 3 + cls)];
             std::vector<int> key;
-            for (int r = std::max(0, row - kTimeSpan); r <= std::min(tw.row_count - 1, row + kTimeSpan); ++r) {
+            for (int r = std::max(lo, row - kTimeSpan); r <= std::min(hi, row + kTimeSpan); ++r) {
                 const bool known = r < kPreambleSymbols || (r - kPreambleSymbols) % 3 == cls;
                 if (!known) continue;
                 e.rows.push_back(r);
                 key.push_back((r - row) + (r == 0 ? 1000 : r == 1 ? 2000 : 0));  // S0、S1 的雜訊倍數不同
             }
             const int n = static_cast<int>(e.rows.size());
+            if (n == 0) continue;  // 這一段太短，沒有這一類的導頻：估計值是 0（只會發生在斷開過的幀）
             auto it = cache.find(key);
             if (it == cache.end()) {
                 std::vector<double> a(static_cast<std::size_t>(n * n)), rhs(static_cast<std::size_t>(n));
@@ -220,9 +227,10 @@ double ChannelEstimator::first_path_delay(const Mode& mode, const SymbolGrid& gr
     return delay;
 }
 
-ChannelEstimate ChannelEstimator::estimate(const Mode& mode, const SymbolGrid& grid) const {
+ChannelEstimate ChannelEstimator::estimate(const Mode& mode, const SymbolGrid& grid, int cut_from, int cut_to) const {
     assert(grid.rows == mode.frame_symbols());
-    const TimeWeights tw = time_weights(mode);
+    assert(cut_from < 0 || (cut_from >= kPreambleSymbols && cut_from <= cut_to && cut_to <= grid.rows));
+    const TimeWeights tw = time_weights(mode, cut_from, cut_to);
     const std::vector<cf> he = interpolate_time(mode, known_cell_estimates(mode, grid), tw);
 
     ChannelEstimate est;

@@ -317,6 +317,13 @@ int nbtv_rx_set_duplex(nbtv_rx *rx, int layout);
  */
 void nbtv_rx_push(nbtv_rx *rx, const float *samples, int count);
 
+/*
+ * 音訊到此為止（讀完一個錄音檔）。接收機有時候會把解出來的一幀留著、等下一幀的位置確定才交（那一幀可能收到一半時
+ * 音訊斷開過，見 docs/TECHNICAL.md）；呼叫之後，留著的那一幀可以用 nbtv_rx_poll_frame 取出來。
+ * 即時收訊不必呼叫：後面一直有音訊進來，留著的幀最多 0.7 秒就會交出來。呼叫之後還可以繼續 nbtv_rx_push。
+ */
+void nbtv_rx_finish(nbtv_rx *rx);
+
 typedef struct nbtv_rx_status {
     int synced;               /* 1：已同步、正在接收一幀；0：搜尋同步訊號中 */
     int mode_id;              /* 自動偵測到的模式；未同步時是 -1 */

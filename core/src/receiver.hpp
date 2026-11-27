@@ -82,6 +82,18 @@ struct RxTuning {
     // 沒有散佈導頻的幀（Mode::scattered_pilots 為 false）沒有導頻可以驗證，改看酬載開頭 12 個符號的循環字首
     // 和符號的尾巴是不是相同（Receiver::cyclic_coherence）：只有雜訊時約 0.1，訊雜比 0 dB 的訊號約 0.5。
     double verify_cyclic = 0.40;
+    // 有散佈導頻的幀：幀尾附近有很像 S0、還來不及判定的東西時，這一幀不算完整（Receiver::process_frame）。這是原來的規則，
+    // 現在預設關掉——酬載自己常常就像 S0，短波的錄音裡一成到六成五的幀因此不算完整，標頭沒解出來時整張就不交出去。
+    // 打開是比較用。
+    bool tail_candidate_veto = false;
+    // 一幀收到一半，音訊斷開過（音訊在送到發射機的路上卡了一下，訊號停幾毫秒到幾十毫秒再原樣接續；或少了一段取樣，
+    // 例如送給網路 SDR 電台的音訊封包沒到）：斷開之後的符號整批晚到或早到，照原來的對時，那一幀不是沒了就是壞一截。
+    // 打開時，沒解出來的幀先記著；下一幀的前導符號如果出現在「不是整數幀」的位置，差的那幾個取樣就是斷開的長度，
+    // 回頭把那一幀分成前後兩段各自對時，再解一次（Receiver::mend_frame）。解出來了但可疑的幀（標頭沒解出來、有一段沒有導頻、
+    // 導頻中間有幾對對不上）先留著不交，等下一幀的位置確定：就在原來的節拍上的話照原樣交（晚 0.07 到 0.4 秒），不在的話
+    // 補救之後再交；一次發射的最後一幀沒有下一幀可以等，最多晚 0.7 秒。訊號乾淨、標頭也正確的幀不會被留。
+    // 只管有散佈導頻的幀；關掉是比較用。
+    bool mend_steps = true;
     // 是否使用逐符號、逐載波的雜訊估計（見 ChannelEstimate::noise_at）。關掉時每個格點都用同一個雜訊變異數。
     bool noise_map = true;
     // 沒有散佈導頻的幀：同一個符號裡各個載波的雜訊不一樣大時，照量到的給（見 Receiver::process_frame_free「各載波的雜訊」）。
@@ -129,6 +141,9 @@ public:
     void push(std::span<const float> samples);  // 12 kHz
     bool poll(RxFrame& out);                    // 取出一個已完成的幀
     RxStatus status() const;
+    // 音訊到此為止（讀完一個檔案）：有一幀留著、等下一幀的位置確定才交的話（RxTuning::mend_steps），現在照原樣交出去，
+    // 之後用 poll 取。即時收訊不必呼叫——後面一直有音訊進來，留著的幀最多 0.7 秒就會交出來。之後還可以繼續 push。
+    void finish();
 
     // 目前已經處理到的輸入取樣數
     std::int64_t samples_received() const { return total_in_; }
@@ -181,6 +196,9 @@ private:
     };
     PilotCheck verify_pilots(std::int64_t t0, double cfo, const Mode& mode) const;
     void process_frame();
+    bool mend_frame(const Acquisition& next);
+    void release_held();
+    void drop_mend();
     void decode_picture(const Mode& mode, const LearnedUnpacked& l, bool whole, RxFrame& frame);
     // 沒有散佈導頻的幀（給 FM 語音通道用）走的路，對應上面靠導頻的那幾個：
     double cyclic_coherence(std::int64_t t0, int first_row, int last_row) const;
@@ -283,6 +301,27 @@ private:
     double sync_quality_ = 0.0;
     float snr_db_ = 0.0f;
     bool snr_valid_ = false;
+    // 最近一個沒有交出去、或解出來了但留著還沒交的幀（有散佈導頻的）：它可能是中途斷開了（RxTuning::mend_steps）。
+    // 緩衝區留著它的取樣，等下一幀的前導符號出現（begin_frame）再決定要不要回頭補救；確認到下一幀就在原來的節拍上、
+    // 或等太久，就作廢（留著的照原樣交出去）。
+    struct Mend {
+        bool valid = false;
+        const Mode* mode = nullptr;
+        std::int64_t t0 = 0;    // 那一幀的起點與頻偏（第一次處理時用的）
+        double cfo = 0.0;
+        bool trusted = false;   // 它的前導符號確認過，而且很明確或緊接在一張好的後面：補救之後標頭還是沒解出來時，導頻清楚也算數
+        // 第一次解出來了、但可疑的幀：結果（還沒解成畫面）留在這裡沒有交出去。補救成了就換成補救的，不成就照原樣交（release_held）。
+        bool held = false;
+        RxFrame frame;
+        LearnedUnpacked unpacked;
+    };
+    Mend mend_;
+    // 兩邊的取樣時脈差多少：照節拍接下來的幀，定時每一幀修正了幾個取樣（除以幀長；最近幾幀的加權和與權重）。
+    // 下一幀的起點本來就會因此偏幾個取樣，mend_frame 算斷開的長度時要扣掉。
+    double trend_sum_ = 0.0, trend_weight_ = 0.0;
+    bool from_previous_ = false;        // 目前這一幀的起點是由上一幀的起點加一幀的長度來的（不是剛捕獲的）
+    const Mode* last_mode_ = nullptr;   // 最近處理完的那一幀的模式與結尾（下一幀照節拍該開始的地方）
+    std::int64_t last_end_ = 0;
 
     // 沒有散佈導頻的幀：同一次發射（一幀接一幀）之間留著的東西。FM 的音訊通道整次發射都不變，
     // 所以通道的估計可以跨幀平均；取樣時脈差多少也不會變。捕獲到新的一次發射時清掉（begin_frame）。

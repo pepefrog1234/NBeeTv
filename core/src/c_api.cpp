@@ -379,6 +379,10 @@ nbtv_rx* nbtv_rx_create(int sample_rate) {
 
 void nbtv_rx_destroy(nbtv_rx* rx) { delete rx; }
 
+void nbtv_rx_finish(nbtv_rx* rx) {
+    if (rx != nullptr) rx->rx.finish();
+}
+
 void nbtv_rx_reset(nbtv_rx* rx) {
     if (rx == nullptr) return;
     rx->rx.reset();

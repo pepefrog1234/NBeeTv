@@ -40,6 +40,17 @@ static_assert(kAcquireMargin >= kAcquireMaxOffset + kAcquireMaxDelay - kAcquireB
 constexpr int kTrackDetectFirst = -24;
 constexpr int kTrackDetectLast = 24;
 constexpr int kTailSegment = 18;      // 解出來的幀：以這麼多個符號為一段，從尾端往回看導頻在不在
+// 回頭補救中途斷開的幀（RxTuning::mend_steps、Receiver::mend_frame）
+constexpr int kMendMinStep = 12;      // 下一幀的起點偏離整數幀至少這麼多個取樣才當成斷開過；更小的，定時追蹤自己跟得上
+constexpr int kMendMaxStep = 2400;    // 最多 0.2 秒；再長的不是音訊卡了一下
+constexpr int kMendMinRows = 4;       // 斷開之後至少還有這麼多個酬載符號：導頻的三種位置各有一個符號，兩段才能各自估通道
+// 接起來之後，各對導頻的相關值加起來至少要比整幀都照原來的對時多這麼多才算數（完整的一對約 0.5–0.9，只有雜訊的約 0.35、方向隨機）。
+// 斷開的長度不到一個循環字首時，照原來的對時解，斷開前後各自的導頻都還相干，差別只在跨過斷點的那三對。
+constexpr double kMendGain = 1.5;
+constexpr double kDipShare = 0.5;     // 導頻中間有連著三對對不上：它們加起來不到平常三對的這個比例（pilot_dip）
+constexpr double kTrendKeep = 0.9;    // 取樣時脈差的估計：每過一幀，之前的份量乘上這個數
+constexpr double kTrendMinWeight = 2.5;  // 累積到三幀左右才用
+constexpr float kLostNoise = 1e6f;    // 斷開的地方沒有訊號的那幾個符號：格點的雜訊給這麼大，等於告訴解碼器「這裡沒有收到」
 constexpr double kSolidScThreshold = 0.15;  // 收訊中找「很明確的前導符號」時 S0 滑動相關的門檻（訊雜比 −2 dB 的 S0 約 0.15）
 constexpr double kS1MinScore = 1.5;   // 前導符號的判定：S1 單獨的分數至少要這麼高（只有雜訊時約為 1）
 constexpr double kS1PeakRatio = 0.5;  // ……而且至少是 S1 在所有模式、所有延遲裡最高分數的這個比例
@@ -153,27 +164,57 @@ float pilot_clip_level(const SymbolGrid& grid, int row, int j) {
 // 不會被少數幾個特別強的符號左右（例如檢查的範圍裡大半是雜訊、最後幾個符號卻是另一次發射的開頭），
 // 完全沒有訊號的符號（取樣全是 0 的靜音）也照樣算一對、相關值是 0。
 // skip 不是空指標時，那幾個載波不算（見 PilotSpread：排除能量最強的幾個載波之後仍然相干，才不是單頻載波造成的）。
+// 一對符號（第 j 個與第 j+3 個酬載符號）正規化的相關值；其中一個完全沒有訊號時是 0。
+// 第 j 個取自 first、第 j+3 個取自 second：平常是同一個陣列；補救中途斷開的幀時，前後兩段的對時不同（Receiver::mend_frame）。
+cd pilot_pair(const SymbolGrid& first, const SymbolGrid& second, int j, const std::array<int, 3>* skip = nullptr) {
+    const int ra = j + kPreambleSymbols, rb = ra + 3;
+    const float la = pilot_clip_level(first, ra, j), lb = pilot_clip_level(second, rb, j);
+    cd acc(0, 0);
+    double ea = 0.0, eb = 0.0;
+    for (int c = 0; c < kCarriers; ++c) {
+        if (!is_pilot(j, kFirstBin + c)) continue;  // 第 j 與第 j+3 個符號的導頻在同樣的格子上
+        if (skip != nullptr && (c == (*skip)[0] || c == (*skip)[1] || c == (*skip)[2])) continue;
+        const cd a = limited(first.at(ra, c), la);
+        const cd b = limited(second.at(rb, c), lb);
+        acc += b * std::conj(a);
+        ea += std::norm(a);
+        eb += std::norm(b);
+    }
+    return (ea > 0.0 && eb > 0.0) ? acc / std::sqrt(ea * eb) : cd(0, 0);
+}
+
 double pilot_coherence(const SymbolGrid& grid, int first, int last, const std::array<int, 3>* skip = nullptr) {
     cd total(0, 0);
     int pairs = 0;
     for (int j = first; j + 3 < last; ++j) {
-        const int ra = j + kPreambleSymbols, rb = ra + 3;
-        const float la = pilot_clip_level(grid, ra, j), lb = pilot_clip_level(grid, rb, j);
-        cd acc(0, 0);
-        double ea = 0.0, eb = 0.0;
-        for (int c = 0; c < kCarriers; ++c) {
-            if (!is_pilot(j, kFirstBin + c)) continue;  // 第 j 與第 j+3 個符號的導頻在同樣的格子上
-            if (skip != nullptr && (c == (*skip)[0] || c == (*skip)[1] || c == (*skip)[2])) continue;
-            const cd a = limited(grid.at(ra, c), la);
-            const cd b = limited(grid.at(rb, c), lb);
-            acc += b * std::conj(a);
-            ea += std::norm(a);
-            eb += std::norm(b);
-        }
         ++pairs;
-        if (ea > 0.0 && eb > 0.0) total += acc / std::sqrt(ea * eb);
+        total += pilot_pair(grid, grid, j, skip);
     }
     return pairs > 0 ? std::abs(total) / pairs : 0.0;
+}
+
+// 導頻整體相干，中間卻有連著三對對不上。一幀收到一半、之後的符號整批晚到或早到（音訊斷開過）時就是這個樣子：
+// 跨過斷點的那三對（前一個符號在斷點之前、後一個在之後）相位差了一個隨頻率變的斜率，加不起來；斷點前後各自的對仍然相干——
+// 之後的符號就算錯位到夾著前後兩個符號，導頻「還在」，只是和之前的對不上。只看導頻在不在，看不出這種幀。
+// 衰落的谷底與突波也會讓幾對對不上，所以這只算「可疑」（見 Receiver::process_frame：可疑的幀先留著不交）。
+bool pilot_dip(const SymbolGrid& grid, int payload_symbols) {
+    const int pairs = payload_symbols - 3;
+    if (pairs < 6) return false;
+    std::vector<cd> value(static_cast<std::size_t>(pairs));
+    cd total(0, 0);
+    for (int j = 0; j < pairs; ++j) {
+        value[static_cast<std::size_t>(j)] = pilot_pair(grid, grid, j);
+        total += value[static_cast<std::size_t>(j)];
+    }
+    const double size = std::abs(total);
+    if (size <= 0.0) return false;
+    const cd toward = std::conj(total / size);
+    double lowest = 3.0;
+    for (int j = 0; j + 3 <= pairs; ++j) {
+        const cd three = value[static_cast<std::size_t>(j)] + value[static_cast<std::size_t>(j + 1)] + value[static_cast<std::size_t>(j + 2)];
+        lowest = std::min(lowest, (three * toward).real());
+    }
+    return lowest < kDipShare * 3.0 * size / pairs;
 }
 
 // 導頻的能量有多集中：25 個有導頻的載波（偶數格）各自把整幀的導頻能量加起來，找出最強的 3 個。
@@ -460,6 +501,11 @@ void Receiver::reset() {
     frame_evidence_ = 0.0;
     pending_start_ = -1;
     done_start_ = INT64_MIN;
+    mend_ = Mend{};
+    trend_sum_ = trend_weight_ = 0.0;
+    from_previous_ = false;
+    last_mode_ = nullptr;
+    last_end_ = 0;
     enter_search(0);
 }
 
@@ -498,6 +544,8 @@ void Receiver::push(std::span<const float> raw) {
     trim();
 }
 
+void Receiver::finish() { drop_mend(); }
+
 bool Receiver::poll(RxFrame& out) {
     if (frames_.empty()) return false;
     out = std::move(frames_.front());
@@ -534,6 +582,16 @@ void Receiver::trim() {
         keep = std::min(keep, rescan_from_ - 2048);
         if (state_ == State::Receive) keep = std::min(keep, std::min(scan_pos_, cand_ready_ ? cand_pos_ : scan_pos_) - 2048);
         if (pending_start_ >= 0) keep = std::min(keep, pending_start_ - 2048);
+    }
+    if (mend_.valid) {
+        // 等著補救的那一幀：下一幀的前導符號最晚會出現在它的結尾之後 kMendMaxStep 個取樣。找 S0 的位置過了那裡、那之前也沒有
+        // 還在等判定的候選位置，就不等了（留著沒交的照原樣交出去）。等的時候它的取樣要留著，往前多留 kMendMaxStep
+        // （斷開之後早到的那一段）。
+        const std::int64_t limit = mend_.t0 + mend_.mode->frame_samples() + kMendMaxStep;
+        const bool scanning = state_ == State::Search || state_ == State::Receive;
+        const bool waiting = (cand_ready_ && cand_pos_ <= limit) || (peak_active_ && peak_pos_ <= limit) || pending_start_ >= 0;
+        if (scanning && scan_pos_ > limit && !waiting) drop_mend();
+        else keep = std::min(keep, mend_.t0 - kMendMaxStep - 2048);
     }
     if (keep - base_ > kBufferSlack) {
         buf_.erase(buf_.begin(), buf_.begin() + static_cast<std::ptrdiff_t>(keep - base_));
@@ -971,6 +1029,13 @@ bool Receiver::try_acquire(std::int64_t s0_start, cd corr, double metric) {
 
 // 開始收一幀。它的前導符號已經通過 try_acquire 的檢查。
 void Receiver::begin_frame(const Acquisition& found) {
+    // 上一幀沒有交出去（或留著還沒交），而這一幀的起點不在它之後整數幀的位置：它可能是中途斷開了，先回頭補救
+    // （要趁這一幀還沒處理）。沒補救成的話，留著的照原樣交出去。
+    const bool mended = mend_.valid && mend_frame(found);
+    drop_mend();
+    // 這一幀如果不是接在剛才那一幀後面不遠（同一個模式、差不到 kMendMaxStep），就是另一次發射：取樣時脈差多少要重新量
+    if (found.mode != last_mode_ || std::llabs(found.t0 - last_end_) > kMendMaxStep) trend_sum_ = trend_weight_ = 0.0;
+    from_previous_ = false;
     mode_ = found.mode;
     cfo_ = found.cfo;
     t0_ = found.t0;
@@ -980,7 +1045,8 @@ void Receiver::begin_frame(const Acquisition& found) {
     presence_checked_ = true;
     rescan_from_ = found.t0 + kSymbolSamples;  // 這一幀若沒解出來、也沒有下一幀，就從這個前導符號之後重新搜尋
     unconfirmed_run_ = 0;
-    last_ok_ = false;
+    // 補救回來的那一幀就是這一幀的上一幀：它的標頭正確，或者導頻從頭到尾都很清楚，和平常「上一幀解出來了」一樣
+    last_ok_ = mended;
     last_clear_ = false;
     follow_misses_ = 0;
     last_complete_ = false;
@@ -1233,6 +1299,8 @@ void Receiver::null_powers(std::int64_t t0, int rows, std::vector<float>& out) c
 // 靠導頻的地方換成：頭尾兩個參考符號（通道、時脈漂移、這一幀有沒有送完）、循環字首（訊號在不在）、
 // 頻帶上方沒用到的頻率（每個符號的雜訊）。
 void Receiver::process_frame_free() {
+    drop_mend();  // 回頭補救中途斷開的幀只做了有散佈導頻的那一種；之前留著沒交的先交出去
+    last_mode_ = nullptr;
     const Mode& mode = *mode_;
     const int rows = mode.frame_symbols();
     const int tail = rows - 1;      // 結尾的參考符號那一列
@@ -1758,6 +1826,184 @@ void Receiver::decode_picture(const Mode& mode, const LearnedUnpacked& l, bool w
     }
 }
 
+// 留著沒交的那一幀（Mend::held）照原樣交出去：到這時候才解成畫面。
+void Receiver::release_held() {
+    if (!mend_.held) return;
+    mend_.held = false;
+    RxFrame frame = std::move(mend_.frame);
+    if (trace_) std::fprintf(stderr, "[rx] 幀 @%lld 留到現在，照原樣交出去\n", static_cast<long long>(frame.start_sample));
+    decode_picture(*mend_.mode, mend_.unpacked, true, frame);
+    mend_.unpacked = LearnedUnpacked{};
+    if (frame.decoded) ++frames_decoded_;
+    else if (frame.skipped) ++frames_skipped_;
+    else ++frames_failed_;
+    frames_.push_back(std::move(frame));
+}
+
+// 不再等著補救上一幀：留著沒交的照原樣交出去。
+void Receiver::drop_mend() {
+    release_held();
+    mend_.valid = false;
+}
+
+// 回頭補救中途斷開過的一幀（RxTuning::mend_steps）。next 是剛捕獲的下一幀；補救回來、交出去了回傳 true。
+//
+// 斷開是什麼樣子：音訊在送到發射機的路上卡了一下（電腦一時忙不過來、音效裝置的緩衝區空了、從網路收音訊的電台等不到下一包），
+// 訊號停幾毫秒到幾十毫秒，然後從停下來的地方原樣接續——之後的每個符號都晚了那麼久；或者少了一段取樣（送給電台的封包沒到、
+// 哪一頭的音訊裝置丟了一段）——之後的每個符號都早了。
+// 兩種情形，斷開之前的符號都在原來的位置上，之後的符號整批移了同樣的取樣數。這個數目不必猜：下一幀的前導符號出現的位置
+// 和「這一幀的起點＋一幀的長度」差多少，就是它（兩邊取樣時脈的差造成的那一點先扣掉）。
+//
+// 做法：這一幀照原來的對時（A）與移過之後的對時（B）各解調一次。相隔 3 個符號的兩個導頻（同樣的格子）相不相干，說明
+// 那兩個符號的對時對不對得上。假設在某個地方斷開：之前的符號用 A、之後的用 B，把所有的對的相關值加起來——兩個符號都在
+// 前段的用 A 的、都在後段的用 B 的、一前一後的拿 A 的前一個配 B 的後一個。分界找對了，每一對都相干；找錯了，分界與真正的
+// 斷點之間的符號用錯了對時，和它們配對的都加不起來。取加起來最大的分界；中間來不及對上的符號（訊號停下來的那一個，
+// 少了一段時是不見的那幾個）當成沒有收到。兩段各自估通道（ChannelEstimator::estimate 的 cut_from、cut_to），
+// 之後和平常的幀一樣等化、解標頭、解畫面。
+//
+// 什麼時候算數：接起來之後要比整幀都照原來的對時明顯更相干（kMendGain），後段的導頻也要夠清楚——不然只是下一幀晚了一點
+// 才開始，這一幀本來就沒有斷。然後標頭要解得出來，或者這一幀的前導符號當時確認過（Mend::trusted）、接起來之後整幀的導頻
+// 清楚而且不是單頻載波冒充的。原來標頭就解得出來的幀（留著沒交的），接起來之後標頭也要解得出來才換。
+//
+// 分不出來的情形：斷開的長度剛好是 3 個符號（80 毫秒）的整數倍。導頻的位置每 3 個符號重複一次，兩種對時下每一對都相干，
+// 找不到分界；這種幀照原樣交（或沒有畫面）。
+bool Receiver::mend_frame(const Acquisition& next) {
+    if (next.mode != mend_.mode || mend_.mode == nullptr) return false;
+    const Mode& mode = *mend_.mode;
+    const std::int64_t length = mode.frame_samples();
+    // 兩邊的取樣時脈差一點的話，下一幀的起點本來就會偏幾個取樣（最近幾幀定時修正的平均，見 process_frame）
+    const double drift = trend_weight_ >= kTrendMinWeight ? trend_sum_ / trend_weight_ * static_cast<double>(length) : 0.0;
+    const std::int64_t step = next.t0 - (mend_.t0 + length) - std::llround(drift);
+    if (std::llabs(step) < kMendMinStep || std::llabs(step) > kMendMaxStep) return false;
+    const int rows = mode.frame_symbols(), payload = mode.payload_symbols;
+    const int pairs = payload - 3;  // 第 j 對是第 j 與第 j+3 個酬載符號，j = 0..pairs−1
+    if (pairs < 6) return false;
+    const std::int64_t ta = mend_.t0, tb = mend_.t0 + step;
+    auto readable = [&](std::int64_t t0) { return t0 + kCyclicPrefix - kTrackBackoff >= base_ && t0 + length + kCyclicPrefix <= end(); };
+    if (!readable(ta) || !readable(tb)) return false;
+
+    double cfo = mend_.cfo;
+    SymbolGrid a = demodulate(ta, cfo, rows), b = demodulate(tb, cfo, rows);
+    // 各對的相關值：兩個符號都照 A（aa）、都照 B（bb）、前一個照 A 後一個照 B（ab）
+    std::vector<cd> aa(static_cast<std::size_t>(pairs)), bb(static_cast<std::size_t>(pairs)), ab(static_cast<std::size_t>(pairs));
+    for (int j = 0; j < pairs; ++j) {
+        aa[static_cast<std::size_t>(j)] = pilot_pair(a, a, j);
+        bb[static_cast<std::size_t>(j)] = pilot_pair(b, b, j);
+        ab[static_cast<std::size_t>(j)] = pilot_pair(a, b, j);
+    }
+    // head[n]：兩個符號都在前 n 個酬載符號裡的那些對（j ≤ n−4），照 A；tail[n]：兩個符號都在第 n 個起的（j ≥ n），照 B
+    std::vector<cd> head(static_cast<std::size_t>(payload) + 1, cd(0, 0)), tail(static_cast<std::size_t>(payload) + 1, cd(0, 0));
+    for (int n = 4; n <= payload; ++n) head[static_cast<std::size_t>(n)] = head[static_cast<std::size_t>(n - 1)] + aa[static_cast<std::size_t>(n - 4)];
+    for (int n = pairs - 1; n >= 0; --n) tail[static_cast<std::size_t>(n)] = tail[static_cast<std::size_t>(n + 1)] + bb[static_cast<std::size_t>(n)];
+    // 分界 (ia, ib)：前 ia 個酬載符號用 A，第 ib 個起用 B，中間的 ib − ia 個當成沒有收到。跨過分界的對是 ib−3 ≤ j < ia。
+    auto across = [&](int ia, int ib) {
+        cd sum(0, 0);
+        for (int j = std::max(ib - 3, 0); j < std::min(ia, pairs); ++j) sum += ab[static_cast<std::size_t>(j)];
+        return sum;
+    };
+    // 少了一段時，不見的符號數是「少掉的取樣數 ÷ 符號長」無條件進位，斷在符號中間的話再多一個；訊號停下來時只有停的那一個
+    const int lost_max = step < 0 ? static_cast<int>((-step + kSymbolSamples - 1) / kSymbolSamples) + 1 : 1;
+    int na = 0, nb = 0;
+    double best = -1.0;
+    for (int ia = 0; ia + kMendMinRows <= payload; ++ia) {
+        for (int ib = ia; ib <= ia + lost_max && ib + kMendMinRows <= payload; ++ib) {
+            const double score = std::abs(head[static_cast<std::size_t>(ia)] + across(ia, ib) + tail[static_cast<std::size_t>(ib)]);
+            if (score > best) {
+                best = score;
+                na = ia;
+                nb = ib;
+            }
+        }
+    }
+    const cd sum_a = head[static_cast<std::size_t>(na)], sum_b = tail[static_cast<std::size_t>(nb)];
+    const cd joined = sum_a + across(na, nb) + sum_b;
+    const int count_a = std::max(na - 3, 0), count_b = pairs - nb;
+    const int count = count_a + count_b + std::max(std::min(na, pairs) - std::max(nb - 3, 0), 0);
+    const double whole_before = std::abs(head[static_cast<std::size_t>(payload)]);  // 整幀都照原來的對時
+    const double gain = std::abs(joined) - whole_before;
+    // 後段的導頻要夠清楚：用到後段符號的那些對（都在後段的，加上跨過分界的）平均起來的相關值。
+    // 只有雜訊時，一對的相關值大小約 0.35、方向隨機，n 對平均起來約 0.35/√n；門檻取 1/√n（只有雜訊時超過的機會不到千分之一）
+    const int count_after = count - count_a;
+    const double after = count_after > 0 ? std::abs(joined - sum_a) / count_after : 0.0;
+    const bool shifted = gain >= kMendGain && after >= std::max(kFollowThreshold, 1.0 / std::sqrt(static_cast<double>(std::max(count_after, 1))));
+    if (trace_) {
+        std::fprintf(stderr, "[rx] 幀 @%lld %s，下一幀的起點%s了 %lld 個取樣：前 %d 個酬載符號用原來的對時、第 %d 個起用移過的，"
+                             "各對導頻的相關值加起來 %.1f（%d 對；後段平均 %.2f），整幀照原來的對時是 %.1f（%d 對）%s\n",
+                     static_cast<long long>(ta), mend_.held ? "留著還沒交" : "沒有交出去", step > 0 ? "晚" : "早",
+                     static_cast<long long>(std::llabs(step)), na, nb, std::abs(joined), count, after, whole_before, pairs,
+                     shifted ? "" : "；不像是中途斷開，不補救");
+    }
+    if (!shifted) return false;
+
+    // 殘餘頻偏：接起來之後的導頻估出來，夠大就重新解調（和 process_frame 一樣）
+    const double dcfo = std::arg(joined) / 3.0 / (kTwoPi * kSymbolSamples);
+    if (std::fabs(dcfo * kSampleRate) >= kCfoRedoHz) {
+        cfo += dcfo;
+        a = demodulate(ta, cfo, rows);
+        b = demodulate(tb, cfo, rows);
+    }
+    const int cut_from = kPreambleSymbols + na, cut_to = kPreambleSymbols + nb;
+    SymbolGrid grid(rows);
+    for (int r = 0; r < rows; ++r) {
+        const SymbolGrid& from = r < cut_from ? a : b;
+        for (int c = 0; c < kCarriers; ++c) grid.at(r, c) = from.at(r, c);
+    }
+    const ChannelEstimate est = chanest_.estimate(mode, grid, cut_from, cut_to);
+    const double coherence = std::abs(joined) / std::max(count, 1);
+    const PilotSpread pilots = pilot_spread(grid, mode.payload_symbols);
+    const bool clear = coherence > kFollowThreshold && pilots.top_share < kPilotTopShare;
+
+    const std::vector<CellPos> positions = data_cell_positions(mode.payload_symbols);
+    std::vector<cf> cells(positions.size());
+    std::vector<float> noise(positions.size());
+    for (std::size_t n = 0; n < positions.size(); ++n) {
+        const int row = positions[n].symbol + kPreambleSymbols;
+        const int c = positions[n].bin - kFirstBin;
+        if (row >= cut_from && row < cut_to) {
+            cells[n] = cf(0, 0);
+            noise[n] = kLostNoise;
+            continue;
+        }
+        const cf h = est.at(row, c);
+        const float h2 = std::max(std::norm(h), 1e-20f);
+        cells[n] = grid.at(row, c) * std::conj(h) / h2;
+        noise[n] = (tuning_.noise_map ? est.noise_at(row, c) : est.noise_var) * (1.0f + est.gain_at(row, c)) / h2;
+    }
+
+    RxFrame frame;
+    frame.mode_id = mode.id;
+    frame.image_width = mode.image_width;
+    frame.image_height = mode.image_height;
+    frame.snr_db = est.snr_db;
+    frame.freq_offset_hz = static_cast<float>(cfo * kSampleRate);
+    frame.start_sample = ta;
+    const LearnedUnpacked l = learned_unpack(mode, cells, noise);
+    frame.header_ok = l.header_ok;
+    if (l.header_ok) {
+        frame.callsign = l.header.callsign_valid ? l.header.callsign : std::string();
+        frame.sequence = l.header.sequence;
+    }
+    // 留著沒交的那一幀原來標頭是對的：接起來之後標頭反而解不出來的話，不換
+    const bool whole = l.header_ok || (mend_.trusted && clear && !(mend_.held && mend_.frame.header_ok));
+    if (trace_) {
+        std::fprintf(stderr, "[rx]   接起來之後：訊雜比 %.1f dB、導頻相干 %.2f（最強的 3 個載波佔 %.0f%%）、中間 %d 個符號當成沒有收到 → 標頭%s%s\n",
+                     static_cast<double>(est.snr_db), coherence, 100.0 * pilots.top_share, nb - na, l.header_ok ? "正確" : "沒解出來",
+                     whole ? "" : "，不算數");
+    }
+    if (!whole) return false;
+    // 留著沒交的那一份不要了
+    mend_.held = false;
+    mend_.frame = RxFrame{};
+    mend_.unpacked = LearnedUnpacked{};
+    decode_picture(mode, l, true, frame);
+    if (trace_) std::fprintf(stderr, "[rx]   → 補救回來：標頭%s、%s\n", l.header_ok ? "正確" : "沒解出來", frame.decoded ? "有畫面" : "沒有畫面");
+    if (frame.decoded) ++frames_decoded_;
+    else if (frame.skipped) ++frames_skipped_;
+    else ++frames_failed_;
+    frames_.push_back(std::move(frame));
+    return true;
+}
+
 void Receiver::process_frame() {
     const Mode& mode = *mode_;
     const int rows = mode.frame_symbols();
@@ -1765,6 +2011,8 @@ void Receiver::process_frame() {
     const bool previous_clear = last_clear_;
     const std::int64_t t0_before = t0_;
     const double cfo_before = cfo_;
+    // 上一幀如果還留著沒交（Mend::held），不能再等了：先照原樣交出去，交出去的順序才和收到的順序一樣
+    release_held();
     // 前導符號確認過的幀處理一次就夠了（見 done_start_）。沒確認到前導符號、只是假設對方還在送的幀不算：
     // 那裡不一定真的有一幀，之後回頭搜尋時可能在它前後找到真正的前導符號。
     if (confirmed_) done_start_ = t0_before;
@@ -1802,9 +2050,14 @@ void Receiver::process_frame() {
         const int from = mode.payload_symbols * k / segments, to = mode.payload_symbols * (k + 1) / segments;
         present_throughout = pilot_coherence(grid, from, to) > kPresenceThreshold;
     }
-    // 幀尾附近如果有很像 S0 的東西還來不及判定（要等後面十幾個符號到齊），這一幀可能在那裡就被別的發射蓋掉了
+    // 這裡原來還有一個條件：幀尾附近如果有很像 S0 的東西還來不及判定（要等後面十幾個符號到齊），這一幀就不算完整——
+    // 它可能在那裡被別的發射蓋掉了。可是那個門檻（kSolidScThreshold）不高，酬載自己就常常超過：偶數格（導頻都在偶數格）
+    // 相隔 128 個取樣會重複，畫面的值小的符號裡導頻佔的比例高，滑動相關就過了門檻。短波的錄音裡一成到六成五的幀都有，
+    // 等於隨機否決：標頭一沒解出來，那一幀就不算數，下一幀的前導符號如果剛好衰落，也不再照節拍接著收。
+    // 現在只看上面那幾段的導頻（最後一段在，就是送到最後了）。還沒判定的候選位置不會因此漏掉：收完這一幀之後，
+    // 沒有確認到下一幀的前導符號時，搜尋會從幀尾之前重新掃一次。RxTuning::tail_candidate_veto 打開是原來的規則（比較用）。
     const bool late_candidate = (cand_ready_ && cand_metric_ >= kSolidScThreshold) || (peak_active_ && peak_metric_ >= kSolidScThreshold);
-    const bool intact = present_throughout && pending_start_ < 0 && !late_candidate;
+    const bool intact = present_throughout && pending_start_ < 0 && !(tuning_.tail_candidate_veto && late_candidate);
     // 導頻的能量是不是分散在整個頻帶：集中在少數幾個載波上的是單頻載波，不是導頻（見 kPilotTopShare）
     const PilotSpread pilots = (intact || trace_) ? pilot_spread(grid, mode.payload_symbols) : PilotSpread{};
     const bool spread = pilots.top_share < kPilotTopShare;
@@ -1817,6 +2070,11 @@ void Receiver::process_frame() {
         std::fprintf(stderr, "[rx] 幀 @%lld 模式 %d：頻偏 %+.2f Hz、定時修正 %+.1f、訊雜比 %.1f dB、導頻相干 %.2f"
                              "（最強的 3 個載波佔 %.0f%%，不算它們是 %.2f）\n",
                      static_cast<long long>(t0_), mode.id, cfo_ * kSampleRate, tau, est.snr_db, coherence, 100.0 * pilots.top_share, coherence_rest);
+        if (!intact) {
+            std::fprintf(stderr, "[rx]   不算完整：%s%s%s\n", present_throughout ? "" : "有一段沒有導頻；",
+                         pending_start_ >= 0 ? "中途出現另一個前導符號；" : "",
+                         tuning_.tail_candidate_veto && late_candidate ? "幀尾有還沒判定的 S0 候選" : "");
+        }
     }
 
     // 等化資料格
@@ -1872,13 +2130,23 @@ void Receiver::process_frame() {
                              : suspect ? (usual ? "；有強的載波，S1 對得上，算一幀" : "；有強的載波，S1 對不上，不算") : "");
     }
     const bool whole = usual || followed;
-    decode_picture(mode, l, whole, frame);
+    // 可疑的幀先留著不交（RxTuning::mend_steps）：標頭沒解出來、有一段沒有導頻，或導頻中間有連著幾對對不上（pilot_dip）。
+    // 這一幀可能收到一半時音訊斷開過——斷開之後的符號錯位了，照這個對時解出來的畫面有一截是壞的，而導頻「還在」、
+    // 標頭有重複與迴旋碼保護也常常還解得出來，所以從這一幀自己看不出來。等下一幀的位置確定：就在原來的節拍上的話
+    // 照原樣交出去（confirm_next），不在的話回頭補救（begin_frame → mend_frame）。
+    const bool dip = tuning_.mend_steps && whole && l.header_ok && intact && pilot_dip(grid, mode.payload_symbols);
+    const bool hold = tuning_.mend_steps && whole && (!l.header_ok || !intact || dip);
+    if (trace_ && dip) std::fprintf(stderr, "[rx]   導頻中間有連著三對對不上\n");
+    if (!hold) decode_picture(mode, l, whole, frame);
     // 沒有畫面的幀：前導符號確認過、從頭到尾都有導頻、中途也沒有出現別的前導符號，才回報「有一幀沒解出來」。
     // 只有開頭一段有導頻的，是對方送到一半就停了，或是誤認的前導符號剛好落在別人的酬載裡。
     const bool emit = whole || (confirmed_ && intact && spread);  // 有強的載波、S1 又對不上的，多半不是一幀，不回報
 
-    if (trace_) std::fprintf(stderr, "[rx]   → 標頭%s、%s\n", ok ? "正確" : "沒解出來", frame.decoded ? "有畫面" : "沒有畫面");
-    if (emit) {
+    if (trace_) {
+        std::fprintf(stderr, "[rx]   → 標頭%s、%s\n", ok ? "正確" : "沒解出來",
+                     hold ? "有畫面（先留著，等下一幀的位置確定）" : frame.decoded ? "有畫面" : "沒有畫面");
+    }
+    if (emit && !hold) {
         if (frame.decoded) ++frames_decoded_;
         else if (frame.skipped) ++frames_skipped_;
         else ++frames_failed_;
@@ -1909,8 +2177,31 @@ void Receiver::process_frame() {
         cfo_ = cfo_before;
     }
 
+    // 取樣時脈差多少：照節拍接下來、也解出來的幀，這一幀的定時修正了幾個取樣（mend_frame 用）
+    if (from_previous_ && (ok || solid)) {
+        trend_sum_ = kTrendKeep * trend_sum_ + static_cast<double>(t0_ - t0_before) / mode.frame_samples();
+        trend_weight_ = kTrendKeep * trend_weight_ + 1.0;
+    }
+    from_previous_ = true;
+
     // 下一幀緊接在後
     const std::int64_t frame_start = t0_;
+    last_mode_ = mode_;
+    last_end_ = frame_start + mode_->frame_samples();
+    // 沒有交出去的幀與留著沒交的幀都記著：下一幀的前導符號如果出現在不是整數幀的位置，它可能是中途斷開了，
+    // 到時候回頭補救（mend_frame）
+    mend_.valid = tuning_.mend_steps && (hold || !emit);
+    mend_.held = mend_.valid && hold;
+    if (mend_.valid) {
+        mend_.mode = mode_;
+        mend_.t0 = frame_start;
+        mend_.cfo = cfo_;
+        mend_.trusted = confirmed_ && (previous_ok || !tentative());
+        if (hold) {
+            mend_.frame = std::move(frame);
+            mend_.unpacked = l;
+        }
+    }
     t0_ += mode_->frame_samples();
     if (ok || solid) {
         // 解出來的這一幀不必再搜尋。不過標頭解得出來不代表對方把整幀送完了：它有重複與迴旋碼保護，
@@ -1995,6 +2286,7 @@ void Receiver::confirm_next() {
     }
 
     if (confirmed) {
+        drop_mend();  // 下一幀就在原來的節拍上：上一幀沒有斷開過。留著沒交的照原樣交出去；沒解出來的就是沒解出來
         confirmed_ = true;
         presence_checked_ = true;
         unconfirmed_run_ = 0;

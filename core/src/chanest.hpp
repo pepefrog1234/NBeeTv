@@ -62,13 +62,17 @@ public:
     // 由整幀導頻平均出的延遲功率分布求得，比單看 S1 可靠。
     double first_path_delay(const Mode& mode, const SymbolGrid& grid) const;
 
-    ChannelEstimate estimate(const Mode& mode, const SymbolGrid& grid) const;
+    // cut_from、cut_to 是格點陣列的列號（kPreambleSymbols ≤ cut_from ≤ cut_to）：這一幀在這兩列之間斷開過——音訊中途停了一下
+    // 或少了一段，之後的符號整批晚到或早到，接收端把前後兩段各自對時之後接成一個陣列（Receiver::mend_frame）。
+    // 兩段的時間基準差了幾個取樣就是整個頻帶上不同的相位斜率，所以第 cut_from 列之前與第 cut_to 列起各自估、互不參考；
+    // 中間的列（沒有可用的訊號）借後面那一段的估計，呼叫端不該用它們的格點。cut_from < 0 表示沒有斷開。
+    ChannelEstimate estimate(const Mode& mode, const SymbolGrid& grid, int cut_from = -1, int cut_to = -1) const;
 
 private:
     struct TimeWeights;
     // 已知格點的最小平方估計，只取偶數格：ls[row·25 + i]，沒有已知值的位置不使用。
     std::vector<cf> known_cell_estimates(const Mode& mode, const SymbolGrid& grid) const;
-    TimeWeights time_weights(const Mode& mode) const;
+    TimeWeights time_weights(const Mode& mode, int cut_from = -1, int cut_to = -1) const;
     std::vector<cf> interpolate_time(const Mode& mode, const std::vector<cf>& ls, const TimeWeights& tw) const;
 
     std::vector<cd> freq_weights_;       // 49×25：由偶數格內插到每一格

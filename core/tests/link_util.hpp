@@ -76,6 +76,10 @@ inline std::vector<RxFrame> run_receiver(Receiver& rx, std::span<const float> au
         RxFrame f;
         while (rx.poll(f)) frames.push_back(std::move(f));
     }
+    // 音訊到此為止：留著等下一幀的那一幀（RxTuning::mend_steps）現在交出來
+    rx.finish();
+    RxFrame f;
+    while (rx.poll(f)) frames.push_back(std::move(f));
     return frames;
 }
 

@@ -87,8 +87,7 @@ Totals run_round(const Mode& mode, sim::ChannelParams params, int burst, const s
     }
     Totals t;
     t.sent = burst;
-    for (std::size_t pos = 0; pos < received.size(); pos += 1024) {
-        rx.push(std::span<const float>(received).subspan(pos, std::min<std::size_t>(1024, received.size() - pos)));
+    auto drain = [&] {
         RxFrame f;
         while (rx.poll(f)) {
             if (f.decoded && f.rgb.size() == image.size()) {
@@ -99,7 +98,13 @@ Totals run_round(const Mode& mode, sim::ChannelParams params, int burst, const s
                 ++t.psnr_count;
             }
         }
+    };
+    for (std::size_t pos = 0; pos < received.size(); pos += 1024) {
+        rx.push(std::span<const float>(received).subspan(pos, std::min<std::size_t>(1024, received.size() - pos)));
+        drain();
     }
+    rx.finish();  // 音訊到此為止：留著等下一幀的那一幀現在交出來
+    drain();
     return t;
 }
 
