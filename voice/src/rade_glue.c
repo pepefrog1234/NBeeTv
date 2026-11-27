@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "rade_api.h"
+#include "rade_v2_ofdm.h" /* 符號的長度（rade_c 對外的 rade_api.h 沒有給） */
 
 #include "arch.h"
 #include "cpu_support.h"
@@ -23,6 +24,8 @@
 #if LPCNET_FRAME_SIZE != NBTV_RADE_SPEECH_FRAME
 #error "語音幀的長度和 LPCNet 的不一樣"
 #endif
+
+int nbtv_rade_symbol_samples(void) { return RADE_V2_SYM_LEN; }
 
 static struct rade *open_context(void) {
     static char name[] = "";

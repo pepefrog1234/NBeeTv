@@ -27,6 +27,14 @@ extern "C" {
 int nbtv_voice_available(void);
 /* 編解碼器的名稱與版本（給「關於」之類的地方顯示），例如 "FreeDV RADE V2 (rade_c 23c3746)"；沒有編進來時是空字串。 */
 const char *nbtv_voice_description(void);
+/*
+ * 語音的訊號一個符號有幾個複數（在 NBTV_VOICE_SIGNAL_RATE 下；RADE V2 是 160 個，20 ms）。沒有編進來時是 0。
+ *
+ * 用在「訊號送到一半得停一下」的時候（電腦一時忙不過來，語音還沒編出來）：停的長度是它的整數倍的話，
+ * 對方的接收端不必重新同步，接著收；不是整數倍的話對方要重新同步（約半秒聽不到），剛好停在結尾前半秒內，
+ * 「結束」的標記對方也收不到。訊號合成到 48 kHz 之後（nbtv_duplex_tx）也一樣，那時候一個符號是它的 6 倍個取樣。
+ */
+int nbtv_voice_symbol_samples(void);
 
 /* ------------------------------------------------------------------ 發射：語音 → 訊號 */
 
@@ -67,7 +75,7 @@ typedef struct nbtv_voice_rx_status {
     int synced;      /* 目前是不是同步到語音的訊號 */
     float snr_db;    /* 訊雜比的估計（3 kHz 的雜訊頻寬），synced 時有效 */
     float clock_ppm; /* 兩邊取樣時脈的差（ppm），同步之後慢慢收斂 */
-    int overs_ended; /* 累計收到幾次「結束」的標記 */
+    int overs_ended; /* 從建立（或上一次 nbtv_voice_rx_reset）到現在，收到幾次「結束」的標記 */
 } nbtv_voice_rx_status;
 
 void nbtv_voice_rx_get_status(const nbtv_voice_rx *rx, nbtv_voice_rx_status *out);

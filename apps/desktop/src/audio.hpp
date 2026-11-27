@@ -72,6 +72,12 @@ public:
     // 畫面可以提早好幾秒排好，語音到要送的那一刻才編得出來，所以兩者不能排在同一條佇列裡。
     /// 語音的佇列墊到這麼多個取樣才開始加（語音是一段一段編出來的）；中途空掉之後也一樣。要在 start 之前設定。
     std::size_t voice_start_level = 0;
+    /// 語音的佇列中途空掉（電腦一時忙不過來，語音還沒編出來）之後，要等到停的長度是這麼多個取樣的整數倍才接回去；
+    /// 0 是墊夠了就接。設成語音訊號一個符號的長度（voice::symbol_samples()）：這樣對方的接收端不必重新同步，
+    /// 不然每停一次對方約半秒聽不到，剛好停在結尾前的話連「結束」的標記也收不到。要在 start 之前設定。
+    std::size_t voice_gap_step = 0;
+    /// 語音中途停下來、後來又接回去的次數（除錯用）。
+    int voice_gaps() const;
     /// 把實際交給裝置的取樣（兩半加起來、還沒乘輸出音量）留一份，給發射時的頻譜顯示用（take_rendered）。要在 start 之前設定。
     bool keep_rendered = false;
     /// 把語音那一半排進它自己的佇列；放不下的部分丟掉（語音晚了就不送，不能愈積愈多）。
@@ -117,6 +123,9 @@ private:
     std::deque<float> voice_;         // 語音那一半
     bool voice_flowing_ = false;
     std::size_t voice_waited_ = 0;
+    bool voice_begun_ = false;        // 這一次（start 之後）語音開始送過了
+    std::size_t voice_gap_ = 0;       // 語音停下來到現在幾個取樣了
+    int voice_gaps_ = 0;
     std::vector<float> rendered_tap_; // keep_rendered：交給裝置的取樣
     SDL_AudioStream* stream_ = nullptr;
     std::vector<float> scratch_;

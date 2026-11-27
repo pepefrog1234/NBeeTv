@@ -191,6 +191,20 @@ void test_codec() {
     nbtv_voice_rx_reset(rx);
     CHECK(decode(rx, padded, 3331).speech == direct.speech);
 
+    // 訊號送到一半停一下再接著送（電腦一時忙不過來）：停的長度是符號長度的整數倍的話，接收端不必重新同步——
+    // 就算停在結尾前不到半秒，「結束」的標記也收得到。外殼的音訊輸出靠的就是這一點：語音的佇列空掉之後，
+    // 等到停的長度是符號的整數倍才接回去（nbtv_voice_symbol_samples 的說明）。
+    const int symbol = nbtv_voice_symbol_samples();
+    CHECK(symbol > 0);
+    for (int symbols : {1, 3, 8}) {
+        std::vector<float> paused = iq;
+        const std::size_t at = 2 * (iq.size() / 2 - static_cast<std::size_t>(0.3 * NBTV_VOICE_SIGNAL_RATE));
+        paused.insert(paused.begin() + static_cast<std::ptrdiff_t>(at), 2 * static_cast<std::size_t>(symbols * symbol), 0.0f);
+        paused.resize(paused.size() + 2 * NBTV_VOICE_SIGNAL_RATE, 0.0f);
+        nbtv_voice_rx_reset(rx);
+        CHECK_EQ(decode(rx, paused, 160).last.overs_ended, 1);
+    }
+
     // 只有雜訊：不同步，也沒有語音出來
     nbtv_voice_rx_reset(rx);
     Rng rng(5);
@@ -229,6 +243,27 @@ void test_codec() {
             CHECK(shared.synced_share > 0.7 * seconds / (seconds + 1.0));
             CHECK(shared.snr_db > 10.0);
             CHECK(shared_match > 0.8);
+            CHECK_EQ(shared.last.overs_ended, 1);
+            // 合成之後才停一下也一樣（外殼就是在這裡停的；這時候一個符號是 48 kHz 的 960 個取樣）：
+            // 在語音結束前 0.3 秒停三個符號，「結束」的標記照樣收到
+            {
+                const std::size_t ratio = static_cast<std::size_t>(kDuplexRate / NBTV_VOICE_SIGNAL_RATE);
+                const std::size_t voice_end = voice.size() * ratio;
+                std::vector<float> paused_air = air;
+                paused_air.insert(paused_air.begin() + static_cast<std::ptrdiff_t>(voice_end - static_cast<std::size_t>(0.3 * kDuplexRate)),
+                                  3 * static_cast<std::size_t>(symbol) * ratio, 0.0f);
+                DuplexRx split(layout);
+                split.push(paused_air);
+                std::vector<cf> paused_voice(split.available_voice());
+                split.read_voice(paused_voice);
+                std::vector<float> paused_iq(2 * paused_voice.size());
+                for (std::size_t i = 0; i < paused_voice.size(); ++i) {
+                    paused_iq[2 * i] = paused_voice[i].real();
+                    paused_iq[2 * i + 1] = paused_voice[i].imag();
+                }
+                nbtv_voice_rx_reset(rx);
+                CHECK_EQ(decode(rx, paused_iq, 160).last.overs_ended, 1);
+            }
             // 畫面也都收得到
             Receiver receiver;
             link_util::attach_models(receiver);
@@ -252,6 +287,7 @@ int main() {
         CHECK(nbtv_voice_tx_create() == nullptr);
         CHECK(nbtv_voice_rx_create() == nullptr);
         CHECK(std::string(nbtv_voice_description()).empty());
+        CHECK_EQ(nbtv_voice_symbol_samples(), 0);
         std::printf("  這份程式沒有把語音的編解碼器編進來（-DNBTV_VOICE=ON），只檢查空殼\n");
         return check::finish("voice");
     }

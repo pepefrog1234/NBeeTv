@@ -2975,8 +2975,10 @@ void test_voice(Check& c) {
 
     const std::vector<float> speech = speech_like(40);
     bool voice_seen = false, level_seen = false;
-    /// 發射到送出 frames 張為止再按停止，回傳送出去的取樣。一邊發射、一邊當成麥克風照實際的時間在收音
-    const auto transmit = [&](int frames) {
+    /// 發射到送出 frames 張為止再按停止，回傳送出去的取樣。一邊發射、一邊當成麥克風照實際的時間在收音。
+    /// hiccup：麥克風那一頭每 0.9 秒裡有 0.25 秒沒有聲音進來，之後一次補上（電腦一時忙不過來的樣子）。
+    /// stall：按了停止、尾巴排進去之後，主執行緒卡住這麼多秒（收尾的那幾步都晚了）；0 是照平常
+    const auto transmit = [&](int frames, bool hiccup = false, double stall = 0) {
         rig.sink->drain();
         rig.ptt->take();
         std::atomic<bool> talking{true};
@@ -2986,7 +2988,9 @@ void test_voice(Check& c) {
             while (talking.load()) {
                 const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - began).count();
                 const std::size_t due = std::min(speech.size(), static_cast<std::size_t>(elapsed * kSampleRate));
-                if (due > spoken) {
+                if (hiccup && std::fmod(elapsed, 0.9) > 0.65) {
+                    // 這一段時間沒有聲音進來
+                } else if (due > spoken) {
                     rig.app->debug_speak(std::vector<float>(speech.begin() + static_cast<std::ptrdiff_t>(spoken), speech.begin() + static_cast<std::ptrdiff_t>(due)));
                     spoken = due;
                 }
@@ -3001,11 +3005,38 @@ void test_voice(Check& c) {
         });
         c.expect(sent && rig.app->tx_phase != App::TxPhase::idle, "發射沒有送到第 " + std::to_string(frames) + " 張");
         rig.app->stop_transmit();
+        if (stall > 0) {
+            demo::spin(rig.app.get(), 0.15);   // 讓尾巴排進輸出佇列
+            std::this_thread::sleep_for(std::chrono::duration<double>(stall));
+        }
         c.expect(rig.wait_idle(30), "送完之後要回到待機");
         talking.store(false);
         talker.join();
         c.expect(rig.ptt->take() == std::vector<bool>({true, false}), "PTT 要剛好按下一次、放開一次");
         return rig.sink->drain();
+    };
+    /// 把一段送出去的訊號交給語音的接收端：解出來的語音、有沒有同步過、同步時的訊雜比、收到幾次「結束」的標記（−1：接收端建不起來）
+    struct Heard {
+        std::vector<float> speech;
+        bool ever_synced = false;
+        double snr_db = 0;
+        int overs = -1;
+    };
+    const auto listen = [](const std::vector<float>& audio) {
+        Heard out;
+        const std::unique_ptr<VoiceReceiver> listener = VoiceReceiver::create(VoiceLayout::standard);
+        if (!listener) return out;
+        for (std::size_t at = 0; at < audio.size(); at += 960) {
+            const std::vector<float> speech_out = listener->process(audio.data() + at, static_cast<int>(std::min<std::size_t>(960, audio.size() - at)));
+            out.speech.insert(out.speech.end(), speech_out.begin(), speech_out.end());
+            const VoiceReceiver::Status status = listener->status();
+            if (status.synced) {
+                out.ever_synced = true;
+                out.snr_db = status.snr_db;   // 同步時的訊雜比（訊號沒了之後的讀數沒有意義）
+            }
+        }
+        out.overs = listener->status().overs_ended;
+        return out;
     };
     /// audio 裡 low–high Hz 的功率佔全部的幾成
     const auto share = [](const std::vector<float>& audio, double low, double high) {
@@ -3050,24 +3081,12 @@ void test_voice(Check& c) {
     const double per_frame = (static_cast<double>(together.size()) / kSampleRate - 0.5 - App::kPttLeadSeconds - voice::kEndSeconds) / std::max(sent, 1);
     const double expected = mode->frame_seconds * voice::slow_factor(VoiceLayout::standard);
     c.expect(std::fabs(per_frame - expected) < 0.1, "和語音一起送：每張 " + number(per_frame) + " 秒，應該是 " + number(expected) + " 秒");
-    std::vector<float> heard;
-    bool ever_synced = false;
-    double voice_snr = 0;
-    int overs = 0;
-    if (const std::unique_ptr<VoiceReceiver> listener = VoiceReceiver::create(VoiceLayout::standard)) {
-        for (std::size_t at = 0; at < together.size(); at += 960) {
-            const std::vector<float> speech_out = listener->process(together.data() + at, static_cast<int>(std::min<std::size_t>(960, together.size() - at)));
-            heard.insert(heard.end(), speech_out.begin(), speech_out.end());
-            const VoiceReceiver::Status status = listener->status();
-            if (status.synced) {
-                ever_synced = true;
-                voice_snr = status.snr_db;   // 同步時的訊雜比（訊號沒了之後的讀數沒有意義）
-            }
-        }
-        overs = listener->status().overs_ended;
-    } else {
-        c.expect(false, "語音的接收端建不起來");
-    }
+    const Heard first = listen(together);
+    c.expect(first.overs >= 0, "語音的接收端建不起來");
+    const std::vector<float>& heard = first.speech;
+    const bool ever_synced = first.ever_synced;
+    const double voice_snr = first.snr_db;
+    const int overs = std::max(first.overs, 0);
     const double heard_seconds = static_cast<double>(heard.size()) / kSampleRate;
     c.expect(ever_synced && heard_seconds > 1.5, "語音那一路只解出 " + number(heard_seconds, 1) + " 秒的語音");
     c.expect(overs == 1, "語音的結尾收到 " + std::to_string(overs) + " 次「結束」的標記，應該是 1 次");
@@ -3078,6 +3097,17 @@ void test_voice(Check& c) {
     c.info("和語音一起送 " + std::to_string(sent) + " 張都收到（每張 " + number(per_frame) + " 秒），平常的接收機收不到；語音解出 " + number(heard_seconds, 1) + " 秒、訊雜比 " +
            number(voice_snr, 0) + " dB、「結束」標記 " + std::to_string(overs) + " 次；功率：語音那一段 " + number(voice_share * 100, 0) + "%、畫面那一段 " +
            number(picture_share * 100, 0) + "%");
+    // 這一段訊號在語音結束之前停三個符號再接著送：對方不必重新同步，「結束」的標記照樣收到。
+    // （輸出在語音的佇列空掉之後，就是等到停的長度是符號的整數倍才接回去——見下面的第 7 步。）
+    const int symbol = voice::symbol_samples();
+    c.expect(symbol > 0, "語音的符號長度是 " + std::to_string(symbol));
+    if (symbol > 0) {
+        std::vector<float> paused = together;
+        const std::size_t back = static_cast<std::size_t>((0.5 + voice::kEndSeconds + 0.25) * kSampleRate);
+        paused.insert(paused.begin() + static_cast<std::ptrdiff_t>(paused.size() > back ? paused.size() - back : 0), static_cast<std::size_t>(3 * symbol), 0.0f);
+        const int ends = listen(paused).overs;
+        c.expect(ends == 1, "訊號在結尾前停三個符號（" + std::to_string(3 * symbol) + " 個取樣）：語音的結尾收到 " + std::to_string(ends) + " 次「結束」的標記，應該是 1 次");
+    }
 
     // 2. 把這一段當成收到的交給 app：畫面進「最近收到」、知道收到了語音、喇叭有聲音
     const std::shared_ptr<Sink> speaker = std::make_shared<Sink>();
@@ -3108,7 +3138,26 @@ void test_voice(Check& c) {
     rig.app->debug_stop_receiving();
     c.info("app 接收：" + std::to_string(received) + " 張進了「最近收到」、知道收到了語音、喇叭有聲音");
 
-    // 3. 開關關掉：照平常的送
+    // 3. 發射中語音一陣一陣地來不及（電腦一時忙不過來）：送出去的語音會停一下再接著送。停的長度是符號的整數倍，
+    //    對方不必重新同步；語音比平常晚了，「結束」的標記還是要送完才放開 PTT（app 會多補一點靜音等它）
+    {
+        const std::vector<float> choppy = padded(transmit(3, true));
+        const int gaps = rig.app->debug_voice_gaps();
+        const Heard result = listen(choppy);
+        c.expect(gaps >= 1, "語音來不及：語音的佇列應該空掉過，卻沒有");
+        c.expect(result.overs == 1, "語音來不及（中途停了 " + std::to_string(gaps) + " 次）：語音的結尾收到 " + std::to_string(result.overs) + " 次「結束」的標記，應該是 1 次");
+        c.expect(static_cast<double>(result.speech.size()) / kSampleRate > 1.5, "語音來不及：對方只解出不到 1.5 秒的語音");
+        c.info("語音一陣一陣地來不及（中途停了 " + std::to_string(gaps) + " 次再接上）：對方照樣解得出語音、收到「結束」標記");
+    }
+
+    // 4. 按了停止、尾巴排進去之後主執行緒卡住兩秒：語音收尾的那一步晚了，「結束」的標記還是要送完才放開 PTT
+    {
+        const int ends = listen(padded(transmit(2, false, 2.0))).overs;
+        c.expect(ends == 1, "收尾時主執行緒卡住兩秒：語音的結尾收到 " + std::to_string(ends) + " 次「結束」的標記，應該是 1 次");
+        c.info("收尾時主執行緒卡住兩秒：「結束」標記照樣送完");
+    }
+
+    // 5. 開關關掉：照平常的送
     rig.app->settings.voice_enabled = false;
     c.expect(!rig.app->voice_with_transmit(), "開關關掉了不應該算「和語音一起送」");
     const std::vector<float> alone = padded(transmit(2));
@@ -3118,7 +3167,7 @@ void test_voice(Check& c) {
     c.expect(std::fabs(alone_per_frame - mode->frame_seconds) < 0.1, "開關關掉之後每張 " + number(alone_per_frame) + " 秒，應該是 " + number(mode->frame_seconds) + " 秒");
     c.info("開關關掉：照平常的送，" + std::to_string(alone_sent) + " 張、每張 " + number(alone_per_frame) + " 秒");
 
-    // 4. 開關開著，但選的不是 FM 用的模式：照平常的送
+    // 6. 開關開著，但選的不是 FM 用的模式：照平常的送
     rig.app->settings.voice_enabled = true;
     if (modes::find(12) != nullptr) {
         rig.app->settings.tx_mode_id = 12;
@@ -3126,6 +3175,51 @@ void test_voice(Check& c) {
         const std::vector<float> other = padded(transmit(1));
         c.expect(good(decode(other)) >= 1, "模式 12（不是 FM 用的）開關開著時，平常的接收機應該收得到");
         c.info("模式 12 不是 FM 用的：開關開著也照平常的送");
+    }
+
+    // 7. 輸出的語音佇列中途空掉：下一段語音接回去的時候，停的長度是符號長度的整數倍（直接看輸出，不經過整個發射流程）
+    if (symbol > 0) {
+        AudioOutput output(8);
+        const std::shared_ptr<Sink> trace = std::make_shared<Sink>();
+        output.simulated = true;
+        output.simulated_sink = [trace](const std::vector<float>& block) {
+            std::lock_guard<std::mutex> lock(trace->mutex);
+            trace->samples.insert(trace->samples.end(), block.begin(), block.end());
+        };
+        output.voice_start_level = static_cast<std::size_t>(voice::kStartSeconds * kSampleRate);
+        output.voice_gap_step = static_cast<std::size_t>(symbol);
+        std::string error;
+        if (output.start(0, &error)) {
+            const std::vector<float> picture_half(static_cast<std::size_t>(6 * kSampleRate), 0.0f);   // 畫面那一半：內容不重要
+            const std::vector<float> first_piece(static_cast<std::size_t>(0.3 * kSampleRate), 0.5f), second_piece(first_piece.size(), -0.5f);
+            // 等語音的佇列播完（最多等五秒），再多等一下
+            const auto drained = [&output](int extra_ms) {
+                const double deadline = uptime_seconds() + 5;
+                while (output.voice_queued_samples() > 0 && uptime_seconds() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                std::this_thread::sleep_for(std::chrono::milliseconds(extra_ms));
+            };
+            output.enqueue(picture_half);
+            output.enqueue_voice(first_piece.data(), first_piece.size());
+            drained(200);   // 播完，佇列空了一陣子
+            output.enqueue_voice(second_piece.data(), second_piece.size());
+            drained(100);
+            output.stop();
+            const std::vector<float> played = trace->take();
+            std::ptrdiff_t last = -1, next = -1;
+            for (std::size_t i = 0; i < played.size(); ++i) {
+                if (played[i] > 0.25f) last = static_cast<std::ptrdiff_t>(i);
+                if (played[i] < -0.25f && next < 0) next = static_cast<std::ptrdiff_t>(i);
+            }
+            if (last >= 0 && next > last) {
+                const std::ptrdiff_t gap = next - last - 1;
+                c.expect(gap > 0 && gap % symbol == 0, "語音的佇列空掉之後，停了 " + std::to_string(gap) + " 個取樣才接回去，不是符號長度（" + std::to_string(symbol) + "）的整數倍");
+                c.info("語音的佇列空掉之後停了 " + std::to_string(gap) + " 個取樣（" + std::to_string(gap / symbol) + " 個符號）才接回去");
+            } else {
+                c.expect(false, "語音的佇列空掉之後：兩段語音沒有都播出來");
+            }
+        } else {
+            c.expect(false, "模擬的輸出開不起來：" + error);
+        }
     }
 }
 

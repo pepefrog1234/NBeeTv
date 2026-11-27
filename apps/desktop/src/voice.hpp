@@ -32,6 +32,9 @@ bool supports(const ModeInfo* mode);
 double slow_factor(VoiceLayout layout);
 /// 放慢最多的那一種是幾倍（輸出佇列照它配置）
 double slowest_factor();
+/// 語音的訊號一個符號的長度（48 kHz 的取樣數；RADE V2 是 960 個，20 毫秒；沒有編解碼器時是 0）。語音的佇列中途空掉之後，
+/// 輸出要等到停的長度是它的整數倍才接回去，對方的接收端才不必重新同步（見 AudioOutput::voice_gap_step）。
+int symbol_samples();
 /// 語音排進輸出佇列之後，墊到這麼多才開始送（語音是一段一段編出來的，每段 40 毫秒）
 inline constexpr double kStartSeconds = 0.12;
 /// 喇叭那一頭：解出來的語音墊到這麼多才開始播，積到上限就先不排新的（兩邊音效卡的快慢不會剛好一樣）

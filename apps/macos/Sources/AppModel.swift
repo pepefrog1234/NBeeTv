@@ -566,6 +566,9 @@ final class AppModel: ObservableObject {
     /// 測試用：正在和語音一起送時，當成麥克風收到了這一段語音。
     func debugSpeak(_ samples: [Float]) { voicePath.speak(samples) }
 
+    /// 測試用：最近這一次發射，語音中途停下來又接回去幾次（電腦忙不過來的時候才會有）。
+    var debugVoiceGaps: Int { engine?.output.voiceGaps ?? 0 }
+
     // MARK: - 接收
 
     private func clearSyncState() {
@@ -1420,6 +1423,7 @@ final class AppModel: ObservableObject {
         do {
             engine.output.gain = settings.outputGain
             engine.output.voiceStartLevel = Int(Voice.startSeconds * Double(NBTV.sampleRate))
+            engine.output.voiceGapStep = Voice.symbolSamples
             engine.output.keepRendered = txVoiceLayout != nil
             try engine.output.start(deviceID: device?.id ?? 0)
             if let device { outputDeviceName = device.name }
@@ -1588,6 +1592,18 @@ final class AppModel: ObservableObject {
                 if txVoiceActive, !txVoiceFinished, Double(txEnd - position) / Double(NBTV.sampleRate) < AppModel.voiceEndSeconds {
                     txVoiceFinished = true
                     voicePath.finish()
+                    // 語音剩下的（最後一小段語音與「結束」的標記）這時候都排進語音的佇列了，要在放開 PTT 之前播完。
+                    // 平常留的那一段靜音夠長；電腦一時忙不過來、這裡晚了的時候，主佇列剩下的會比語音剩下的短：
+                    // 補上不夠的靜音，發射晚一點點結束，標記才不會被切掉
+                    let voiceLeft = engine.output.voiceQueuedSamples + NBTV.sampleRate / 50
+                    let left = Int(txEnd - engine.output.playedSamples)
+                    if voiceLeft > left {
+                        let extra = [Float](repeating: 0, count: voiceLeft - left)
+                        txTap?.write(extra)
+                        engine.output.enqueue(extra)
+                        txEnd += Int64(extra.count)
+                        DebugTap.log(String(format: "語音收尾晚了：多補 %.0f 毫秒的靜音，等「結束」的標記送完", Double(extra.count) / Double(NBTV.sampleRate) * 1000))
+                    }
                 }
                 if position >= txEnd { finishTransmit() }
             }
@@ -1765,6 +1781,7 @@ final class AppModel: ObservableObject {
             DebugTap.log(String(format: "發射結束：已播 %.2f 秒、已排到 %.2f 秒、送出 %d 張、裝置取了 %lld 格（其中靜音 %lld 格）、佇列空掉 %d 次",
                                 Double(engine.output.playedSamples) / Double(NBTV.sampleRate), Double(txEnd) / Double(NBTV.sampleRate),
                                 txFramesSent, engine.output.renderedFrames, engine.output.silentFrames, engine.output.underruns))
+            if txVoiceLayout != nil { DebugTap.log("和語音一起送：語音中途停下來又接回去 \(engine.output.voiceGaps) 次") }
         }
         // 送到一半出錯才會在「發射中」直接走到這裡（按停止的話，當下就暫停過了；之後使用者自己又按播放的不再管）
         if txPhase == .transmitting { pauseVideoWithTransmit() }

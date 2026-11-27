@@ -12,6 +12,9 @@ extern "C" {
 
 #define NBTV_RADE_SPEECH_FRAME 160
 
+/* 訊號的一個符號有幾個複數（含循環字首）。 */
+int nbtv_rade_symbol_samples(void);
+
 /* ---- 發射 ---- */
 typedef struct nbtv_rade_tx nbtv_rade_tx;
 

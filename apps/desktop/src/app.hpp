@@ -246,6 +246,8 @@ public:
     void debug_use_simulated_output(std::function<void(const std::vector<float>&)> sink, std::optional<double> stall_after = std::nullopt);
     /// 測試用：正在和語音一起送時，當成麥克風收到了這一段語音（48 kHz）。
     void debug_speak(std::vector<float> samples);
+    /// 測試用：最近這一次發射，語音中途停下來又接回去幾次（電腦忙不過來的時候才會有）。
+    int debug_voice_gaps() const;
     /// 測試用：喇叭換成模擬的（解出來的語音交給 sink，在別的執行緒上呼叫）。要在 debug_begin_receiving 之前呼叫。
     void debug_use_simulated_speaker(std::function<void(const std::vector<float>&)> sink);
     /// 測試用：不開音訊裝置就開始（或結束）一次接收；音訊由 debug_feed_input 一段一段交進來，像音訊的執行緒那樣。

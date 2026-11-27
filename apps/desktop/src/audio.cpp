@@ -96,6 +96,9 @@ void AudioOutput::reset() {
     underruns_ = 0;
     flowing_ = voice_flowing_ = false;
     waited_ = voice_waited_ = 0;
+    voice_begun_ = false;
+    voice_gap_ = 0;
+    voice_gaps_ = 0;
     voice_.clear();
     rendered_tap_.clear();
 }
@@ -110,6 +113,11 @@ void AudioOutput::enqueue_voice(const float* samples, std::size_t count) {
 std::int64_t AudioOutput::voice_queued_samples() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return static_cast<std::int64_t>(voice_.size());
+}
+
+int AudioOutput::voice_gaps() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return voice_gaps_;
 }
 
 std::vector<float> AudioOutput::take_rendered() {
@@ -222,15 +230,32 @@ void AudioOutput::render(float* out, std::size_t count) {
     }
     std::fill(out + n, out + count, 0.0f);
     // 語音那一半有的話加上去
-    if (voice_flowing_ || voice_.size() >= std::max<std::size_t>(voice_start_level, 1) || (!voice_.empty() && voice_waited_ >= wait_limit)) {
-        voice_flowing_ = true;
-        voice_waited_ = 0;
-        const std::size_t voice = std::min(voice_.size(), count);
-        for (std::size_t i = 0; i < voice; ++i) out[i] = std::clamp(out[i] + voice_[i], -1.0f, 1.0f);
+    std::size_t voice_from = 0;   // 這一批從第幾個取樣開始加語音
+    if (!voice_flowing_) {
+        if (voice_.size() >= std::max<std::size_t>(voice_start_level, 1) || (!voice_.empty() && voice_waited_ >= wait_limit)) {
+            // 中途停過：停的長度要是 voice_gap_step 的整數倍才接回去（這一批裡輪不到的話，下一批再看）
+            const std::size_t pad = voice_begun_ && voice_gap_step > 0 ? (voice_gap_step - voice_gap_ % voice_gap_step) % voice_gap_step : 0;
+            if (pad < count) {
+                voice_from = pad;
+                if (voice_begun_) ++voice_gaps_;
+                voice_flowing_ = true;
+                voice_begun_ = true;
+                voice_waited_ = 0;
+                voice_gap_ = 0;
+            }
+        } else if (!voice_.empty()) {
+            voice_waited_ += count;   // 還沒墊夠：先不加
+        }
+        if (!voice_flowing_ && voice_begun_) voice_gap_ += count;
+    }
+    if (voice_flowing_) {
+        const std::size_t voice = std::min(voice_.size(), count - voice_from);
+        for (std::size_t i = 0; i < voice; ++i) out[voice_from + i] = std::clamp(out[voice_from + i] + voice_[i], -1.0f, 1.0f);
         voice_.erase(voice_.begin(), voice_.begin() + static_cast<std::ptrdiff_t>(voice));
-        if (voice < count) voice_flowing_ = false;
-    } else if (!voice_.empty()) {
-        voice_waited_ += count;
+        if (voice < count - voice_from) {
+            voice_flowing_ = false;
+            voice_gap_ = count - voice_from - voice;
+        }
     }
     if (keep_rendered && rendered_tap_.size() < static_cast<std::size_t>(2 * kSampleRate)) rendered_tap_.insert(rendered_tap_.end(), out, out + count);
     if (volume != 1.0f) {

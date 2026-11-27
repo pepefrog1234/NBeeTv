@@ -56,6 +56,8 @@ int nbtv_voice_available(void) { return 1; }
 
 const char* nbtv_voice_description(void) { return "FreeDV RADE V2 (rade_c " NBTV_VOICE_RADE_VERSION ")"; }
 
+int nbtv_voice_symbol_samples(void) { return nbtv_rade_symbol_samples(); }
+
 /* ---- 發射 ---- */
 
 nbtv_voice_tx* nbtv_voice_tx_create(void) {
@@ -149,6 +151,7 @@ void nbtv_voice_rx_reset(nbtv_voice_rx* rx) {
     rx->iq.clear();
     rx->speech.clear();
     rx->speech_read = 0;
+    rx->overs_ended = 0;
 }
 
 void nbtv_voice_rx_push(nbtv_voice_rx* rx, const float* iq, int count) {
@@ -194,6 +197,7 @@ void nbtv_voice_rx_get_status(const nbtv_voice_rx* rx, nbtv_voice_rx_status* out
 
 int nbtv_voice_available(void) { return 0; }
 const char* nbtv_voice_description(void) { return ""; }
+int nbtv_voice_symbol_samples(void) { return 0; }
 
 nbtv_voice_tx* nbtv_voice_tx_create(void) { return nullptr; }
 void nbtv_voice_tx_destroy(nbtv_voice_tx*) {}

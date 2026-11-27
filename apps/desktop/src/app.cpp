@@ -548,6 +548,8 @@ void App::debug_speak(std::vector<float> samples) {
     if (engine_) engine_->voice_path.speak(std::move(samples));
 }
 
+int App::debug_voice_gaps() const { return engine_ ? engine_->output.voice_gaps() : 0; }
+
 void App::debug_use_simulated_speaker(std::function<void(const std::vector<float>&)> sink) {
     if (!engine_) return;
     engine_->speaker.simulated = true;
@@ -1582,6 +1584,7 @@ void App::go_on_air(EncodedFrame first, int session) {
     }
     engine_->output.gain = settings.output_gain();
     engine_->output.voice_start_level = static_cast<std::size_t>(voice::kStartSeconds * kSampleRate);
+    engine_->output.voice_gap_step = static_cast<std::size_t>(voice::symbol_samples());
     engine_->output.keep_rendered = tx_voice_layout_.has_value();
     std::string error;
     if (!engine_->output.start(device ? device->id : 0, &error)) {
@@ -1747,6 +1750,16 @@ void App::tx_tick() {
             if (tx_voice_active_ && !tx_voice_finished_ && static_cast<double>(tx_end_ - position) / kSampleRate < voice::kEndSeconds) {
                 tx_voice_finished_ = true;
                 engine_->voice_path.finish();
+                // 語音剩下的（最後一小段語音與「結束」的標記）這時候都排進語音的佇列了，要在放開 PTT 之前播完。
+                // 平常留的那一段靜音夠長；電腦一時忙不過來、這裡晚了的時候，主佇列剩下的會比語音剩下的短：
+                // 補上不夠的靜音，發射晚一點點結束，標記才不會被切掉
+                const std::int64_t voice_left = engine_->output.voice_queued_samples() + kSampleRate / 50;
+                const std::int64_t left = tx_end_ - engine_->output.played_samples();
+                if (voice_left > left) {
+                    const std::vector<float> extra(static_cast<std::size_t>(voice_left - left), 0.0f);
+                    engine_->output.enqueue(extra);
+                    tx_end_ += static_cast<std::int64_t>(extra.size());
+                }
             }
             if (position >= tx_end_) finish_transmit();
         }

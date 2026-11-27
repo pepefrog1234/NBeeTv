@@ -20,6 +20,8 @@ double slow_factor(VoiceLayout layout) { return nbtv_duplex_slow_factor(duplex_c
 
 double slowest_factor() { return std::max(slow_factor(VoiceLayout::standard), slow_factor(VoiceLayout::narrow)); }
 
+int symbol_samples() { return nbtv_voice_symbol_samples() * (kSampleRate / NBTV_VOICE_SIGNAL_RATE); }
+
 }  // namespace voice
 
 // ---------------------------------------------------------------- 發射端

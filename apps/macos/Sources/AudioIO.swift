@@ -328,6 +328,14 @@ final class AudioOutput {
     var voiceStartLevel = 0
     private var voiceFlowing = false
     private var voiceWaited = 0   // 同上，語音的佇列
+    /// 語音的佇列中途空掉（電腦一時忙不過來，語音還沒編出來）之後，要等到停的長度是這麼多個取樣的整數倍才接回去；
+    /// 0 是墊夠了就接。設成語音訊號一個符號的長度（Voice.symbolSamples）：這樣對方的接收端不必重新同步，
+    /// 不然每停一次對方約半秒聽不到，剛好停在結尾前的話連「結束」的標記也收不到。要在 start 之前設定。
+    var voiceGapStep = 0
+    private var voiceBegun = false   // 這一次（start 之後）語音開始送過了
+    private var voiceGap = 0         // 語音停下來到現在幾個取樣了
+    /// 語音中途停下來、後來又接回去的次數（除錯用；即時執行緒寫、其他執行緒只讀）
+    private(set) var voiceGaps = 0
     /// 墊不夠也不會一直等：等了這麼久（半秒）還是只有一點點，就是後面沒有了，把剩下的播掉
     private let waitLimit = NBTV.sampleRate / 2
     /// 把實際交給裝置的取樣（兩半加起來、還沒乘輸出音量）留一份，給發射時的頻譜顯示用（takeRendered）。要在 start 之前設定。
@@ -355,6 +363,9 @@ final class AudioOutput {
         voiceFlowing = false
         waited = 0
         voiceWaited = 0
+        voiceBegun = false
+        voiceGap = 0
+        voiceGaps = 0
         underruns = 0
         renderedFrames = 0
         silentFrames = 0
@@ -477,20 +488,48 @@ final class AudioOutput {
             if got < frames { flowing = false }
         }
         if got < frames { (dest + got).update(repeating: 0, count: frames - got) }
-        if frames <= voiceScratchCapacity {
-            let voiceReady = voiceFlowing ? frames : voiceRing.available
-            if voiceFlowing || voiceReady >= max(voiceStartLevel, 1) || (voiceReady > 0 && voiceWaited >= waitLimit) {
-                voiceFlowing = true
-                voiceWaited = 0
-                let voice = voiceRing.read(into: voiceScratch, count: frames)
-                if voice < frames { voiceFlowing = false }
-                for index in 0..<voice { dest[index] = min(max(dest[index] + voiceScratch[index], -1), 1) }
-            } else if voiceReady > 0 {
-                voiceWaited += frames
-            }
+        var done = 0
+        while done < frames {
+            let count = min(frames - done, voiceScratchCapacity)
+            mixVoice(dest + done, count)
+            done += count
         }
         if keepRendered { renderedRing.write(dest, count: frames) }
         return got
+    }
+
+    /// 把語音那一半加到這一批輸出上（count 不超過 voiceScratchCapacity）。
+    private func mixVoice(_ dest: UnsafeMutablePointer<Float>, _ count: Int) {
+        var start = 0   // 這一批從第幾個取樣開始加語音
+        if !voiceFlowing {
+            let ready = voiceRing.available
+            guard ready >= max(voiceStartLevel, 1) || (ready > 0 && voiceWaited >= waitLimit) else {
+                // 還沒墊夠：先不加
+                if ready > 0 { voiceWaited += count }
+                if voiceBegun { voiceGap += count }
+                return
+            }
+            // 中途停過：停的長度要是 voiceGapStep 的整數倍才接回去（這一批裡輪不到的話，下一批再看）
+            if voiceBegun, voiceGapStep > 0 {
+                let pad = (voiceGapStep - voiceGap % voiceGapStep) % voiceGapStep
+                if pad >= count {
+                    voiceGap += count
+                    return
+                }
+                start = pad
+            }
+            if voiceBegun { voiceGaps += 1 }
+            voiceFlowing = true
+            voiceBegun = true
+            voiceWaited = 0
+            voiceGap = 0
+        }
+        let voice = voiceRing.read(into: voiceScratch, count: count - start)
+        for index in 0..<voice { dest[start + index] = min(max(dest[start + index] + voiceScratch[index], -1), 1) }
+        if voice < count - start {
+            voiceFlowing = false
+            voiceGap = count - start - voice
+        }
     }
 
     /// 把排在 position（從 start 起算第幾個取樣）之後的都丟掉。裝置已經取到 position 之後了就不動，回傳 false。

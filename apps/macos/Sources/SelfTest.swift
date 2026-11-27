@@ -2512,29 +2512,66 @@ enum SelfTest {
         var details: [String] = []
         let rate = Double(NBTV.sampleRate)
 
-        /// 發射到送出 frames 張為止再按停止，回傳送出去的取樣。speak：一邊發射一邊當成麥克風在收音
-        func transmit(frames: Int, speak: Bool) -> [Float] {
+        /// 發射到送出 frames 張為止再按停止，回傳送出去的取樣。speak：一邊發射一邊當成麥克風在收音。
+        /// hiccup：麥克風那一頭每 0.9 秒裡有 0.25 秒沒有聲音進來，之後一次補上（電腦一時忙不過來的樣子）。
+        /// stall：按了停止、尾巴排進去之後，主執行緒卡住這麼多秒（收尾的那幾步都晚了）；0 是照平常
+        func transmit(_ label: String, frames: Int, speak: Bool, hiccup: Bool = false, stall: Double = 0) -> [Float] {
             _ = sent.take()
             _ = ptt.take()
             let speech = speechLike(seconds: 30)
             var spoken = 0
+            let began = DispatchTime.now().uptimeNanoseconds
             let talker = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "nbtv.selftest.voice"))
             talker.schedule(deadline: .now(), repeating: .milliseconds(20))
             talker.setEventHandler {
-                guard speak, spoken + 960 <= speech.count else { return }
-                model.debugSpeak(Array(speech[spoken..<spoken + 960]))
-                spoken += 960
+                guard speak else { return }
+                // 照實際經過的時間給：計時器晚了就一次補齊。（每次固定給 20 毫秒的話，計時器一晚語音就愈給愈少，
+                // 送出去的語音會一直斷——CI 上比較慢的機器就是這樣。）
+                let elapsed = Double(DispatchTime.now().uptimeNanoseconds - began) / 1e9
+                if hiccup, elapsed.truncatingRemainder(dividingBy: 0.9) > 0.65 { return }
+                let due = min(speech.count, Int(elapsed * rate))
+                guard due > spoken else { return }
+                model.debugSpeak(Array(speech[spoken..<due]))
+                spoken = due
             }
             talker.resume()
             model.startTransmit()
             if !Demo.wait(timeout: 30, until: { model.txFramesSent >= frames || model.txPhase == .idle }) || model.txPhase == .idle {
-                problems.append("發射沒有送到第 \(frames) 張")
+                problems.append("\(label)：發射沒有送到第 \(frames) 張")
             }
             model.stopTransmit()
+            if stall > 0 {
+                Demo.spin(0.15)   // 讓尾巴排進輸出佇列
+                Thread.sleep(forTimeInterval: stall)
+            }
             _ = Demo.wait(timeout: 15) { model.txPhase == .idle }
+            if model.txPhase != .idle { problems.append("\(label)：按了停止之後 15 秒還沒有回到待機") }
             talker.cancel()
-            if ptt.take() != [true, false] { problems.append("PTT 沒有按下一次、放開一次") }
+            Demo.spin(0.3)   // PTT 的放開在背景佇列上做
+            let keyed = ptt.take()
+            if keyed != [true, false] {
+                problems.append("\(label)：PTT 不是「按下一次、放開一次」（實際是\(keyed.isEmpty ? "沒有動過" : keyed.map { $0 ? "按下" : "放開" }.joined(separator: "、"))）")
+            }
             return sent.take()
+        }
+        /// 把一段送出去的訊號交給語音的接收端：解出來的語音、有沒有同步過、同步時的訊雜比、收到幾次「結束」的標記
+        func listen(_ samples: [Float]) -> (heard: [Float], everSynced: Bool, snrDb: Double, oversEnded: Int)? {
+            guard let voice = VoiceReceiver(layout: .standard) else { return nil }
+            var heard: [Float] = []
+            var everSynced = false
+            var snrDb = 0.0
+            let chunk = NBTV.sampleRate / 50
+            var position = 0
+            while position < samples.count {
+                heard += voice.process(Array(samples[position..<min(position + chunk, samples.count)]))
+                let now = voice.status
+                if now.synced {
+                    everSynced = true
+                    snrDb = now.snrDb   // 同步時的訊雜比（訊號沒了之後的讀數沒有意義）
+                }
+                position += chunk
+            }
+            return (heard, everSynced, snrDb, voice.status.oversEnded)
         }
         /// samples 裡 low–high Hz 的功率佔全部的幾成
         func share(_ samples: [Float], _ low: Double, _ high: Double) -> Double {
@@ -2551,7 +2588,7 @@ enum SelfTest {
 
         // 1. 開關開著、FM 用的模式：和語音一起送
         if !model.voiceWithTransmit { problems.append("開關開著、選的是模式 \(mode.id)，卻不算「和語音一起送」") }
-        let together = transmit(frames: 3, speak: true) + Demo.silence(seconds: 0.5)
+        let together = transmit("和語音一起送", frames: 3, speak: true) + Demo.silence(seconds: 0.5)
         let plain = Demo.receive(together).flatMap(\.frames).filter { $0.decoded }
         if !plain.isEmpty { problems.append("和語音一起送的訊號，平常的接收機卻收到了 \(plain.count) 張") }
         let duplexReceiver = CoreReceiver()
@@ -2567,19 +2604,11 @@ enum SelfTest {
         var heard: [Float] = []
         var voiceStatus = (synced: false, snrDb: 0.0, oversEnded: 0)
         var everSynced = false
-        if let voice = VoiceReceiver(layout: .standard) {
-            let chunk = NBTV.sampleRate / 50
-            var position = 0
-            while position < together.count {
-                heard += voice.process(Array(together[position..<min(position + chunk, together.count)]))
-                let now = voice.status
-                if now.synced {
-                    everSynced = true
-                    voiceStatus.snrDb = now.snrDb   // 同步時的訊雜比（訊號沒了之後的讀數沒有意義）
-                }
-                position += chunk
-            }
-            voiceStatus.oversEnded = voice.status.oversEnded
+        if let result = listen(together) {
+            heard = result.heard
+            everSynced = result.everSynced
+            voiceStatus.snrDb = result.snrDb
+            voiceStatus.oversEnded = result.oversEnded
         } else {
             problems.append("語音的接收端建不起來")
         }
@@ -2594,6 +2623,17 @@ enum SelfTest {
         details.append(String(format: "和語音一起送 %d 張都收到（每張 %.2f 秒），平常的接收機收不到；語音解出 %.1f 秒、訊雜比 %.0f dB、「結束」標記 %d 次；"
                                   + "功率：語音那一段 %.0f%%、畫面那一段 %.0f%%",
                               shared.count, perFrame, heardSeconds, voiceStatus.snrDb, voiceStatus.oversEnded, voiceShare * 100, pictureShare * 100))
+        // 這一段訊號在語音結束之前停三個符號再接著送：對方不必重新同步，「結束」的標記照樣收到。
+        // （輸出在語音的佇列空掉之後，就是等到停的長度是符號的整數倍才接回去——見下面的第 7 步。）
+        let symbol = Voice.symbolSamples
+        if symbol <= 0 {
+            problems.append("語音的符號長度是 \(symbol)")
+        } else {
+            let at = max(0, together.count - Int((0.5 + AppModel.voiceEndSeconds + 0.25) * rate))
+            let paused = Array(together[..<at]) + [Float](repeating: 0, count: 3 * symbol) + Array(together[at...])
+            let ends = listen(paused)?.oversEnded ?? 0
+            if ends != 1 { problems.append("訊號在結尾前停三個符號（\(3 * symbol) 個取樣）：語音的結尾收到 \(ends) 次「結束」的標記，應該是 1 次") }
+        }
 
         // 2. 把這一段當成收到的交給 app：畫面進「最近收到」、知道收到了語音、喇叭有聲音
         let speaker = SampleCollector()
@@ -2621,11 +2661,29 @@ enum SelfTest {
         if Demo.power(played) < 1e-7 { problems.append("交給 app 接收：喇叭沒有聲音") }
         details.append(String(format: "app 接收：%d 張進了「最近收到」、右側欄顯示收到語音（訊雜比 %.0f dB）、喇叭有聲音", received, voiceSnr ?? 0))
 
-        // 3. 開關關掉：照平常的送
+        // 3. 發射中語音一陣一陣地來不及（電腦一時忙不過來）：送出去的語音會停一下再接著送。停的長度是符號的整數倍，
+        //    對方不必重新同步；語音比平常晚了，「結束」的標記還是要送完才放開 PTT（app 會多補一點靜音等它）
+        let choppy = transmit("語音來不及", frames: 3, speak: true, hiccup: true) + Demo.silence(seconds: 0.5)
+        let gaps = model.debugVoiceGaps
+        let choppyResult = listen(choppy)
+        if gaps < 1 { problems.append("語音來不及：語音的佇列應該空掉過，卻沒有") }
+        if (choppyResult?.oversEnded ?? 0) != 1 {
+            problems.append("語音來不及（中途停了 \(gaps) 次）：語音的結尾收到 \(choppyResult?.oversEnded ?? 0) 次「結束」的標記，應該是 1 次")
+        }
+        if Double(choppyResult?.heard.count ?? 0) / rate < 1.5 { problems.append("語音來不及：對方只解出不到 1.5 秒的語音") }
+        details.append("語音一陣一陣地來不及（中途停了 \(gaps) 次再接上）：對方照樣解得出語音、收到「結束」標記")
+
+        // 4. 按了停止、尾巴排進去之後主執行緒卡住兩秒：語音收尾的那一步晚了，「結束」的標記還是要送完才放開 PTT
+        let stalled = transmit("收尾時卡住", frames: 2, speak: true, stall: 2.0) + Demo.silence(seconds: 0.5)
+        let stalledEnds = listen(stalled)?.oversEnded ?? 0
+        if stalledEnds != 1 { problems.append("收尾時主執行緒卡住兩秒：語音的結尾收到 \(stalledEnds) 次「結束」的標記，應該是 1 次") }
+        details.append("收尾時主執行緒卡住兩秒：「結束」標記照樣送完")
+
+        // 5. 開關關掉：照平常的送
         settings.voiceEnabled = false
         Demo.spin(0.1)
         if model.voiceWithTransmit { problems.append("開關關掉了還算「和語音一起送」") }
-        let alone = transmit(frames: 2, speak: true) + Demo.silence(seconds: 0.5)
+        let alone = transmit("開關關掉", frames: 2, speak: true) + Demo.silence(seconds: 0.5)
         let aloneFrames = Demo.receive(alone).flatMap(\.frames).filter { $0.decoded && $0.headerOK }
         if aloneFrames.count < 2 { problems.append("開關關掉之後，平常的接收機只收到 \(aloneFrames.count) 張") }
         let aloneVoice = share(alone, 340, 1240)
@@ -2634,16 +2692,52 @@ enum SelfTest {
         if abs(alonePerFrame - mode.frameSeconds) > 0.1 { problems.append(String(format: "開關關掉之後每張 %.2f 秒，應該是 %.2f 秒", alonePerFrame, mode.frameSeconds)) }
         details.append(String(format: "開關關掉：照平常的送，%d 張、每張 %.2f 秒（360–1220 Hz 佔 %.0f%%）", aloneFrames.count, alonePerFrame, aloneVoice * 100))
 
-        // 4. 開關開著，但選的不是 FM 用的模式：照平常的送
+        // 6. 開關開著，但選的不是 FM 用的模式：照平常的送
         settings.voiceEnabled = true
         if let hf = Modes.find(12) {
             settings.txModeID = hf.id
             Demo.spin(0.1)
             if model.voiceWithTransmit { problems.append("模式 \(hf.id) 不是 FM 用的，卻算「和語音一起送」") }
-            let other = transmit(frames: 1, speak: true) + Demo.silence(seconds: 0.5)
+            let other = transmit("模式 \(hf.id)", frames: 1, speak: true) + Demo.silence(seconds: 0.5)
             let otherFrames = Demo.receive(other).flatMap(\.frames).filter { $0.decoded && $0.headerOK }
             if otherFrames.isEmpty { problems.append("模式 \(hf.id)（不是 FM 用的）開關開著時，平常的接收機收不到") }
             details.append("模式 \(hf.id) 不是 FM 用的：開關開著也照平常的送，\(otherFrames.count) 張")
+        }
+
+        // 7. 輸出的語音佇列中途空掉：下一段語音接回去的時候，停的長度是符號長度的整數倍（直接看輸出，不經過整個發射流程）
+        if symbol > 0 {
+            let output = AudioOutput(queueSeconds: 8)
+            let played = SampleCollector()
+            output.simulated = true
+            output.simulatedSink = { played.append($0) }
+            output.gain = 1
+            output.voiceStartLevel = Int(Voice.startSeconds * rate)
+            output.voiceGapStep = symbol
+            if (try? output.start(deviceID: 0)) != nil {
+                let piece = Int(0.3 * rate)
+                /// 等語音的佇列播完（最多等五秒），再多等一下
+                func drained(then extra: Double) {
+                    let deadline = Date().addingTimeInterval(5)
+                    while output.voiceQueuedSamples > 0, Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
+                    Thread.sleep(forTimeInterval: extra)
+                }
+                output.enqueue([Float](repeating: 0, count: Int(6 * rate)))    // 畫面那一半：內容不重要
+                output.enqueueVoice([Float](repeating: 0.5, count: piece))      // 第一段語音
+                drained(then: 0.2)                                               // 播完，佇列空了一陣子
+                output.enqueueVoice([Float](repeating: -0.5, count: piece))     // 第二段
+                drained(then: 0.1)
+                output.stop()
+                let trace = played.take()
+                if let last = trace.lastIndex(where: { $0 > 0.25 }), let next = trace.firstIndex(where: { $0 < -0.25 }), next > last {
+                    let gap = next - last - 1
+                    if gap <= 0 || gap % symbol != 0 { problems.append("語音的佇列空掉之後，停了 \(gap) 個取樣才接回去，不是符號長度（\(symbol)）的整數倍") }
+                    details.append("語音的佇列空掉之後停了 \(gap) 個取樣（\(gap / symbol) 個符號）才接回去")
+                } else {
+                    problems.append("語音的佇列空掉之後：兩段語音沒有都播出來")
+                }
+            } else {
+                problems.append("模擬的輸出開不起來")
+            }
         }
         report(name, problems.isEmpty, problems.isEmpty ? details.joined(separator: "；") : problems.joined(separator: "；"))
     }
