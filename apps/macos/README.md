@@ -40,7 +40,8 @@ NBTV_SIGN_IDENTITY="Developer ID Application: 名稱 (Team ID)" NBTV_NOTARY_PROF
   也可以改用 App Store Connect 的 API 金鑰；用哪些環境變數寫在指令稿的開頭。
 - GitHub 上推版本標籤時，CI 的 `sign-macos` 工作對兩種處理器的 app 各做一次，發佈頁放的是簽過的那兩份。
   憑證與登入資料放在 repo 的 `release-signing` 這個 Environment 的 secrets 裡，名稱列在 `.github/workflows/build.yml` 那個工作的說明；
-  沒有設定時那個工作什麼都不做，發佈的仍然是 ad-hoc 簽章的。手動執行那份流程並勾選 sign，可以只試簽章與公證、不發佈。
+  沒有設定時那個工作什麼都不做，發佈的仍然是 ad-hoc 簽章的。手動執行那份流程並勾選 sign，可以只試簽章與公證、不發佈；
+  再填上 reuse_run（先前某一次執行的編號），就不重新建置，直接拿那一次做好的 app 來簽，幾分鐘就有結果。
 - 憑證上的名稱（個人會員是法定姓名）會留在每一份簽過的 app 裡，用 `codesign -dv` 看得到。
 - 沒有開沙盒，也沒有用到別的 Hardened Runtime 例外。以後 bundle 裡如果加了內嵌的程式或程式庫，要先由內而外各自簽過，指令稿要跟著改。
 - 2026-11-27 在開發用的 Mac 上實際走過：簽章、公證（從上傳到通過約一分鐘）、釘票據之後，Gatekeeper 的評估是「Notarized Developer ID」，

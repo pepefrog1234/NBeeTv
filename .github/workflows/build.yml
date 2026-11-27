@@ -16,6 +16,8 @@
 # 憑證與公證的登入資料放在「release-signing」這個 Environment 的 secrets 裡（名稱見 sign-macos 的說明）；
 # 沒有設定的話（例如別人的 fork）那個工作什麼都不做，照舊發佈 ad-hoc 簽章的。
 # 手動執行時勾選 sign 可以只試簽章與公證、不發佈：簽好的那兩份在那一次執行的 Artifacts 裡（signed-macos-apps）。
+# 再填上 reuse_run（先前某一次執行的編號），就不重新建置，直接拿那一次做好的 NBTV.app 來簽，幾分鐘就知道結果
+# （換了憑證、改了 sign-macos 之後用這個試）。
 name: build
 
 on:
@@ -29,13 +31,18 @@ on:
         description: "也把 NBTV.app 用 Developer ID 簽章並送 Apple 公證（只是試，不會發佈）"
         type: boolean
         default: false
+      reuse_run:
+        description: "只試簽章：不重新建置，用這一次執行（填它的編號）做好的 NBTV.app；要一起勾選上面那一項"
+        type: string
+        default: ""
 
 permissions:
   contents: read
 
 # 同一個分支又推了新的提交，舊的那一次就不必跑完；版本標籤的那一次不取消。
+# 只試簽章的執行（reuse_run）另外算一組：它不建置，不該把同一個分支上正在跑的建置取消掉，也不該被它取消。
 concurrency:
-  group: build-${{ github.ref }}
+  group: build-${{ github.ref }}${{ inputs.reuse_run && '-sign-only' || '' }}
   cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
@@ -44,6 +51,7 @@ jobs:
   # ffmpeg.exe 以 GPL 發佈：它的原始碼另外留一份 NBeeTv-<版本>-windows-ffmpeg-source，推版本標籤時和下載包一起放上 GitHub Releases。
   ffmpeg-windows:
     name: ffmpeg-windows-${{ matrix.arch }}
+    if: ${{ !inputs.reuse_run }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
@@ -385,13 +393,20 @@ jobs:
   #   NOTARY_APPLE_ID、NOTARY_TEAM_ID、NOTARY_PASSWORD   Apple ID、Team ID 與 App 專用密碼（不是帳號的密碼）
   # 沒有設定 MACOS_CERTIFICATE_P12 的話這個工作什麼都不做（別人的 fork 就是這樣），發佈的仍然是 ad-hoc 簽章的 app。
   # 簽章身分的名稱不會印在紀錄裡（紀錄是公開的）。
+  # 平常要等 build 成功；手動執行填了 reuse_run 時 build 被略過，改拿那一次執行的產物。
   sign-macos:
     name: sign-macos
-    if: github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.sign)
+    if: >-
+      ${{ !cancelled()
+          && (needs.build.result == 'success' || (needs.build.result == 'skipped' && inputs.reuse_run))
+          && (github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.sign)) }}
     needs: build
     runs-on: macos-26
     timeout-minutes: 60
     environment: release-signing
+    permissions:
+      contents: read
+      actions: read   # 拿別次執行的產物（reuse_run）要這一項
     outputs:
       signed: ${{ steps.sign.outputs.signed }}
     env:
@@ -403,10 +418,21 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: actions/download-artifact@v8
+        if: ${{ !inputs.reuse_run }}
         with:
           path: packages
           pattern: NBeeTv-*-macos-*
           merge-multiple: true
+
+      # 只試簽章時：拿指定的那一次執行做好的
+      - uses: actions/download-artifact@v8
+        if: ${{ inputs.reuse_run }}
+        with:
+          path: packages
+          pattern: NBeeTv-*-macos-*
+          merge-multiple: true
+          run-id: ${{ inputs.reuse_run }}
+          github-token: ${{ github.token }}
 
       - name: 沒有設定憑證
         if: env.HAVE_CERTIFICATE != 'true'
@@ -421,22 +447,37 @@ jobs:
           CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
           CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
         run: |
+          # 匯入一個檔案。「已經在鑰匙圈裡了」不算錯：匯出的 .p12 可能連中繼憑證一起帶著，下面再放一次就會遇到。
+          # security 平常印的內容（裡面有憑證的名稱）不留在紀錄裡，只有真的出錯時才印它的錯誤訊息。
+          import() {
+            local output
+            if ! output="$(security import "$@" 2>&1)"; then
+              case "$output" in
+                *"already exists"*) ;;
+                *) echo "$output" >&2; return 1 ;;
+              esac
+            fi
+          }
           keychain="$RUNNER_TEMP/signing.keychain-db"
           keychain_password="$(uuidgen)"
           security create-keychain -p "$keychain_password" "$keychain"
           security set-keychain-settings -lut 3600 "$keychain"
           security unlock-keychain -p "$keychain_password" "$keychain"
           echo "$CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
-          security import "$RUNNER_TEMP/certificate.p12" -P "$CERTIFICATE_PASSWORD" -f pkcs12 -k "$keychain" -T /usr/bin/codesign > /dev/null
+          import "$RUNNER_TEMP/certificate.p12" -P "$CERTIFICATE_PASSWORD" -f pkcs12 -k "$keychain" -T /usr/bin/codesign
           rm -f "$RUNNER_TEMP/certificate.p12"
+          echo "憑證與私鑰：匯入了"
           for file in DeveloperIDCA.cer DeveloperIDG2CA.cer; do
             curl -fsSL --retry 3 "https://www.apple.com/certificateauthority/$file" -o "$RUNNER_TEMP/$file"
-            security import "$RUNNER_TEMP/$file" -k "$keychain" > /dev/null
+            import "$RUNNER_TEMP/$file" -k "$keychain"
+            echo "中繼憑證 $file：在鑰匙圈裡了"
           done
           # 讓 codesign 不必經過詢問視窗就能用這把私鑰
           security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$keychain" > /dev/null
           # 加進搜尋清單，原來的留著
           security list-keychains -d user -s "$keychain" $(security list-keychains -d user | sed -e 's/^ *"//' -e 's/"$//')
+          # 只印幾個、不印名稱：「identities found」是有幾組憑證＋私鑰，「valid identities found」是其中憑證鏈驗得過、沒過期的
+          security find-identity -p codesigning "$keychain" | grep -E "identities found$" | sed -e 's/^ *//' || true
           identity="$(security find-identity -v -p codesigning "$keychain" | awk '/Developer ID Application/ { print $2; exit }')"
           if [ -z "$identity" ]; then
             echo "::error::MACOS_CERTIFICATE_P12 裡沒有可以用的 Developer ID Application 身分（憑證過期、少了私鑰，或密碼不對）"
