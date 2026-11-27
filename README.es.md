@@ -57,7 +57,9 @@ También para FM hay unos **modos 5, 6 y 7** experimentales: la imagen sigue sie
 El canal de audio de FM no cambia durante una trama, así que los pilotos sobran y en el mismo tiempo cabe un 20 % más de datos.
 El modo 5 usa el mismo modelo que el modo 15 y tarda 2.29 segundos por imagen; el modo 6 tarda 2.88 segundos y mejora la calidad en 1.4 dB;
 el modo 7 tarda 4.43 segundos y la mejora en 3.6 dB. Solo sirven en canales de voz en FM sin desplazamiento de frecuencia y con señal estable
-(no en SSB); también funcionan con las herramientas de línea de comandos y con las dos apps, y solo se han comprobado en simulación.
+(no en SSB); también funcionan con las herramientas de línea de comandos y con las dos apps. Los modos 5 y 6 se probaron el 27-11-2026
+con un par de equipos de FM reales: con señal suficiente se reciben todas las imágenes, y el receptor se mejoró a partir de esas grabaciones
+(con señal débil recibe algunas imágenes más y algo más nítidas). El modo 7 solo se ha comprobado en simulación.
 
 En el mismo tipo de trama hay además dos modos rápidos experimentales, los **modos 3 y 4**, ambos con la red cuatro veces mayor.
 El modo 3 tiene una imagen de 96×72 y tarda 0.67 segundos por imagen, igual de rápido que el modo 14; al quitar los pilotos caben

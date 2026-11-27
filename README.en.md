@@ -57,7 +57,9 @@ Also for FM, there are experimental **modes 5, 6 and 7**: the picture is still 1
 The FM audio channel does not change during a frame, so the pilots can go, and the same time carries 20% more data.
 Mode 5 uses the same model as mode 15 at 2.29 seconds per picture; mode 6 takes 2.88 seconds and is 1.4 dB better;
 mode 7 takes 4.43 seconds and is 3.6 dB better. They only work on FM voice channels with no frequency offset and a steady signal
-(not on SSB); they too are supported by the command-line tools and both apps, and have only been checked in simulation.
+(not on SSB); they too are supported by the command-line tools and both apps. Modes 5 and 6 were tried over a pair of real FM radios
+on 2026-11-27: with enough signal every picture is received, and the receiver was improved from those recordings
+(with a weak signal it receives a few more pictures, a little sharper). Mode 7 has only been checked in simulation.
 
 The same kind of frame also has two experimental fast modes, **modes 3 and 4**, both using the network four times larger.
 Mode 3 has a 96×72 picture at 0.67 seconds per picture, as fast as mode 14; dropping the pilots makes room for 2 more channels

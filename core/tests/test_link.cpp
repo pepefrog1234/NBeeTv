@@ -875,6 +875,199 @@ void test_free_truncated_picture() {
     std::printf("  只送出前七成的一幀：模式 5 交出 %d 張（PSNR %.1f dB），模式 15 交出 %d 張（%.1f dB）\n", pictures[0], psnr[0], pictures[1], psnr[1]);
 }
 
+namespace {
+
+// ───── FM 的訊號弱時：雜訊集中在低頻 ─────
+
+// 低頻比高頻吵的雜訊：白雜訊過一階低通（轉折 300 Hz，往上每八度少 6 dB，像接收機的去加重），再扣掉更低的頻率
+// （像語音通道 300 Hz 以下的截止）。500 Hz 比 2500 Hz 大十幾 dB。power 是整段的平均功率。
+std::vector<float> low_heavy_noise(std::size_t count, double power, std::uint64_t seed) {
+    Rng rng(seed);
+    std::vector<double> shaped(count);
+    const double a = 1.0 - std::exp(-2.0 * 3.14159265358979323846 * 300.0 / kSampleRate);
+    double low = 0.0, lower = 0.0, sum = 0.0;
+    for (double& v : shaped) {
+        low += a * (rng.gauss() - low);
+        lower += a * (low - lower);
+        v = low - lower;
+        sum += v * v;
+    }
+    const double scale = std::sqrt(power * static_cast<double>(count) / std::max(sum, 1e-30));
+    std::vector<float> out(count);
+    for (std::size_t i = 0; i < count; ++i) out[i] = static_cast<float>(shaped[i] * scale);
+    return out;
+}
+
+std::vector<float> white_noise(std::size_t count, double power, std::uint64_t seed) {
+    Rng rng(seed);
+    std::vector<float> out(count);
+    for (float& v : out) v = static_cast<float>(std::sqrt(power) * rng.gauss());
+    return out;
+}
+
+struct NoiseRun {
+    int decoded = 0;    // 標頭正確、有畫面的幀數
+    double psnr = 0.0;  // 它們對各自原圖的平均 PSNR
+};
+
+// 一次發射（frames 幀，三張測試圖輪流）加上給定的雜訊之後接收。
+NoiseRun receive_in_noise(const Mode& m, int frames, const std::vector<float>& noise, bool carrier_noise, bool flatten_search) {
+    const std::vector<float> signal = burst(m, frames, "N0CALL");
+    const std::size_t lead = 6000;
+    std::vector<float> audio(noise);
+    for (std::size_t i = 0; i < signal.size() && lead + i < audio.size(); ++i) audio[lead + i] += signal[i];
+    Receiver rx;
+    rx.tuning().carrier_noise = carrier_noise;
+    rx.tuning().flatten_search = flatten_search;
+    attach_models(rx);
+    NoiseRun out;
+    for (const RxFrame& f : run_receiver(rx, audio)) {
+        if (!(f.decoded && f.header_ok && f.callsign == "N0CALL" && f.mode_id == m.id) || f.sequence < 0) continue;
+        const auto rgb = test_images::load(test_images::kNames[f.sequence % 3], m.image_width, m.image_height);
+        if (f.rgb.size() != rgb.size()) continue;
+        ++out.decoded;
+        out.psnr += test_images::psnr(f.rgb, rgb);
+    }
+    if (out.decoded > 0) out.psnr /= out.decoded;
+    return out;
+}
+
+// 像在車上收 FM：大部分時間雜訊很小，不時來一陣偏低頻的強雜訊（訊號掉到門檻以下的那幾十毫秒）。
+// quiet_db、burst_db 是平常與那一陣的雜訊功率相對於訊號的 dB；每秒平均 rate 陣，每陣 10–120 毫秒。
+std::vector<float> flutter_noise(std::size_t count, double signal_power, double quiet_db, double burst_db, double rate, std::uint64_t seed) {
+    std::vector<float> out = white_noise(count, signal_power * std::pow(10.0, quiet_db / 10.0), seed);
+    const std::vector<float> loud = low_heavy_noise(count, signal_power * std::pow(10.0, burst_db / 10.0), seed + 1000);
+    Rng rng(seed + 2000);
+    std::size_t at = 0;
+    while (at < count) {
+        at += static_cast<std::size_t>(-std::log(std::max(rng.uniform(), 1e-9)) / rate * kSampleRate);
+        const std::size_t length = static_cast<std::size_t>((0.010 + 0.110 * rng.uniform()) * kSampleRate);
+        for (std::size_t i = at; i < std::min(at + length, count); ++i) out[i] += loud[i];
+        at += length;
+    }
+    return out;
+}
+
+// 雜訊偏低頻時，接收機要自己量出各載波的雜訊（RxTuning::carrier_noise），找訊號之前也先把頻譜拉平
+// （RxTuning::flatten_search）。兩者都沒有假設雜訊是什麼形狀，所以白雜訊下不能變差。
+void test_free_low_heavy_noise() {
+    const Mode& m = *find_mode(5);
+    const int frames = 6;
+    const std::vector<float> signal = burst(m, frames, "N0CALL");
+    const double power = mean_power(signal);
+    const std::size_t count = signal.size() + 6000 + 12000;
+    const std::uint64_t seeds[] = {11, 12, 13};
+
+    // 訊號比雜訊小 2.5 dB：兩樣都關的話幾乎找不到訊號，都開要收到一半以上
+    int with = 0, without = 0;
+    for (std::uint64_t seed : seeds) {
+        const std::vector<float> noise = low_heavy_noise(count, power * std::pow(10.0, 0.25), seed);
+        with += receive_in_noise(m, frames, noise, true, true).decoded;
+        without += receive_in_noise(m, frames, noise, false, false).decoded;
+    }
+    CHECK(with >= 9);
+    CHECK(with >= without + 6);
+    std::printf("  模式 5、偏低頻的雜訊、訊號比雜訊小 2.5 dB：收到 %d/18（各載波的雜訊與搜尋前拉平都關掉：%d/18）\n", with, without);
+
+    // 訊號和雜訊一樣大：都收得到，量了各載波的雜訊之後畫面比較清楚
+    int got_on = 0, got_off = 0;
+    double psnr_on = 0.0, psnr_off = 0.0;
+    for (std::uint64_t seed : seeds) {
+        const std::vector<float> noise = low_heavy_noise(count, power, seed);
+        const NoiseRun on = receive_in_noise(m, frames, noise, true, true), off = receive_in_noise(m, frames, noise, false, true);
+        got_on += on.decoded;
+        got_off += off.decoded;
+        psnr_on += on.psnr / 3.0;
+        psnr_off += off.psnr / 3.0;
+    }
+    CHECK(got_on >= 17);
+    CHECK(got_on >= got_off);
+    CHECK(psnr_on > psnr_off + 0.3);
+    std::printf("  模式 5、偏低頻的雜訊、訊號和雜訊一樣大：%d/18、%.2f dB（不量各載波的雜訊：%d/18、%.2f dB）\n", got_on, psnr_on, got_off, psnr_off);
+
+    // 白雜訊：兩樣都開和都關，收到的張數一樣（訊號弱的那一組容許差一張），畫面差不到 0.15 dB
+    for (double snr : {-3.0, 3.0}) {
+        int a = 0, b = 0;
+        double pa = 0.0, pb = 0.0;
+        for (std::uint64_t seed : {31u, 32u}) {
+            const std::vector<float> noise = white_noise(count, power * std::pow(10.0, -snr / 10.0), seed);
+            const NoiseRun on = receive_in_noise(m, frames, noise, true, true), off = receive_in_noise(m, frames, noise, false, false);
+            a += on.decoded;
+            b += off.decoded;
+            pa += on.psnr / 2.0;
+            pb += off.psnr / 2.0;
+        }
+        CHECK(std::abs(a - b) <= (snr < 0.0 ? 1 : 0));
+        CHECK(std::fabs(pa - pb) < 0.15);
+        std::printf("  模式 5、白雜訊、訊號比雜訊 %+.0f dB：%d/12、%.2f dB（都關掉：%d/12、%.2f dB）\n", snr, a, pa, b, pb);
+    }
+}
+
+// 一陣一陣的強雜訊（平常的雜訊比訊號小 8 dB，每秒十陣、比訊號大 9 dB、偏低頻）：每一幀都有好幾個符號被打到。
+// 逐符號的雜訊估計本來就讓這些幀收得到；被打到的符號裡各載波不一樣吵，量出來之後畫面要更清楚。
+void test_free_noise_bursts() {
+    const Mode& m = *find_mode(5);
+    const int frames = 24;
+    const std::vector<float> signal = burst(m, frames, "N0CALL");
+    const double power = mean_power(signal);
+    const std::vector<float> noise = flutter_noise(signal.size() + 6000 + 12000, power, -8.0, 9.0, 10.0, 21);
+    const NoiseRun on = receive_in_noise(m, frames, noise, true, true), off = receive_in_noise(m, frames, noise, false, true);
+    CHECK(on.decoded >= frames - 1);
+    CHECK(on.decoded >= off.decoded);
+    CHECK(on.psnr > off.psnr + 0.25);
+    std::printf("  模式 5、一陣一陣偏低頻的強雜訊：%d/%d、%.2f dB（不量各載波的雜訊：%d/%d、%.2f dB）\n", on.decoded, frames, on.psnr, off.decoded, frames, off.psnr);
+}
+
+// 連續兩幀的前導符號都被雜訊打壞，而且其中第一幀的尾端附近還有幾個很像 S0 的符號（別人按了一下發射，或雜訊剛好像）。
+// 第一幀照節拍收下來之後，它結尾的參考符號對得上，就是完整送到最後的一幀：下一幀也要照節拍接著收，
+// 不能因為幀尾那幾個符號還來不及判定就停下來。六幀都要收到。
+void test_free_follow_through_damage() {
+    const Mode& m = *find_mode(5);
+    std::vector<float> signal = burst(m, 6, "N0CALL");
+    CHECK_EQ(static_cast<int>(signal.size()), 6 * m.frame_samples());
+    if (signal.empty()) return;
+    const double power = mean_power(signal);
+    const std::vector<float> s0(signal.begin(), signal.begin() + kSymbolSamples);
+    Rng rng(4242);
+    for (int frame : {2, 3}) {
+        const std::size_t at = static_cast<std::size_t>(frame) * static_cast<std::size_t>(m.frame_samples());
+        for (int n = 0; n < kPreambleSymbols * kSymbolSamples; ++n) signal[at + static_cast<std::size_t>(n)] = static_cast<float>(std::sqrt(power) * rng.gauss());
+    }
+    const std::size_t near_end = static_cast<std::size_t>(3 * m.frame_samples()) - 4800;
+    for (int copy = 0; copy < 5; ++copy) {
+        for (int n = 0; n < kSymbolSamples; ++n) signal[near_end + static_cast<std::size_t>(copy * kSymbolSamples + n)] += s0[static_cast<std::size_t>(n)];
+    }
+    std::vector<float> audio(3000, 0.0f);
+    audio.insert(audio.end(), signal.begin(), signal.end());
+    audio.insert(audio.end(), 9000, 0.0f);
+    sim::ChannelParams params;
+    params.snr_db = 25.0;
+    params.seed = 707;
+    sim::Channel channel(params, power);
+    std::vector<float> received;
+    channel.process(audio, received);
+    // 音訊一次給多少個取樣，會改變「候選的前導符號來不來得及在這一幀收完之前判定」；不管怎麼給，結果都要一樣
+    int worst = 6;
+    for (std::size_t chunk : {240u, 480u, 1024u, 1200u, 4800u}) {
+        Receiver rx;
+        attach_models(rx);
+        int good = 0, other = 0;
+        bool fourth = false;
+        for (const RxFrame& f : run_receiver(rx, received, chunk)) {
+            const bool mine = f.decoded && f.header_ok && f.callsign == "N0CALL" && f.mode_id == m.id;
+            ++(mine ? good : other);
+            fourth = fourth || (mine && f.sequence == 3);
+        }
+        CHECK_EQ(good, 6);
+        CHECK_EQ(other, 0);
+        CHECK(fourth);
+        worst = std::min(worst, good);
+    }
+    std::printf("  模式 5 連續 6 幀、第三與第四幀的前導符號換成雜訊、第三幀尾端有幾個像 S0 的符號，音訊分五種大小給：最少收到 %d 張\n", worst);
+}
+
+}  // namespace
+
 int main() {
     test_noise_only();
     if (!have_models()) {
@@ -900,5 +1093,8 @@ int main() {
     test_free_faded_preamble();
     test_free_bursts();
     test_free_truncated_picture();
+    test_free_low_heavy_noise();
+    test_free_noise_bursts();
+    test_free_follow_through_damage();
     return check::finish("link");
 }

@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
 
 #include "fft.hpp"
@@ -282,6 +283,22 @@ constexpr double kFreeDeficit = 0.7;
 // 收到的能量不到預期的這個比例：那個符號根本沒有訊號（對方送到一半就停了）。不管雜訊看起來正不正常，都不能把它當成收到的值。
 // 乾淨的訊號一個符號的能量起伏不會到這麼低。
 constexpr double kFreeAbsent = 0.25;
+// 各載波的雜訊形狀（見 process_frame_free「各載波的雜訊」與 Receiver::carrier_shape）
+constexpr double kShapeMaxSnrDb = 10.0;    // 一個符號的訊雜比（每個格點）在這以上就不量：雜訊太小，量不準，各載波的份量本來也差不多
+constexpr double kShapeClassStepDb = 4.0;  // 往下每這麼多 dB 一級：6–10、2–6、−2–2、−2 以下（FreeTrack::kShapeClasses 級）
+constexpr double kShapeForget = 0.7;       // 每過一幀，之前累計的份量乘上這個數（大約是最近三幀）
+constexpr double kShapeMinRows = 6.0;      // 一級裡累計的符號不到這麼多個，就不用它自己量到的
+constexpr int kShapeBands = 7;             // 49 個載波分成這麼多段，每段各自平均
+constexpr double kShapeFloor = 0.03;       // 某一段扣掉訊號之後剩下的比各段平均的這個比例還小（或是負的）：當成這麼多
+constexpr double kShapeMaxTiltDb = 24.0;   // 最高與最低的一段最多差這麼多
+static_assert(kCarriers % kShapeBands == 0);
+// 找訊號之前把輸入的頻譜拉平（Receiver::flatten）
+constexpr double kFlatCentreHz = 1500.0;  // 頻帶的正中間：拉到頻譜的重心落在這裡
+constexpr double kFlatSeconds = 1.0;      // 自相關是最近這麼久的指數平均
+constexpr int kFlatEvery = 256;           // 每這麼多個取樣重新算一次 a
+constexpr double kFlatMin = 0.5;          // 算出來的 a 不到這個數就不動（重心只偏一點：訊號自己的頻率響應、衰落，不是雜訊偏低頻）
+constexpr double kFlatMax = 0.95;         // a 的上限（接近 1 時是微分器，頻帶兩端差 17 dB）
+constexpr double kFlatStep = 0.25;        // 每次往算出來的值靠近這個比例
 
 // 兩個通道估計（49 個載波）差多少：b ≈ gain · a · exp(−j2πk·tau/N + j·phi)。
 // tau 是 b 比 a 晚幾個取樣，phi 是共同的相位，rho 是對齊之後的正規化相關值（同一個通道、訊號乾淨時接近 1）。
@@ -408,12 +425,19 @@ double payload_top_share(const SymbolGrid& grid, int first_row, int last_row) {
 
 Receiver::Receiver() {
     buf_.reserve(1 << 17);
+    flat_.reserve(1 << 17);
     raw_.reserve(1 << 17);
 }
 
 void Receiver::reset() {
     analytic_.reset();
     buf_.clear();
+    flat_.clear();
+    flat_a_ = 0.0;
+    flat_r0_ = 0.0;
+    flat_r1_ = flat_r2_ = cd(0.0, 0.0);
+    flat_prev_ = flat_prev2_ = cf(0.0f, 0.0f);
+    flat_count_ = 0;
     raw_.clear();
     free_ = FreeTrack{};
     base_ = 0;
@@ -464,7 +488,9 @@ void Receiver::push(std::span<const float> raw) {
     // 輸入音量：時間常數約 0.1 秒的指數平均
     const double alpha = 1.0 / (0.1 * kSampleRate);
     for (float s : samples) level_ += alpha * (static_cast<double>(s) * s - level_);
+    const std::size_t had = buf_.size();
     analytic_.process(samples, buf_);
+    flatten(had);
     raw_.insert(raw_.end(), samples.begin(), samples.end());  // 和 buf_ 一樣長、同樣的編號
     total_in_ += static_cast<std::int64_t>(samples.size());
     while (step()) {
@@ -511,8 +537,48 @@ void Receiver::trim() {
     }
     if (keep - base_ > kBufferSlack) {
         buf_.erase(buf_.begin(), buf_.begin() + static_cast<std::ptrdiff_t>(keep - base_));
+        flat_.erase(flat_.begin(), flat_.begin() + static_cast<std::ptrdiff_t>(keep - base_));
         raw_.erase(raw_.begin(), raw_.begin() + static_cast<std::ptrdiff_t>(keep - base_));
         base_ = keep;
+    }
+}
+
+// buf_ 裡從第 from 個起是新進來的：算出它們拉平之後的值，接在 flat_ 後面。
+// 濾波器是一階的：y[n] = x[n] − a·x[n−1]，a 愈大愈壓低頻（a = 0 不動）。a 怎麼定：讓濾過之後的頻譜重心落在頻帶正中間。
+// 濾過之後延遲 1 的自相關是 (1 + a²)·r1 − a·(r0 + r2)，它的角度就是重心的頻率；r0、r1、r2 是輸入延遲 0、1、2 的自相關，
+// 用最近約一秒的指數平均。要它的角度等於正中間的頻率，是 a 的二次方程式，兩個根互為倒數，取 0 到 1 之間的那一個。
+// 輸入的重心本來就不低於正中間（短波的雜訊、夠強的訊號）時 a = 0，flat_ 和 buf_ 完全相同。
+// 這裡不知道、也不必知道接的是哪一台電台：雜訊偏多少，就拉多少。
+void Receiver::flatten(std::size_t from) {
+    const double alpha = 1.0 / (kFlatSeconds * kSampleRate);
+    const double theta = kTwoPi * kFlatCentreHz / kSampleRate;
+    const cd turn = std::polar(1.0, -theta);
+    for (std::size_t i = from; i < buf_.size(); ++i) {
+        const cf x = buf_[i];
+        if (tuning_.flatten_search) {
+            flat_r0_ += alpha * (std::norm(x) - flat_r0_);
+            flat_r1_ += alpha * (cd(x) * std::conj(cd(flat_prev_)) - flat_r1_);
+            flat_r2_ += alpha * (cd(x) * std::conj(cd(flat_prev2_)) - flat_r2_);
+            if (++flat_count_ >= kFlatEvery) {
+                flat_count_ = 0;
+                double target = 0.0;
+                const double a1 = (flat_r1_ * turn).imag();                           // 負的：重心比正中間低
+                const double b1 = (flat_r2_ * turn).imag() - flat_r0_ * std::sin(theta);
+                if (a1 < 0.0 && flat_r0_ > 0.0) {
+                    const double disc = b1 * b1 - 4.0 * a1 * a1;
+                    target = kFlatMax;                                                // 沒有實根：一階的濾波器拉到底也不夠
+                    if (disc >= 0.0 && b1 < 0.0) target = std::min((b1 + std::sqrt(disc)) / (2.0 * a1), kFlatMax);
+                    if (target < kFlatMin) target = 0.0;
+                }
+                flat_a_ += kFlatStep * (target - flat_a_);
+                if (flat_a_ < 1e-3) flat_a_ = 0.0;
+            }
+        } else {
+            flat_a_ = 0.0;
+        }
+        flat_.push_back(flat_a_ > 0.0 ? x - static_cast<float>(flat_a_) * flat_prev_ : x);
+        flat_prev2_ = flat_prev_;
+        flat_prev_ = x;
     }
 }
 
@@ -573,7 +639,7 @@ bool Receiver::search_step() {
             sc_p_ = cd(0, 0);
             sc_e1_ = sc_e2_ = 0.0;
             for (int m = 0; m < kScLength; ++m) {
-                const cd a = sample(d + m), b = sample(d + m + kScLag);
+                const cd a = flat_sample(d + m), b = flat_sample(d + m + kScLag);
                 sc_p_ += std::conj(a) * b;
                 sc_e1_ += std::norm(a);
                 sc_e2_ += std::norm(b);
@@ -582,8 +648,8 @@ bool Receiver::search_step() {
             sc_age_ = 0;
         } else {
             // 由 d−1 的結果更新：去掉最舊的一項，加入最新的一項
-            const cd a0 = sample(d - 1), b0 = sample(d - 1 + kScLag);
-            const cd a1 = sample(d - 1 + kScLength), b1 = sample(d - 1 + kScLength + kScLag);
+            const cd a0 = flat_sample(d - 1), b0 = flat_sample(d - 1 + kScLag);
+            const cd a1 = flat_sample(d - 1 + kScLength), b1 = flat_sample(d - 1 + kScLength + kScLag);
             sc_p_ += std::conj(a1) * b1 - std::conj(a0) * b0;
             sc_e1_ += std::norm(a1) - std::norm(a0);
             sc_e2_ += std::norm(b1) - std::norm(b0);
@@ -623,7 +689,8 @@ bool Receiver::search_step() {
 }
 
 // 取 256 點、修正頻偏後做 FFT。頻偏的相位以取樣編號為準，所以各個視窗之間相位連續。
-void Receiver::fft_window(std::int64_t start, double cfo, cf* out) const {
+// flat 是 true 時取拉平過的那一份（flat_）：找前導符號、確認訊號在不在的那幾步用。
+void Receiver::fft_window(std::int64_t start, double cfo, cf* out, bool flat) const {
     assert(start >= base_ && start + kFftSize <= end());
     // 正式版沒有 assert：萬一呼叫端算錯了範圍，寧可當成那裡沒有訊號（全 0），也不要讀到緩衝區外面
     if (start < base_ || start + kFftSize > end()) {
@@ -635,7 +702,7 @@ void Receiver::fft_window(std::int64_t start, double cfo, cf* out) const {
     double phase0 = std::fmod(step * static_cast<double>(start % (1LL << 40)), kTwoPi);
     cd rot = std::polar(1.0, phase0);
     const cd inc = std::polar(1.0, step);
-    const cf* in = &buf_[static_cast<std::size_t>(start - base_)];
+    const cf* in = flat ? &flat_[static_cast<std::size_t>(start - base_)] : &buf_[static_cast<std::size_t>(start - base_)];
     for (int n = 0; n < kFftSize; ++n) {
         out[n] = in[n] * cf(rot);
         rot *= inc;
@@ -653,6 +720,8 @@ void Receiver::fft_window(std::int64_t start, double cfo, cf* out) const {
 // 別的模式的幀（已經移除的數位與類比模式，或是以後才加的模式）一樣會通過 S0 的檢查，酬載裡也一樣有導頻。
 // 只比自己認得的序列的話，那種幀會被當成自己的某個模式收下來。全部都比，才看得出最像的其實是別的編號；
 // 回傳的 mode_id 可能是模式表裡沒有的，由呼叫端決定不收。
+//
+// S0、S1 的 FFT 取的是拉平過的取樣（flatten）：視窗外的能量密度就是雜訊，雜訊偏低頻時低的那幾個載波會把它整個抬高。
 Receiver::PreambleCheck Receiver::check_preamble(std::int64_t s0_window, double cfo, std::span<const int> shifts,
                                                  int expect_mode, int detect_first, int detect_last) const {
     constexpr int kHalf = kFftSize / 2;
@@ -668,8 +737,8 @@ Receiver::PreambleCheck Receiver::check_preamble(std::int64_t s0_window, double 
     const double kDofOut0 = kS0Carriers - kDofIn0;
 
     cf y0[kFftSize], y1[kFftSize];
-    fft_window(s0_window, cfo, y0);
-    fft_window(s0_window + kSymbolSamples, cfo, y1);
+    fft_window(s0_window, cfo, y0, true);
+    fft_window(s0_window + kSymbolSamples, cfo, y1, true);
 
     PreambleCheck best;
     std::array<double, kHalf> p0{};
@@ -766,7 +835,7 @@ Receiver::PreambleCheck Receiver::check_preamble(std::int64_t s0_window, double 
 // 由 S1 的通道估計求最強路徑與第一條路徑相對於視窗起點的延遲（取樣數）。
 Receiver::PathDelays Receiver::s1_path_delays(std::int64_t s1_window, double cfo, int mode_id) const {
     cf y[kFftSize];
-    fft_window(s1_window, cfo, y);
+    fft_window(s1_window, cfo, y, true);
     cf x[kFftSize];
     std::fill(x, x + kFftSize, cf(0, 0));
     for (int c = 0; c < kCarriers; ++c) {
@@ -878,6 +947,15 @@ bool Receiver::try_acquire(std::int64_t s0_start, cd corr, double metric) {
         if (trace_) std::fprintf(stderr, "[rx]   幀起點 %lld 的那一幀已經收過了，不再收一次\n", static_cast<long long>(t0));
         return false;
     }
+    if (receiving && free && mode == mode_ && free_.frames > 0 && std::llabs(t0 - t0_) <= kCyclicPrefix / 2) {
+        // 這個前導符號就是正在收的這一幀自己的（照節拍接著收、前導符號當時沒確認到，搜尋後來又找到它）。
+        // 它只說明這一幀確實在；通道、時脈差、幀的起點都已經由前幾幀累積得很準，不能因為它就全部重來——
+        // 重新捕獲只靠這一個前導符號，而它正是剛才沒確認到的那一個（多半被雜訊打壞了）。當成確認，接著收。
+        if (trace_) std::fprintf(stderr, "[rx]   幀起點 %lld 就是正在收的這一幀：當成確認，不重新開始\n", static_cast<long long>(t0));
+        confirmed_ = true;
+        frame_evidence_ = std::max(frame_evidence_, chk.score);
+        return false;
+    }
     const Acquisition found{mode, cfo + pilots.cfo_delta, t0, chk.score, metric};
     if (receiving && !tentative()) {
         // 目前這一幀照樣收完（少了後面一截也可能解得出來），之後直接去收這個前導符號開始的那一幀
@@ -922,7 +1000,7 @@ void Receiver::begin_frame(const Acquisition& found) {
     snr_valid_ = true;
 }
 
-SymbolGrid Receiver::demodulate(std::int64_t t0, double cfo, int rows) const {
+SymbolGrid Receiver::demodulate(std::int64_t t0, double cfo, int rows, bool flat) const {
     SymbolGrid grid(rows);
     // 視窗提前 kTrackBackoff 個取樣，會讓第 k 格多出 exp(−j2πk·提前量/N) 的相位，這裡乘回去
     std::array<cf, kCarriers> derotate;
@@ -931,7 +1009,7 @@ SymbolGrid Receiver::demodulate(std::int64_t t0, double cfo, int rows) const {
     }
     cf y[kFftSize];
     for (int r = 0; r < rows; ++r) {
-        fft_window(t0 + static_cast<std::int64_t>(r) * kSymbolSamples + kCyclicPrefix - kTrackBackoff, cfo, y);
+        fft_window(t0 + static_cast<std::int64_t>(r) * kSymbolSamples + kCyclicPrefix - kTrackBackoff, cfo, y, flat);
         for (int c = 0; c < kCarriers; ++c) grid.at(r, c) = y[kFirstBin + c] * derotate[static_cast<std::size_t>(c)];
     }
     return grid;
@@ -1014,6 +1092,7 @@ bool Receiver::pilots_present(std::int64_t t0, double cfo, const Mode& mode) con
 // 接近 S/(S+N)；只有雜訊時在 0 附近（一個符號約 ±0.3，平均 12 個符號約 0.1、36 個約 0.06）。
 // 不必知道酬載放了什麼，所以沒有導頻的幀靠它判斷訊號在不在、送到哪裡為止。
 // 單頻載波的循環字首也和尾巴相同，要另外用 payload_top_share 擋。
+// 讀的是拉平過的取樣（flatten）：雜訊偏低頻時，原來的取樣算出來的值會被低頻的雜訊壓低。
 double Receiver::cyclic_coherence(std::int64_t t0, int first_row, int last_row) const {
     cd total(0, 0);
     int rows = 0;
@@ -1024,7 +1103,7 @@ double Receiver::cyclic_coherence(std::int64_t t0, int first_row, int last_row) 
         cd acc(0, 0);
         double ea = 0.0, eb = 0.0;
         for (int n = kCyclicFirst; n < kCyclicLast; ++n) {
-            const cd a = sample(s + n), b = sample(s + n + kFftSize);
+            const cd a = flat_sample(s + n), b = flat_sample(s + n + kFftSize);
             acc += b * std::conj(a);
             ea += std::norm(a);
             eb += std::norm(b);
@@ -1032,6 +1111,77 @@ double Receiver::cyclic_coherence(std::int64_t t0, int first_row, int last_row) 
         if (ea > 0.0 && eb > 0.0) total += acc / std::sqrt(ea * eb);
     }
     return rows > 0 ? std::abs(total) / rows : 0.0;
+}
+
+// 一個符號裡訊號的功率（解析訊號每個取樣的均方值）：循環字首乘上符號尾巴對應的取樣再平均。兩邊的訊號相同、雜訊無關，
+// 所以雜訊不會讓這個值偏高（只會讓它起伏）；訊號被雜訊壓掉的符號，量到的就少。讀不到時回傳 false。
+bool Receiver::cyclic_signal(std::int64_t symbol_start, double& power) const {
+    if (symbol_start + kCyclicFirst < base_ || symbol_start + kCyclicLast + kFftSize > end()) return false;
+    double acc = 0.0;
+    for (int n = kCyclicFirst; n < kCyclicLast; ++n) {
+        const cd a = sample(symbol_start + n), b = sample(symbol_start + n + kFftSize);
+        acc += (b * std::conj(a)).real();
+    }
+    power = acc / (kCyclicLast - kCyclicFirst);
+    return true;
+}
+
+// 第 k 級符號的雜訊在各個載波上的形狀（49 個值，平均是 1）。量到的還不夠多時回傳 false。
+// free_.shape_power 是那一級的符號每個載波收到的功率；訊號的總量是 free_.shape_signal，照通道估計（channel，總功率 channel_power）
+// 分給各個載波，扣掉之後剩下的是雜訊。一個載波一個載波看起伏太大，所以分成 kShapeBands 段各自平均，再配一條直線
+// （縱軸是雜訊的對數，橫軸是第幾段）；雜訊比訊號小很多的那幾段起伏大，份量就輕。直線的斜率不到自己誤差的兩倍，就當成是平的。
+// tilt_db 是配出來最高的一段比最低的一段多幾 dB（低頻比較吵時是負的）。
+bool Receiver::carrier_shape(int k, const std::array<cf, kCarriers>& channel, double channel_power, std::array<float, kCarriers>& out,
+                             double& tilt_db) const {
+    const std::size_t i = static_cast<std::size_t>(k);
+    const double rows = free_.shape_rows[i];
+    tilt_db = 0.0;
+    if (rows < kShapeMinRows || !(channel_power > 0.0)) return false;
+    const double signal = std::max(free_.shape_signal[i], 0.0);
+    constexpr int kPer = kCarriers / kShapeBands;
+    std::array<double, kShapeBands> noise{}, total{};
+    double mean = 0.0;
+    for (int b = 0; b < kShapeBands; ++b) {
+        const std::size_t j = static_cast<std::size_t>(b);
+        for (int c = b * kPer; c < (b + 1) * kPer; ++c) {
+            const double p = free_.shape_power[i][static_cast<std::size_t>(c)];
+            total[j] += p;
+            noise[j] += p - signal * std::norm(channel[static_cast<std::size_t>(c)]) / channel_power;
+        }
+        total[j] /= kPer;
+        noise[j] /= kPer;
+        mean += noise[j] / kShapeBands;
+    }
+    if (!(mean > 0.0)) return false;
+    double sw = 0.0, sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+    const double cells = kPer * rows;  // 一段裡平均了幾個格點
+    for (int b = 0; b < kShapeBands; ++b) {
+        const std::size_t j = static_cast<std::size_t>(b);
+        const double level = std::max(noise[j], kShapeFloor * mean);
+        const double sigma = total[j] / std::sqrt(cells) / level;  // 對數刻度上的誤差：一個格點的功率起伏和它自己一樣大
+        const double w = 1.0 / (sigma * sigma);
+        const double x = b - (kShapeBands - 1) / 2.0, y = std::log(level);
+        sw += w;
+        sx += w * x;
+        sy += w * y;
+        sxx += w * x * x;
+        sxy += w * x * y;
+    }
+    const double det = sw * sxx - sx * sx;
+    if (!(det > 0.0)) return false;
+    double slope = (sw * sxy - sx * sy) / det;  // 每往上一段，雜訊的自然對數差多少
+    if (slope * slope < 4.0 * sw / det) slope = 0.0;
+    const double limit = kShapeMaxTiltDb * std::log(10.0) / 10.0 / (kShapeBands - 1);
+    slope = std::clamp(slope, -limit, limit);
+    double sum = 0.0;
+    for (int c = 0; c < kCarriers; ++c) {
+        const double value = std::exp(slope * (c - (kCarriers - 1) / 2.0) / kPer);
+        out[static_cast<std::size_t>(c)] = static_cast<float>(value);
+        sum += value;
+    }
+    for (float& v : out) v = static_cast<float>(v * kCarriers / sum);
+    tilt_db = slope * (kShapeBands - 1) * 10.0 / std::log(10.0);
+    return true;
 }
 
 // 開頭幾十個酬載符號裡訊號在不在（對應靠導頻的 pilots_present）。
@@ -1051,7 +1201,7 @@ Receiver::PilotCheck Receiver::verify_frame_start(std::int64_t t0, double cfo, c
     if (mode.scattered_pilots) return verify_pilots(t0, cfo, mode);
     PilotCheck out;
     const int last = kPreambleSymbols + std::min(mode.payload_symbols, kVerifySymbols);
-    const SymbolGrid grid = demodulate(t0, 0.0, last);
+    const SymbolGrid grid = demodulate(t0, 0.0, last, true);
     if (payload_top_share(grid, kPreambleSymbols, last) >= kPilotTopShare) return out;
     std::array<cf, kCarriers> h1;
     for (int c = 0; c < kCarriers; ++c) h1[static_cast<std::size_t>(c)] = grid.at(1, c) * (s1_value(mode.id, kFirstBin + c) > 0.0f ? 1.0f : -1.0f);
@@ -1314,6 +1464,79 @@ void Receiver::process_frame_free() {
     snr_db_ = static_cast<float>(10.0 * std::log10(power / (64.0 * payload_var)));  // 3 kHz 的雜訊頻寬是 64 格
     snr_valid_ = true;
 
+    // 各載波的雜訊。上面的 row_var 是一個符號裡所有載波平均的雜訊；同一個符號裡，各個載波其實不一樣吵。
+    // FM 的訊號弱到門檻以下時，解調出來的雜訊（喀喀聲）經過接收機的去加重，低頻比高頻大十幾 dB；訊號夠強時大致是平的。
+    // 差多少、是什麼形狀，每一台接收機不一樣，所以不假設，從收到的幀自己量：
+    //   每個載波收到的功率 ＝ 訊號在那個載波上的功率 ＋ 那個載波上的雜訊
+    // 訊號的總量由循環字首量（cyclic_signal），照通道估計分給各個載波；扣掉之後剩下的就是雜訊。
+    // 一個符號只有 49 個值，看不出形狀，所以把吵雜程度差不多的符號放在一起量（照 row_var 分成幾級；愈吵的符號形狀愈斜），
+    // 同一次發射裡前幾幀量到的也算進來（Receiver::carrier_shape）。訊雜比在 kShapeMaxSnrDb 以上的符號不量、照舊。
+    constexpr int kClasses = FreeTrack::kShapeClasses;
+    std::vector<int> row_class(static_cast<std::size_t>(rows), -1);
+    std::array<std::array<float, kCarriers>, kClasses> shape{};
+    std::array<bool, kClasses> shaped{};
+    if (tuning_.carrier_noise && power > 0.0) {
+        for (int k = 0; k < kClasses; ++k) {
+            const std::size_t i = static_cast<std::size_t>(k);
+            for (double& v : free_.shape_power[i]) v *= kShapeForget;
+            free_.shape_signal[i] *= kShapeForget;
+            free_.shape_rows[i] *= kShapeForget;
+        }
+        std::array<double, kClasses> seen_rows{}, seen_noise{}, seen_var{};  // 只算這一幀的（給追蹤訊息用）
+        for (int row = payload_first; row < payload_last; ++row) {
+            const std::size_t r = static_cast<std::size_t>(row);
+            const double var = std::max(row_var[r], floor_var);
+            const double symbol_snr_db = 10.0 * std::log10(mean_power / var);
+            if (symbol_snr_db >= kShapeMaxSnrDb) continue;
+            const int k = std::min(static_cast<int>((kShapeMaxSnrDb - symbol_snr_db) / kShapeClassStepDb), kClasses - 1);
+            row_class[r] = k;
+            double signal = 0.0;
+            if (!cyclic_signal(t0_ + static_cast<std::int64_t>(row) * kSymbolSamples, signal)) continue;
+            signal *= static_cast<double>(kFftSize) * kFftSize;  // 換成 FFT 輸出的刻度：這個符號所有載波上訊號的功率合計
+            const std::size_t i = static_cast<std::size_t>(k);
+            double energy = 0.0;
+            for (int c = 0; c < kCarriers; ++c) {
+                const double e = std::norm(grid.at(row, c));
+                free_.shape_power[i][static_cast<std::size_t>(c)] += e;
+                energy += e;
+            }
+            free_.shape_signal[i] += signal;
+            free_.shape_rows[i] += 1.0;
+            seen_rows[i] += 1.0;
+            seen_noise[i] += (energy - signal) / kCarriers;
+            seen_var[i] += var;
+        }
+        std::array<double, kClasses> tilt{};
+        for (int k = 0; k < kClasses; ++k) {
+            const std::size_t i = static_cast<std::size_t>(k);
+            shaped[i] = carrier_shape(k, base, power, shape[i], tilt[i]);
+        }
+        if (trace_) {
+            for (int k = 0; k < kClasses; ++k) {
+                const std::size_t i = static_cast<std::size_t>(k);
+                if (seen_rows[i] <= 0.0) continue;
+                const double top = kShapeMaxSnrDb - k * kShapeClassStepDb;
+                if (k < kClasses - 1) std::fprintf(stderr, "[rx]   各載波的雜訊：訊雜比 %.0f–%.0f dB 的符號", top - kShapeClassStepDb, top);
+                else std::fprintf(stderr, "[rx]   各載波的雜訊：訊雜比 %.0f dB 以下的符號", top);
+                std::fprintf(stderr, " %.0f 個（累計 %.1f）", seen_rows[i], free_.shape_rows[i]);
+                if (shaped[i]) std::fprintf(stderr, "，頻帶上緣比下緣 %+.1f dB", tilt[i]);
+                else std::fprintf(stderr, "，量到的還不夠");
+                if (seen_noise[i] > 0.0) std::fprintf(stderr, "；扣掉訊號剩下的是估計的 %+.1f dB", 10.0 * std::log10(seen_noise[i] / std::max(seen_var[i], 1e-30)));
+                std::fprintf(stderr, "\n");
+            }
+        }
+        // 自己量到的不夠的那一級，借隔壁的（先借比較吵的那一級）；都沒有就照舊
+        const std::array<bool, kClasses> own = shaped;
+        for (int k = 0; k < kClasses; ++k) {
+            const std::size_t i = static_cast<std::size_t>(k);
+            if (own[i]) continue;
+            const int from = k + 1 < kClasses && own[i + 1] ? k + 1 : (k > 0 && own[i - 1] ? k - 1 : -1);
+            if (from < 0) continue;
+            shape[i] = shape[static_cast<std::size_t>(from)];
+            shaped[i] = true;
+        }
+    }
+
     // 訊號在不在：整個酬載一次，再分成 2–4 段各看一次（對方把整幀送完了，不是送到一半就停）
     const double coherence = cyclic_coherence(t0_, payload_first, payload_last);
     const bool present = coherence > kPresenceThreshold;
@@ -1323,16 +1546,19 @@ void Receiver::process_frame_free() {
         const int from = mode.payload_symbols * k / segments, to = mode.payload_symbols * (k + 1) / segments;
         present_throughout = cyclic_coherence(t0_, payload_first + from, payload_first + to) > kPresenceThreshold;
     }
-    const bool late_candidate = (cand_ready_ && cand_metric_ >= kSolidScThreshold) || (peak_active_ && peak_metric_ >= kSolidScThreshold);
-    const bool intact = present_throughout && tail_ok && pending_start_ < 0 && !late_candidate;
+    // 有導頻的幀在這裡還要看「幀尾附近有沒有很像 S0、還來不及判定的東西」（process_frame 的 late_candidate）：那種幀只能靠它猜
+    // 這一幀有沒有在尾端被別的發射蓋掉。這種幀不必猜：結尾的參考符號對得上（tail_ok），就是對方把這一幀送到最後了。
+    // 而且那個門檻（kSolidScThreshold）不高，酬載或雜訊偶爾也會超過；一超過，下一幀的前導符號如果剛好被雜訊打壞，
+    // 就不會照節拍接著收，白白少一張。還沒判定的候選位置不會因此漏掉：這一幀收完之後，搜尋會從幀尾之前重新掃一次。
+    const bool intact = present_throughout && tail_ok && pending_start_ < 0;
     const double top_share = payload_top_share(grid, payload_first, payload_last);
     const bool spread = top_share < kPilotTopShare;
     const bool clear = intact && spread && coherence > kFollowThreshold;
     if (trace_) {
         std::fprintf(stderr, "[rx] 幀 @%lld 模式 %d（沒有導頻）：定時修正 %+.1f；開頭的參考符號相關 %.2f、晚 %+.2f；結尾的相關 %.2f、晚 %+.2f、相位差 %+.2f；"
-                             "通道是 %d 個參考符號的平均；訊雜比 %.1f dB；循環字首相干 %.2f；最強的 3 個載波佔 %.0f%%；%s\n",
+                             "通道是 %d 個參考符號的平均；訊雜比 %.1f dB；循環字首相干 %.2f；最強的 3 個載波佔 %.0f%%；%s；搜尋時拉平 %.2f\n",
                      static_cast<long long>(t0_), mode.id, moved_by, head.rho, tau0, end_shift.rho, tau1, dphi, references, static_cast<double>(snr_db_),
-                     coherence, 100.0 * top_share, profiled ? "逐符號的雜訊" : "整幀同一個雜訊");
+                     coherence, 100.0 * top_share, profiled ? "逐符號的雜訊" : "整幀同一個雜訊", flat_a_);
     }
 
     // 等化。第 row 列離開頭的參考符號 row − 1 個符號，時間差與相位照比例內插。
@@ -1346,12 +1572,14 @@ void Receiver::process_frame_free() {
         cd rot = std::polar(1.0, step * kFirstBin + phi0 + dphi * alpha);
         const cd inc = std::polar(1.0, step);
         const float var = static_cast<float>(std::max(row_var[static_cast<std::size_t>(row)], floor_var) * (1.0 + estimate_gain));
+        const int k = row_class[static_cast<std::size_t>(row)];
+        const float* across = k >= 0 && shaped[static_cast<std::size_t>(k)] ? shape[static_cast<std::size_t>(k)].data() : nullptr;
         for (int c = 0; c < kCarriers; ++c) {
             const cf h = base[static_cast<std::size_t>(c)] * cf(rot);
             rot *= inc;
             const float h2_power = std::max(std::norm(h), 1e-20f);
             cells[n] = grid.at(row, c) * std::conj(h) / h2_power;
-            noise[n] = var / h2_power;
+            noise[n] = (across != nullptr ? var * across[c] : var) / h2_power;
             ++n;
         }
     }

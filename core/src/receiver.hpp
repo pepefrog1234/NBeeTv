@@ -84,6 +84,14 @@ struct RxTuning {
     double verify_cyclic = 0.40;
     // 是否使用逐符號、逐載波的雜訊估計（見 ChannelEstimate::noise_at）。關掉時每個格點都用同一個雜訊變異數。
     bool noise_map = true;
+    // 沒有散佈導頻的幀：同一個符號裡各個載波的雜訊不一樣大時，照量到的給（見 Receiver::process_frame_free「各載波的雜訊」）。
+    // FM 的訊號弱到門檻以下時，雜訊集中在低頻；差多少每一台接收機不一樣，所以是從收到的幀自己量，沒有照哪一台定的數字。
+    // 關掉時同一個符號裡每個載波都用同一個雜訊變異數（比較用）。
+    bool carrier_noise = true;
+    // 找前導符號、確認訊號在不在之前，先把輸入的頻譜拉平（Receiver::flatten）。FM 的訊號弱的時候雜訊集中在低頻，
+    // 這些判定用的相關值都被低頻的雜訊拖累；拉平之後才是它們設計時假設的白雜訊。拉多少只看輸入自己的頻譜重心，
+    // 沒有照哪一台電台定的數字；輸入本來就平（短波、訊號夠強的 FM）時不動。只影響「找」，解碼用的還是原來的取樣。
+    bool flatten_search = true;
     // 各格點雜訊不一樣大時，交給解碼器之前的處理方式，見 LearnedRxOptions（learned_frame.hpp）。
     bool learned_median_snr = true;
     bool learned_attenuate = true;
@@ -141,6 +149,8 @@ private:
 
     std::int64_t end() const { return base_ + static_cast<std::int64_t>(buf_.size()); }
     const cf& sample(std::int64_t index) const { return buf_[static_cast<std::size_t>(index - base_)]; }
+    const cf& flat_sample(std::int64_t index) const { return flat_[static_cast<std::size_t>(index - base_)]; }
+    void flatten(std::size_t from);
 
     // 捕獲到的一幀：前導符號通過了 try_acquire 的兩道檢查（前導符號的分數、酬載開頭的導頻）
     struct Acquisition {
@@ -155,7 +165,7 @@ private:
     bool search_step();
     bool try_acquire(std::int64_t s0_start, cd corr, double metric);
     void begin_frame(const Acquisition& found);
-    void fft_window(std::int64_t start, double cfo, cf* out) const;
+    void fft_window(std::int64_t start, double cfo, cf* out, bool flat = false) const;
     PreambleCheck check_preamble(std::int64_t s0_window, double cfo, std::span<const int> shifts, int expect_mode, int detect_first,
                                  int detect_last) const;
     struct PathDelays {
@@ -163,7 +173,7 @@ private:
         double peak = 0.0;   // 最強的路徑
     };
     PathDelays s1_path_delays(std::int64_t s1_window, double cfo, int mode_id) const;
-    SymbolGrid demodulate(std::int64_t t0, double cfo, int rows) const;
+    SymbolGrid demodulate(std::int64_t t0, double cfo, int rows, bool flat = false) const;
     bool pilots_present(std::int64_t t0, double cfo, const Mode& mode) const;
     struct PilotCheck {
         double rho = 0.0;        // 正規化相關
@@ -174,6 +184,9 @@ private:
     void decode_picture(const Mode& mode, const LearnedUnpacked& l, bool whole, RxFrame& frame);
     // 沒有散佈導頻的幀（給 FM 語音通道用）走的路，對應上面靠導頻的那幾個：
     double cyclic_coherence(std::int64_t t0, int first_row, int last_row) const;
+    bool cyclic_signal(std::int64_t symbol_start, double& power) const;
+    bool carrier_shape(int k, const std::array<cf, kCarriers>& channel, double channel_power, std::array<float, kCarriers>& out,
+                       double& tilt_db) const;
     bool signal_present(std::int64_t t0, const Mode& mode) const;
     PilotCheck verify_frame_start(std::int64_t t0, double cfo, const Mode& mode) const;
     void null_powers(std::int64_t t0, int rows, std::vector<float>& out) const;
@@ -212,6 +225,14 @@ private:
     // 解析濾波器只留 220–2780 Hz；沒有散佈導頻的幀要聽頻帶上方（到 4 kHz）的雜訊，得從這裡取。
     std::vector<float> raw_;
     std::vector<cf> buf_;
+    // buf_ 經過拉平頻譜的一階濾波器之後的取樣，同樣的編號：flat_[n] = buf_[n] − a·buf_[n−1]（見 flatten）。
+    // 找前導符號、確認訊號在不在的那幾步讀這一份；a 是 0 的時候和 buf_ 完全相同。
+    std::vector<cf> flat_;
+    double flat_a_ = 0.0;                      // 目前的 a
+    double flat_r0_ = 0.0;                     // 輸入最近約一秒的自相關：延遲 0、1、2 個取樣
+    cd flat_r1_{0.0, 0.0}, flat_r2_{0.0, 0.0};
+    cf flat_prev_{0.0f, 0.0f}, flat_prev2_{0.0f, 0.0f};  // 前一個、前兩個取樣
+    int flat_count_ = 0;                       // 離上一次重新算 a 過了幾個取樣
     std::int64_t base_ = 0;      // buf_[0] 的取樣編號
     std::int64_t total_in_ = 0;
     double level_ = 0.0;         // 輸入平方值的指數平均
@@ -279,6 +300,12 @@ private:
         long null_rows = 0;
         double scale_num = 0.0, scale_den = 0.0;    // 頻帶外的相對大小換算成頻帶內雜訊變異數的係數（分子、分母）
         float noise_var = 0.0f;                     // 最近一次量到的雜訊變異數（這一幀沒有參考符號可以量時沿用）
+        // 各載波的雜訊形狀：符號照吵雜的程度分成幾級，各級分開累計（見 process_frame_free「各載波的雜訊」）。
+        // 每過一幀，之前累計的份量會打折，所以是最近幾幀的加權和。
+        static constexpr int kShapeClasses = 4;
+        std::array<std::array<double, kCarriers>, kShapeClasses> shape_power{};  // 每個載波收到的功率
+        std::array<double, kShapeClasses> shape_signal{};                        // 其中訊號佔的（所有載波合計）
+        std::array<double, kShapeClasses> shape_rows{};                          // 累計了幾個符號
     };
     FreeTrack free_;
 
