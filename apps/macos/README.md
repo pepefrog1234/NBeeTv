@@ -37,6 +37,7 @@ NBTV_SIGN_IDENTITY="Developer ID Application: 名稱 (Team ID)" NBTV_NOTARY_PROF
 
 - 需要付費的 Apple Developer Program 會員資格，以及一張連同私鑰都在鑰匙圈裡的 Developer ID Application 憑證。
 - 公證的登入資料先存進鑰匙圈：`xcrun notarytool store-credentials 設定檔名稱 --apple-id … --team-id …`（它會問 App 專用密碼）。
+  這個設定檔在螢幕鎖定時讀不到（`notarytool` 會說找不到它），要在解鎖的狀態下執行。
   也可以改用 App Store Connect 的 API 金鑰；用哪些環境變數寫在指令稿的開頭。
 - GitHub 上推版本標籤時，CI 的 `sign-macos` 工作對兩種處理器的 app 各做一次，發佈頁放的是簽過的那兩份。
   憑證與登入資料放在 repo 的 `release-signing` 這個 Environment 的 secrets 裡，名稱列在 `.github/workflows/build.yml` 那個工作的說明；

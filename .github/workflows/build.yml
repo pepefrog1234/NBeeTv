@@ -470,7 +470,7 @@ jobs:
           for file in DeveloperIDCA.cer DeveloperIDG2CA.cer; do
             curl -fsSL --retry 3 "https://www.apple.com/certificateauthority/$file" -o "$RUNNER_TEMP/$file"
             import "$RUNNER_TEMP/$file" -k "$keychain"
-            echo "中繼憑證 $file：在鑰匙圈裡了"
+            echo "中繼憑證 ${file}：在鑰匙圈裡了"
           done
           # 讓 codesign 不必經過詢問視窗就能用這把私鑰
           security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$keychain" > /dev/null
@@ -507,6 +507,22 @@ jobs:
             export NBTV_NOTARY_KEY="$RUNNER_TEMP/notary-key.p8" NBTV_NOTARY_KEY_ID="$NOTARY_KEY_ID" NBTV_NOTARY_ISSUER="$NOTARY_ISSUER"
           else
             export NBTV_NOTARY_APPLE_ID="$NOTARY_APPLE_ID" NBTV_NOTARY_TEAM_ID="$NOTARY_TEAM_ID" NBTV_NOTARY_PASSWORD="$NOTARY_PASSWORD"
+            # 這三項設定的時候看不到自己打的字，最容易出錯。登入失敗時 Apple 只說「帳號或密碼不對」，
+            # 所以這裡先看一下樣子（不印內容）：哪一項看起來不對就提醒，方便知道該重設哪一個。
+            case "$NOTARY_APPLE_ID" in
+              *[[:space:]]*) echo "::warning::NOTARY_APPLE_ID 裡有空白字元" ;;
+              *@*.*) ;;
+              *) echo "::warning::NOTARY_APPLE_ID 看起來不像 Apple ID（應該是一個信箱）" ;;
+            esac
+            case "$NOTARY_PASSWORD" in
+              *[[:space:]]*) echo "::warning::NOTARY_PASSWORD 裡有空白或換行" ;;
+              [a-z][a-z][a-z][a-z]-[a-z][a-z][a-z][a-z]-[a-z][a-z][a-z][a-z]-[a-z][a-z][a-z][a-z]) ;;
+              *) echo "::warning::NOTARY_PASSWORD 的樣子不像 App 專用密碼（應該是 xxxx-xxxx-xxxx-xxxx：四組、每組四個小寫字母）" ;;
+            esac
+            team="$(security find-certificate -c "Developer ID Application" -p "$SIGN_KEYCHAIN" | openssl x509 -noout -subject -nameopt multiline | awk -F'= ' '/organizationalUnitName/ { print $2 }')"
+            if [ "$team" != "$NOTARY_TEAM_ID" ]; then
+              echo "::warning::NOTARY_TEAM_ID 和憑證上的 Team ID 不一樣（或是裡面多了空白、換行）"
+            fi
           fi
           mkdir -p signed
           count=0

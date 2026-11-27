@@ -60,6 +60,13 @@ fi
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
+
+# 先確認公證的登入資料能用（列出送審紀錄是最輕的一個請求），免得簽好、壓縮好、傳上去才發現登不進去
+if ! xcrun notarytool history "${notary[@]}" > /dev/null 2> "$work/login.err"; then
+    cat "$work/login.err" >&2
+    die "公證的登入資料不能用（Apple ID、App 專用密碼與 Team ID，或 API 金鑰），還沒有開始簽"
+fi
+
 name="$(basename "$app")"
 copy="$work/$name"
 ditto "$app" "$copy"
@@ -97,7 +104,7 @@ if [ -n "$id" ] && xcrun notarytool log "$id" "${notary[@]}" "$work/log.json" > 
         echo "$issues" >&2
     fi
 fi
-[ "$status" = "Accepted" ] || die "Apple 沒有接受（$status）"
+[ "$status" = "Accepted" ] || die "Apple 沒有接受（${status}）"
 
 echo "釘上票據"
 xcrun stapler staple -q "$copy"
@@ -115,4 +122,4 @@ fi
 mkdir -p "$(dirname "$out")"
 rm -f "$out"
 ditto -c -k --keepParent "$copy" "$out"
-echo "完成：$out（$(($(stat -f %z "$out") / 1048576)) MB）"
+echo "完成：${out}（$(($(stat -f %z "$out") / 1048576)) MB）"
