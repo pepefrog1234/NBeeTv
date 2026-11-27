@@ -36,3 +36,9 @@
 // 接收：這台電腦來不及解每一張畫面時
 "來不及解" = "Skipped (too slow)";
 "這台電腦解一張畫面比收一張還久，來不及的畫面會略過" = "This computer takes longer to decode a picture than to receive one, so pictures it cannot keep up with are skipped";
+
+// 同時送語音：設定裡語音用的麥克風與喇叭（其餘的句子沿用 macOS 版的）
+"麥克風" = "Microphone";
+"喇叭" = "Speaker";
+"同時送語音時自己講話用" = "For speaking when sending voice too";
+"同時送語音時聽對方講話用" = "For hearing the other station when sending voice too";

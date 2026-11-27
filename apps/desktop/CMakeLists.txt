@@ -113,6 +113,7 @@ set(NBTV_DESKTOP_SOURCES
   src/canvas.cpp
   src/settings.cpp
   src/png.cpp
+  src/voice.cpp
   src/app.cpp
   src/ui.cpp
   src/demo.cpp
@@ -136,6 +137,7 @@ set(NBTV_DESKTOP_HEADERS
   src/canvas.hpp
   src/settings.hpp
   src/png.hpp
+  src/voice.hpp
   src/app.hpp
   src/ui.hpp
   src/demo.hpp
@@ -173,7 +175,8 @@ target_include_directories(nbtv-gui PRIVATE src "${NBTV_STB_DIR}" "${PROJECT_SOU
 target_compile_features(nbtv-gui PRIVATE cxx_std_20)
 # 權重檔：執行檔旁邊沒有的時候從這裡找（tools/model_file.hpp，和命令列工具同一套規則）
 target_compile_definitions(nbtv-gui PRIVATE NBTV_MODEL_DIR="${PROJECT_SOURCE_DIR}/models")
-target_link_libraries(nbtv-gui PRIVATE nbtvcore nbtv_imgui SDL3::SDL3)
+# 語音的編解碼器（voice/）是選用的：沒有打開 -DNBTV_VOICE=ON 時連結到的是空殼，介面上不會出現「同時送語音」
+target_link_libraries(nbtv-gui PRIVATE nbtvvoice nbtvcore nbtv_imgui SDL3::SDL3)
 find_package(Threads REQUIRED)
 target_link_libraries(nbtv-gui PRIVATE Threads::Threads)
 if(WIN32)
@@ -204,6 +207,10 @@ if(NOT NBTV_DESKTOP_SYSTEM_SDL3 AND EXISTS "${sdl3_SOURCE_DIR}/LICENSE.txt")
   string(APPEND NBTV_THIRD_PARTY_TEXT "\n================================================================\nSDL 3.4.20 (Simple DirectMedia Layer) - https://libsdl.org\n================================================================\n${NBTV_SDL_LICENSE}\n")
 endif()
 string(APPEND NBTV_THIRD_PARTY_TEXT "\n================================================================\nstb_image, stb_image_write, stb_truetype, stb_rect_pack, stb_textedit - https://github.com/nothings/stb\n================================================================\nPublic domain (www.unlicense.org) or, at your option, the MIT License:\n\nCopyright (c) 2017 Sean Barrett\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of\nthis software and associated documentation files (the \"Software\"), to deal in\nthe Software without restriction, including without limitation the rights to\nuse, copy, modify, merge, publish, distribute, sublicense, and/or sell copies\nof the Software, and to permit persons to whom the Software is furnished to do\nso, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n")
+if(NBTV_VOICE)
+  # 有把語音的編解碼器編進來：它用到的兩份程式的授權條文也附上（那一段文字在 voice/CMakeLists.txt 組好）
+  string(APPEND NBTV_THIRD_PARTY_TEXT "${NBTV_VOICE_NOTICES}")
+endif()
 file(CONFIGURE OUTPUT "${NBTV_THIRD_PARTY_NOTICES}" @ONLY CONTENT "${NBTV_THIRD_PARTY_TEXT}")
 
 install(TARGETS nbtv-gui RUNTIME DESTINATION "${NBTV_INSTALL_BINDIR}")

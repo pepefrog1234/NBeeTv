@@ -40,6 +40,9 @@ struct RxUpdate {
     std::vector<std::array<float, kSpectrumBins>> spectrum_rows;
     /// 這幾列頻譜進來的時候接收機是不是同步中（同步中瀑布圖的參考位準不跟著訊號動）。
     bool rows_synced = false;
+    /// 「同時送語音」開著時：語音那一路目前有沒有同步、訊雜比的估計。沒開著時是空的
+    std::optional<bool> voice_synced;
+    double voice_snr_db = 0;
 };
 
 class App {
@@ -120,6 +123,21 @@ public:
     std::vector<std::string> serial_ports;
     std::string input_device_name = "—";
     std::string output_device_name = "—";
+    // ---- 同時送語音（見 voice.hpp）
+    std::string microphone_name = "—";
+    std::string speaker_name = "—";
+    bool voice_rx_synced = false;                // 收到的訊號裡有語音，而且同步到了
+    std::optional<double> voice_rx_snr_db;       // 那時候語音的訊雜比
+    bool voice_tx_on = false;                    // 這一次發射正在送語音（麥克風那一條路開起來了）
+    std::optional<double> voice_tx_level_db;     // 那時候麥克風的音量（dBFS）
+    /// 「同時送語音」現在有沒有作用：程式裡有語音的編解碼器，而且開關開著。
+    bool voice_on() const;
+    /// 現在按下發射的話會不會和語音一起送：開關開著，而且選的是 FM 用的模式。
+    /// 定時發射一律不送語音：沒有人在的時候不開麥克風。
+    bool voice_with_transmit() const;
+    /// 設定裡「同時送語音」的開關、版面、麥克風或喇叭改了：存起來，接收照新的設定重來（發射中不動）。
+    void voice_settings_changed();
+
     /// 要讓使用者看到的訊息（裝置或 PTT 出錯等），顯示在底列。
     std::optional<std::string> notice;
     /// PTT 的指令沒有成功、電台可能還按著發射時的警告（主視窗疊一條顯示，要使用者自己按掉）。
@@ -226,6 +244,10 @@ public:
     void abort_transmit();
     /// 測試用：之後的發射不開音訊裝置，改由模擬的輸出照實際的時間把取樣取走。
     void debug_use_simulated_output(std::function<void(const std::vector<float>&)> sink, std::optional<double> stall_after = std::nullopt);
+    /// 測試用：正在和語音一起送時，當成麥克風收到了這一段語音（48 kHz）。
+    void debug_speak(std::vector<float> samples);
+    /// 測試用：喇叭換成模擬的（解出來的語音交給 sink，在別的執行緒上呼叫）。要在 debug_begin_receiving 之前呼叫。
+    void debug_use_simulated_speaker(std::function<void(const std::vector<float>&)> sink);
     /// 測試用：不開音訊裝置就開始（或結束）一次接收；音訊由 debug_feed_input 一段一段交進來，像音訊的執行緒那樣。
     void debug_begin_receiving();
     void debug_stop_receiving();
@@ -314,7 +336,10 @@ private:
     void after(double seconds, std::function<void()> job);
     void warn_ptt_may_be_keyed(const std::string& reason);
     void start_receiving();
+    void start_speaker();
+    void start_voice_path(VoiceLayout layout);
     void clear_sync_state();
+    void clear_voice_state();
     void append_spectrum(const std::vector<std::array<float, kSpectrumBins>>& rows, WaterfallStore::Reference reference);
 
     std::shared_ptr<const CanvasLayer> current_canvas();
@@ -420,6 +445,9 @@ private:
     double tx_pulled_at_ = 0;
     double tx_stopping_at_ = 0;
     double tx_prepare_seconds_ = 0;        // 最近準備一張（取畫面＋編碼）花了多久
+    std::optional<VoiceLayout> tx_voice_layout_;   // 這一次發射是和語音一起送的話，用的是哪一種版面
+    bool tx_voice_active_ = false;         // 語音那一條路真的開起來了（麥克風開不了的話畫面照送，只是沒有語音）
+    bool tx_voice_finished_ = false;       // 這一次發射的語音已經收尾了
     double prepare_lead() const;
 
     // 定時發射

@@ -75,6 +75,10 @@ std::string Settings::serialized() const {
     put("canvasEnabled", canvas_enabled ? "1" : "0");
     put("canvasText", canvas_text);
     put("canvasPosition", canvas_position == CanvasPosition::top ? "top" : "bottom");
+    put("voiceEnabled", voice_enabled ? "1" : "0");
+    put("voiceLayout", voice_layout == VoiceLayout::narrow ? "narrow" : "standard");
+    put("microphone", microphone);
+    put("speaker", speaker);
     put("language", language);
     put("windowWidth", std::to_string(window_width));
     put("windowHeight", std::to_string(window_height));
@@ -146,6 +150,10 @@ Settings Settings::load(const std::string& path) {
     s.canvas_enabled = flag("canvasEnabled", false);
     s.canvas_text = text("canvasText", "");
     s.canvas_position = text("canvasPosition", "top") == "bottom" ? CanvasPosition::bottom : CanvasPosition::top;
+    s.voice_enabled = flag("voiceEnabled", false);
+    s.voice_layout = text("voiceLayout", "standard") == "narrow" ? VoiceLayout::narrow : VoiceLayout::standard;
+    s.microphone = text("microphone", "");
+    s.speaker = text("speaker", "");
     const std::string language = text("language", "");
     s.language = std::find(i18n::languages().begin(), i18n::languages().end(), language) != i18n::languages().end() ? language : "";
     s.window_width = std::max(0, static_cast<int>(number("windowWidth", 0)));

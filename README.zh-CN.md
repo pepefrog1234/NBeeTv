@@ -61,6 +61,12 @@ Windows、Linux 的 app 都可以收发；只在仿真里验证过，还没有�
 比模式 5 低 2.7 dB，但比同样快的 96×72 画面放大来看高约 3 dB。模式 4 的运算量约是其他大画面模式的四倍（M4 Max 上解一张约 0.13 秒），
 核心少的慢电脑可能跟不上。同样只能用在 FM，也只在仿真里验证过。
 
+供 FM 使用的这几个模式（3–7 与 15）还可以**一边发画面、一边发实时的语音**（实验中）：把 FM 语音信道的音频频带切成两段，
+语音在 360–1220 Hz，用 [FreeDV](https://freedv.org) 的 RADE V2；画面放慢 1.5 倍（或 1.8 倍）、搬到 1335 Hz 以上，每张因此要久一些。
+macOS 的 app 与 Windows、Linux 的 app 在右侧栏有“同时送语音”的开关（0.2.1 之后的版本），收发双方都要打开、选一样的版面；
+关着的时候和以前完全一样。只在仿真里验证过，还没有经过真的电台；RADE V2 本身也还是测试版，FreeDV 还不建议在空中使用。
+细节见[技术说明](docs/TECHNICAL.md#語音與畫面共用-fm-語音通道實驗中)。
+
 ## 下载
 
 到 [Releases](https://github.com/pepefrog1234/NBeeTv/releases) 下载自己平台的文件。每一个都是在该平台、该种处理器的机器上构建并跑过测试的。
@@ -190,10 +196,15 @@ cmake -S . -B build-desktop -DNBTV_BUILD_DESKTOP_APP=ON -DNBTV_BUILD_TESTS=OFF
 cmake --build build-desktop --config Release --target nbtv-gui
 ```
 
+“同时送语音”用的语音编解码器默认不编进来（0.2.1 之后的下载包里的程序有）。需要的话，在上面的 `cmake -S …` 那一行加上 `-DNBTV_VOICE=ON`：
+配置时会另外下载 [rade_c](https://github.com/freedv/rade_c) 与 [Opus](https://github.com/xiph/opus) 的源代码、Opus 的模型数据
+（共约 280 MB，都会核对 SHA-256）一起编译，不需要另外安装什么。
+
 | 路径 | 内容 |
 | --- | --- |
 | `core/` | 与平台无关的 C++20 核心库：OFDM 收发、同步、信道估计、神经网络的推理。对外只有一个 C API（`core/include/nbtv/nbtv.h`） |
 | `sim/` | 短波信道仿真 |
+| `voice/` | 实时语音编解码器（FreeDV 的 RADE V2）的封装，供“同时送语音”使用；可选 |
 | `tools/` | 命令行工具；`tools/learned/` 是模型的训练与导出程序（Python、PyTorch） |
 | `models/` | 模型的权重文件 |
 | `apps/macos/` | macOS 的 app（SwiftUI） |
@@ -205,6 +216,7 @@ cmake --build build-desktop --config Release --target nbtv-gui
 - 文字与字幕会被抹糊，小块的鲜艳颜色会变淡。
 - 帧与呼号没有验证身份的机制，谁都可以用任何呼号发出画面。
 - Windows 与 Linux 的 app 是新的，只有自动检查，还没有接着真实的电台、声卡、摄像头与串口验证过。
+- “同时送语音”只在仿真里验证过。RADE V2 还是测试版，它的波形之后可能再改，改了之后新旧版本互相听不到。
 - 命令行工具的说明与下面的详细文档目前只有繁体中文。
 
 ## 文档
@@ -224,3 +236,6 @@ cmake --build build-desktop --config Release --target nbtv-gui
 
 模型的权重（`models/`）是用 [COCO](https://cocodataset.org/) val2017 的照片训练的。那些照片的版权属于各位拍摄者，各自采用不同的知识共享（Creative Commons）许可，其中有些仅限非商业使用。
 权重随项目一起提供；要用于业余无线电实验以外的用途之前，请自行确认。
+
+0.2.1 之后的下载包里的程序另外链接了 [rade_c](https://github.com/freedv/rade_c)（BSD 两条款）与 [Opus](https://github.com/xiph/opus)（BSD 三条款），供“同时送语音”使用。
+它们的许可证条文在包里的 `THIRD-PARTY-LICENSES.txt`（macOS 的 app 在 app 的 `Resources` 里），代码库里在 [voice/LICENSES/](voice/LICENSES/)。

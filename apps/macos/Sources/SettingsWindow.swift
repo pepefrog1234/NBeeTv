@@ -6,7 +6,8 @@ struct SettingsView: View {
     @EnvironmentObject var model: AppModel
     var placeholderControls = false
     /// 整個設定視窗的高度：版面稿是 700，後來多了「顯示」一組，PTT 多了用 CAT 指令的那一種（電台型號、序列速率兩列）。
-    static let windowHeight: CGFloat = 844
+    /// app 裡有語音的編解碼器時，「音訊」多一列（語音用的麥克風與喇叭）。
+    static let windowHeight: CGFloat = Voice.available ? 902 : 844
     /// 排版區的高度。真的視窗裡內容會往上延伸到標題列底下，所以要比 windowHeight 少一個標題列的高度。
     var height: CGFloat = SettingsView.windowHeight
 
@@ -125,16 +126,28 @@ struct SettingsView: View {
         row(L("輸出裝置"), L("送去電台發射的聲音")) {
             devicePicker(devices: model.outputDevices, uid: settings.outputDeviceUID, current: model.outputDeviceName) { settings.outputDeviceUID = $0 }
         }
+        if Voice.available {
+            // 同時送語音時用的：自己講話的麥克風、聽對方講話的喇叭（不是接電台的那兩個裝置）
+            row(L("麥克風與喇叭"), L("同時送語音時用")) {
+                HStack(spacing: 8) {
+                    devicePicker(devices: model.inputDevices, uid: settings.microphoneUID, current: model.microphoneName, width: 150) { settings.microphoneUID = $0 }
+                        .accessibilityLabel(L("語音用的麥克風：%@", model.microphoneName))
+                    devicePicker(devices: model.outputDevices, uid: settings.speakerUID, current: model.speakerName, width: 150) { settings.speakerUID = $0 }
+                        .accessibilityLabel(L("語音用的喇叭：%@", model.speakerName))
+                }
+            }
+        }
     }
 
-    private func devicePicker(devices: [AudioDevice], uid: String, current: String, select: @escaping (String) -> Void) -> some View {
+    private func devicePicker(devices: [AudioDevice], uid: String, current: String, width: CGFloat = 220,
+                              select: @escaping (String) -> Void) -> some View {
         Button {
             model.refreshDevices()
             var items = [PopupItem(title: L("系統預設"), selected: uid.isEmpty) { select("") }]
             items += devices.map { device in PopupItem(title: device.name, selected: device.uid == uid) { select(device.uid) } }
             showPopupMenu(items)
         } label: {
-            PopupButtonLabel(title: current).frame(width: 220)
+            PopupButtonLabel(title: current).frame(width: width)
         }
         .buttonStyle(.plain)
     }

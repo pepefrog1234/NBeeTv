@@ -22,6 +22,7 @@ nbtv_add_test(kernels)
 nbtv_add_test(learned)
 nbtv_add_test(merge)
 nbtv_add_test(link)
+nbtv_add_test(duplex)
 nbtv_add_test(c_api)
 
 # 推論的內層迴圈有兩種寫法（core/src/learned_kernels.hpp），平常依 CPU 自動選：x86-64 上有 AVX2 的電腦用 avx2 那一種。

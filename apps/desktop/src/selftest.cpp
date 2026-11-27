@@ -36,6 +36,7 @@
 #include "snapshot.hpp"
 #include "sources.hpp"
 #include "tasks.hpp"
+#include "voice.hpp"
 #include "waterfall.hpp"
 
 namespace nbtvgui::selftest {
@@ -2939,6 +2940,195 @@ void test_ui_transmit(Check& c) {
 // 接收的音訊交給兩條執行緒（app.cpp 的 Engine）：一條算瀑布圖的頻譜，一條做解調與解畫面。
 // 這裡不開音訊裝置，把音訊像音訊的執行緒那樣一段一段交進去；用 debug_hold_decoder 讓解畫面的那一條停住，
 // 等於一台解一張畫面要很久的電腦——停多久由測試決定，不靠計時，快的慢的電腦上結果都一樣。
+// ---------------------------------------------------------------- 同時送語音
+
+/// 像語音的測試聲音（48 kHz）：基頻慢慢起伏的一串諧波，音量一陣一陣的。內容不重要，要的是有東西可以編。
+std::vector<float> speech_like(double seconds) {
+    const double two_pi = 6.283185307179586;
+    std::vector<float> out(static_cast<std::size_t>(seconds * kSampleRate));
+    double phase = 0;
+    for (std::size_t n = 0; n < out.size(); ++n) {
+        const double t = static_cast<double>(n) / kSampleRate;
+        phase += (130 + 30 * std::sin(two_pi * 0.7 * t)) / kSampleRate;
+        double v = 0;
+        for (int harmonic = 1; harmonic <= 12; ++harmonic) v += std::sin(two_pi * harmonic * phase) / harmonic;
+        out[n] = static_cast<float>(0.25 * v * (0.55 + 0.45 * std::sin(two_pi * 2.3 * t)));
+    }
+    return out;
+}
+
+/// 同時送語音（程式裡有語音的編解碼器時）。用的是 app 真正的流程，音訊輸出、麥克風、喇叭都是模擬的：
+///   * 開關開著、選 FM 用的模式：送出去的是合成的訊號——平常的接收機收不到，照同一種版面收的接收機每一張都收得到，
+///     每張的時間是放慢之後的；語音那一路解得出語音，結尾有「結束」的標記；語音在 360–1220 Hz、畫面在 1335 Hz 以上
+///   * 把那一段音訊當成收到的交給 app：畫面進了「最近收到」，知道收到了語音，喇叭有聲音
+///   * 開關關掉、或選的不是 FM 用的模式：照平常的送
+void test_voice(Check& c) {
+    if (!voice::available()) return c.skip("這份程式沒有把語音的編解碼器編進來（建置時要加 -DNBTV_VOICE=ON）", "voice");
+    const ModeInfo* mode = modes::find(3);
+    if (mode == nullptr) return c.expect(false, "app 裡沒有模式 3");
+    const Picture rocket = picture_or_gray("rocket", mode->picture);
+    Rig rig(mode->id);
+    rig.app->settings.voice_enabled = true;
+    rig.app->settings.voice_layout = VoiceLayout::standard;
+    rig.set_still(rocket);
+    c.expect(rig.app->voice_on() && rig.app->voice_with_transmit(), "開關開著、選的是模式 3：按下發射應該和語音一起送");
+
+    const std::vector<float> speech = speech_like(40);
+    bool voice_seen = false, level_seen = false;
+    /// 發射到送出 frames 張為止再按停止，回傳送出去的取樣。一邊發射、一邊當成麥克風照實際的時間在收音
+    const auto transmit = [&](int frames) {
+        rig.sink->drain();
+        rig.ptt->take();
+        std::atomic<bool> talking{true};
+        std::thread talker([&] {
+            std::size_t spoken = 0;
+            const auto began = std::chrono::steady_clock::now();
+            while (talking.load()) {
+                const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - began).count();
+                const std::size_t due = std::min(speech.size(), static_cast<std::size_t>(elapsed * kSampleRate));
+                if (due > spoken) {
+                    rig.app->debug_speak(std::vector<float>(speech.begin() + static_cast<std::ptrdiff_t>(spoken), speech.begin() + static_cast<std::ptrdiff_t>(due)));
+                    spoken = due;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+        });
+        rig.app->start_transmit();
+        const bool sent = rig.wait(60, [&] {
+            voice_seen = voice_seen || rig.app->voice_tx_on;
+            level_seen = level_seen || (rig.app->voice_tx_level_db && *rig.app->voice_tx_level_db > -60);
+            return rig.app->tx_frames_sent >= frames || rig.app->tx_phase == App::TxPhase::idle;
+        });
+        c.expect(sent && rig.app->tx_phase != App::TxPhase::idle, "發射沒有送到第 " + std::to_string(frames) + " 張");
+        rig.app->stop_transmit();
+        c.expect(rig.wait_idle(30), "送完之後要回到待機");
+        talking.store(false);
+        talker.join();
+        c.expect(rig.ptt->take() == std::vector<bool>({true, false}), "PTT 要剛好按下一次、放開一次");
+        return rig.sink->drain();
+    };
+    /// audio 裡 low–high Hz 的功率佔全部的幾成
+    const auto share = [](const std::vector<float>& audio, double low, double high) {
+        double inside = 0, total = 0;
+        for (const std::array<float, kSpectrumBins>& row : demo::monitor_rows(audio)) {
+            for (int bin = 0; bin < kSpectrumBins; ++bin) {
+                const double power = std::pow(10.0, static_cast<double>(row[static_cast<std::size_t>(bin)]) / 10.0), hz = bin * kSpectrumMaxHz / (kSpectrumBins - 1);
+                total += power;
+                if (hz >= low && hz <= high) inside += power;
+            }
+        }
+        return total > 0 ? inside / total : 0.0;
+    };
+    const auto good = [](const std::vector<DecodedFrame>& frames) {
+        int count = 0;
+        for (const DecodedFrame& frame : frames) count += frame.decoded && frame.header_ok && frame.callsign == "BX4ACP" ? 1 : 0;
+        return count;
+    };
+    const auto padded = [](std::vector<float> audio) {
+        const std::vector<float> pad = demo::silence(0.5);
+        audio.insert(audio.end(), pad.begin(), pad.end());
+        return audio;
+    };
+
+    // 1. 開關開著、FM 用的模式：和語音一起送
+    const std::vector<float> together = padded(transmit(3));
+    const int sent = rig.app->tx_frames_sent;
+    c.expect(voice_seen, "發射中應該顯示正在送語音");
+    c.expect(level_seen, "發射中應該讀得到麥克風的音量");
+    c.expect(good(decode(together)) == 0, "和語音一起送的訊號，平常的接收機不應該收得到");
+    std::vector<DecodedFrame> shared;
+    {
+        CoreReceiver receiver;
+        receiver.set_duplex(VoiceLayout::standard);
+        for (std::size_t at = 0; at < together.size(); at += 960) {
+            receiver.push(together.data() + at, static_cast<int>(std::min<std::size_t>(960, together.size() - at)));
+            while (std::optional<DecodedFrame> frame = receiver.poll_frame()) shared.push_back(std::move(*frame));
+        }
+    }
+    c.expect(good(shared) == sent && sent >= 3, "和語音一起送：照同一種版面收到 " + std::to_string(good(shared)) + " 張，app 說送了 " + std::to_string(sent) + " 張");
+    // 每一張在空中的時間：扣掉開頭的 0.3 秒、結尾的靜音與補的半秒，除以張數
+    const double per_frame = (static_cast<double>(together.size()) / kSampleRate - 0.5 - App::kPttLeadSeconds - voice::kEndSeconds) / std::max(sent, 1);
+    const double expected = mode->frame_seconds * voice::slow_factor(VoiceLayout::standard);
+    c.expect(std::fabs(per_frame - expected) < 0.1, "和語音一起送：每張 " + number(per_frame) + " 秒，應該是 " + number(expected) + " 秒");
+    std::vector<float> heard;
+    bool ever_synced = false;
+    double voice_snr = 0;
+    int overs = 0;
+    if (const std::unique_ptr<VoiceReceiver> listener = VoiceReceiver::create(VoiceLayout::standard)) {
+        for (std::size_t at = 0; at < together.size(); at += 960) {
+            const std::vector<float> speech_out = listener->process(together.data() + at, static_cast<int>(std::min<std::size_t>(960, together.size() - at)));
+            heard.insert(heard.end(), speech_out.begin(), speech_out.end());
+            const VoiceReceiver::Status status = listener->status();
+            if (status.synced) {
+                ever_synced = true;
+                voice_snr = status.snr_db;   // 同步時的訊雜比（訊號沒了之後的讀數沒有意義）
+            }
+        }
+        overs = listener->status().overs_ended;
+    } else {
+        c.expect(false, "語音的接收端建不起來");
+    }
+    const double heard_seconds = static_cast<double>(heard.size()) / kSampleRate;
+    c.expect(ever_synced && heard_seconds > 1.5, "語音那一路只解出 " + number(heard_seconds, 1) + " 秒的語音");
+    c.expect(overs == 1, "語音的結尾收到 " + std::to_string(overs) + " 次「結束」的標記，應該是 1 次");
+    c.expect(demo::power(heard) > 1e-6, "解出來的語音是靜音");
+    const double voice_share = share(together, 340, 1240), picture_share = share(together, 1320, 2900);
+    c.expect(voice_share > 0.25 && picture_share > 0.25 && voice_share + picture_share > 0.97,
+             "頻譜不對：語音那一段佔 " + number(voice_share * 100, 0) + "%、畫面那一段佔 " + number(picture_share * 100, 0) + "%");
+    c.info("和語音一起送 " + std::to_string(sent) + " 張都收到（每張 " + number(per_frame) + " 秒），平常的接收機收不到；語音解出 " + number(heard_seconds, 1) + " 秒、訊雜比 " +
+           number(voice_snr, 0) + " dB、「結束」標記 " + std::to_string(overs) + " 次；功率：語音那一段 " + number(voice_share * 100, 0) + "%、畫面那一段 " +
+           number(picture_share * 100, 0) + "%");
+
+    // 2. 把這一段當成收到的交給 app：畫面進「最近收到」、知道收到了語音、喇叭有聲音
+    const std::shared_ptr<Sink> speaker = std::make_shared<Sink>();
+    rig.app->debug_use_simulated_speaker([speaker](const std::vector<float>& block) {
+        std::lock_guard<std::mutex> lock(speaker->mutex);
+        speaker->samples.insert(speaker->samples.end(), block.begin(), block.end());
+    });
+    const std::size_t before = rig.app->history.size();
+    rig.app->debug_begin_receiving();
+    bool app_heard = false;
+    const auto feed = [&](const std::vector<float>& audio) {
+        const std::size_t block = static_cast<std::size_t>(kSampleRate / 5);
+        for (std::size_t at = 0; at < audio.size(); at += block) {
+            rig.app->debug_feed_input(std::vector<float>(audio.begin() + static_cast<std::ptrdiff_t>(at), audio.begin() + static_cast<std::ptrdiff_t>(std::min(audio.size(), at + block))));
+            rig.wait(5, [&] { return rig.app->debug_receive_backlog() < 0.001; });
+            demo::spin(rig.app.get(), 0.1);   // 狀態是攢一小段時間才交給介面的
+            app_heard = app_heard || rig.app->voice_rx_synced;
+        }
+    };
+    feed(together);
+    const bool heard_during = app_heard;
+    feed(demo::silence(4));   // 訊號沒了：語音那一路要回到「沒有收到」
+    const std::size_t received = rig.app->history.size() - before;
+    c.expect(static_cast<int>(received) == sent, "交給 app 接收：「最近收到」多了 " + std::to_string(received) + " 張，應該是 " + std::to_string(sent) + " 張");
+    c.expect(heard_during, "交給 app 接收：一直不知道收到了語音");
+    c.expect(!rig.app->voice_rx_synced, "訊號沒了之後還顯示收到語音");
+    c.expect(demo::power(speaker->take()) > 1e-7, "交給 app 接收：喇叭沒有聲音");
+    rig.app->debug_stop_receiving();
+    c.info("app 接收：" + std::to_string(received) + " 張進了「最近收到」、知道收到了語音、喇叭有聲音");
+
+    // 3. 開關關掉：照平常的送
+    rig.app->settings.voice_enabled = false;
+    c.expect(!rig.app->voice_with_transmit(), "開關關掉了不應該算「和語音一起送」");
+    const std::vector<float> alone = padded(transmit(2));
+    const int alone_sent = rig.app->tx_frames_sent;
+    c.expect(good(decode(alone)) == alone_sent && alone_sent >= 2, "開關關掉之後，平常的接收機應該每一張都收到");
+    const double alone_per_frame = (static_cast<double>(alone.size()) / kSampleRate - 0.5 - App::kPttLeadSeconds - App::kTailSilenceSeconds) / std::max(alone_sent, 1);
+    c.expect(std::fabs(alone_per_frame - mode->frame_seconds) < 0.1, "開關關掉之後每張 " + number(alone_per_frame) + " 秒，應該是 " + number(mode->frame_seconds) + " 秒");
+    c.info("開關關掉：照平常的送，" + std::to_string(alone_sent) + " 張、每張 " + number(alone_per_frame) + " 秒");
+
+    // 4. 開關開著，但選的不是 FM 用的模式：照平常的送
+    rig.app->settings.voice_enabled = true;
+    if (modes::find(12) != nullptr) {
+        rig.app->settings.tx_mode_id = 12;
+        c.expect(!rig.app->voice_with_transmit(), "模式 12 不是 FM 用的，不應該算「和語音一起送」");
+        const std::vector<float> other = padded(transmit(1));
+        c.expect(good(decode(other)) >= 1, "模式 12（不是 FM 用的）開關開著時，平常的接收機應該收得到");
+        c.info("模式 12 不是 FM 用的：開關開著也照平常的送");
+    }
+}
+
 void test_receive_threads(Check& c) {
     const ModeInfo* mode = modes::find(14);  // 每張 0.67 秒，最容易來不及的模式
     if (mode == nullptr) return c.expect(false, "app 裡沒有模式 14");
@@ -3227,6 +3417,7 @@ int run(const Options& options) {
         {"ui-click", "介面：按鈕、選單、輸入框", test_ui_click},
         {"ui-images", "介面：圖片序列的上一張、下一張、滑桿，從按鈕發射", [&work](Check& c) { test_ui_images(c, work); }},
         {"ui-transmit", "介面：從按鈕發射", test_ui_transmit},
+        {"voice", "同時送語音：發射、接收、開關", test_voice},
         {"rx-threads", "接收：解畫面不擋瀑布圖、來不及時略過不堆積、停止不必等", test_receive_threads},
         {"sdl-audio", "SDL 的音訊裝置（假的驅動）", test_sdl_audio},
     };

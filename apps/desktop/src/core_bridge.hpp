@@ -54,6 +54,14 @@ struct Picture {
 };
 using PicturePtr = std::shared_ptr<const Picture>;
 
+/// 語音與畫面共用 FM 語音通道（見 voice.hpp）的版面：畫面放慢幾倍、佔到多高的頻率。
+enum class VoiceLayout {
+    standard,   // 畫面放慢 1.5 倍，佔到 2866 Hz
+    narrow,     // 畫面放慢 1.8 倍，只佔到 2611 Hz：給音訊上緣比較窄的電台
+};
+/// 核心的 C API 用的版面代碼
+constexpr int duplex_code(VoiceLayout layout) { return layout == VoiceLayout::narrow ? NBTV_DUPLEX_NARROW : NBTV_DUPLEX_STANDARD; }
+
 /// 把輸入整理成可以傳送的呼號（轉大寫、去掉不能用的字元、最多 9 個字元）。
 std::string normalize_callsign(const std::string& text);
 
@@ -168,6 +176,9 @@ public:
     CoreReceiver& operator=(const CoreReceiver&) = delete;
 
     void reset();
+    /// 語音＋畫面：打開之後收的是合成訊號裡的畫面（先分出畫面那一段、還原成原來的樣子才解），平常的訊號收不到；
+    /// 給空的關掉。切換時接收機回到初始狀態。
+    bool set_duplex(std::optional<VoiceLayout> layout);
     /// 要不要把最近幾幀合起來解（預設不要）。只對有配合併用權重的模型有作用；重設不會改變這個設定。
     void set_merging(bool on);
     /// 要不要解畫面（預設要）。關掉時幀照樣收、照樣回報，只是沒有畫面（DecodedFrame::skipped）：
@@ -206,7 +217,11 @@ public:
     /// 換模式，下一幀生效。模式編號沒有定義時回傳 false，模式與畫面的大小都不變。
     bool set_mode(int id);
     void set_callsign(const std::string& callsign);
+    /// 一幀最多有幾個取樣（語音＋畫面打開時，實際的個數可能少幾個）
     int frame_samples() const;
+    /// 語音＋畫面：打開之後給的是「畫面那一半」（放慢、搬到畫面的頻段、音量照比例調好），每一幀在空中的時間是原來的
+    /// voice::slow_factor 倍；語音那一半另外做（VoiceSender），播放時加上去。給空的關掉。只能在兩次發射之間改（finish 之後）。
+    bool set_duplex(std::optional<VoiceLayout> layout);
     /// 目前這個模式的畫面大小：encode 只收這個大小的畫面
     PictureSize picture_size() const { return picture_size_; }
     /// 把一張畫面做成一幀音訊。畫面要是目前這個模式的大小（picture_size）。

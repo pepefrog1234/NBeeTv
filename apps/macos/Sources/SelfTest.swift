@@ -195,6 +195,7 @@ enum SelfTest {
         run("schedule") { testScheduleTimes() }
         run("schedule-transmit") { testScheduledTransmit(rocket) }
         run("safety") { testTransmitSafety(rocket) }
+        run("voice") { testVoice(rocket) }
         run("l10n") { testLocalization() }
         if only != nil {
             run("serial") { testSerialErrors() }
@@ -2448,6 +2449,203 @@ enum SelfTest {
         if abs((early - late) - 20) > 3 { problems.append(String(format: "發射中把音量調低 20 dB，送出去的訊號只差 %.1f dB（%.1f → %.1f dBFS）", early - late, early, late)) }
         detail += String(format: "；輸出音量 −6 → −26 dB，送出去的訊號 %.1f → %.1f dBFS", early, late)
         report(name, problems.isEmpty, problems.isEmpty ? detail : problems.joined(separator: "；"))
+    }
+
+    // MARK: 同時送語音
+
+    /// 像語音的測試聲音（48 kHz）：基頻慢慢起伏的一串諧波，音量一陣一陣的。內容不重要，要的是有東西可以編。
+    private static func speechLike(seconds: Double) -> [Float] {
+        let rate = Double(NBTV.sampleRate)
+        var phase = 0.0
+        return (0..<Int(seconds * rate)).map { n in
+            let t = Double(n) / rate
+            phase += (130 + 30 * sin(2 * .pi * 0.7 * t)) / rate
+            var v = 0.0
+            for harmonic in 1...12 { v += sin(2 * .pi * Double(harmonic) * phase) / Double(harmonic) }
+            return Float(0.25 * v * (0.55 + 0.45 * sin(2 * .pi * 2.3 * t)))
+        }
+    }
+
+    /// 同時送語音（app 裡有語音的編解碼器時）。用的是 app 真正的狀態物件，音訊輸出、麥克風、喇叭都換成模擬的：
+    ///   * 開關開著、選 FM 用的模式：送出去的是合成的訊號——平常的接收機收不到，照同一種版面收的接收機每一張都收得到，
+    ///     每張的時間是放慢之後的；語音那一路解得出語音，結尾有「結束」的標記；語音在 360–1220 Hz、畫面在 1335 Hz 以上
+    ///   * 把那一段音訊當成收到的交給 app：畫面進了「最近收到」，右側欄知道收到了語音，喇叭有聲音
+    ///   * 開關關掉、或選的不是 FM 用的模式：照平常的送
+    private static func testVoice(_ image: Data) {
+        let name = "同時送語音：發射、接收、開關"
+        guard Voice.available else {
+            report(name, nil, "這份 app 沒有把語音的編解碼器編進來（建置時要加 -DNBTV_VOICE=ON）")
+            return
+        }
+        guard let mode = Modes.find(3) else {
+            report(name, nil, "app 裡沒有模式 3 的模型")
+            return
+        }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("nbtv-selftest-voice-\(getpid()).mp4")
+        defer { try? FileManager.default.removeItem(at: url) }
+        guard let cg = NBTV.image(fromRGB: image), Demo.makeVideo(at: url, from: cg, seconds: 4, fps: 10) else {
+            report(name, false, "示範影片做不出來")
+            return
+        }
+        setenv("NBTV_NO_DEVICES", "1", 1)   // 狀態物件啟動時不開輸入裝置與鏡頭
+        let settings = AppSettings(store: nil)
+        settings.callsign = "N0CALL"
+        settings.sourceKind = .video
+        settings.loopVideo = true
+        settings.txModeID = mode.id
+        settings.voiceEnabled = true
+        settings.voiceLayout = .standard
+        let ptt = RecordingPTT()
+        settings.debugPTTDriver = { ptt }
+        let model = AppModel(settings: settings, live: true)
+        let sent = SampleCollector()
+        model.debugUseSimulatedOutput { sent.append($0) }
+        model.start()
+        defer { model.shutdown() }
+        var opened: Bool?
+        model.openVideo(url) { opened = $0 }
+        guard Demo.wait(timeout: 10, until: { opened != nil }), opened == true, Demo.wait(timeout: 10, until: { model.canTransmit }) else {
+            report(name, false, "影片開不起來，或一直沒有來源畫面")
+            return
+        }
+        var problems: [String] = []
+        var details: [String] = []
+        let rate = Double(NBTV.sampleRate)
+
+        /// 發射到送出 frames 張為止再按停止，回傳送出去的取樣。speak：一邊發射一邊當成麥克風在收音
+        func transmit(frames: Int, speak: Bool) -> [Float] {
+            _ = sent.take()
+            _ = ptt.take()
+            let speech = speechLike(seconds: 30)
+            var spoken = 0
+            let talker = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "nbtv.selftest.voice"))
+            talker.schedule(deadline: .now(), repeating: .milliseconds(20))
+            talker.setEventHandler {
+                guard speak, spoken + 960 <= speech.count else { return }
+                model.debugSpeak(Array(speech[spoken..<spoken + 960]))
+                spoken += 960
+            }
+            talker.resume()
+            model.startTransmit()
+            if !Demo.wait(timeout: 30, until: { model.txFramesSent >= frames || model.txPhase == .idle }) || model.txPhase == .idle {
+                problems.append("發射沒有送到第 \(frames) 張")
+            }
+            model.stopTransmit()
+            _ = Demo.wait(timeout: 15) { model.txPhase == .idle }
+            talker.cancel()
+            if ptt.take() != [true, false] { problems.append("PTT 沒有按下一次、放開一次") }
+            return sent.take()
+        }
+        /// samples 裡 low–high Hz 的功率佔全部的幾成
+        func share(_ samples: [Float], _ low: Double, _ high: Double) -> Double {
+            var inside = 0.0, total = 0.0
+            for row in Demo.monitorRows(samples) {
+                for (bin, db) in row.enumerated() {
+                    let power = pow(10.0, Double(db) / 10), hz = Double(bin) * NBTV.spectrumMaxHz / Double(NBTV.spectrumBins - 1)
+                    total += power
+                    if hz >= low, hz <= high { inside += power }
+                }
+            }
+            return total > 0 ? inside / total : 0
+        }
+
+        // 1. 開關開著、FM 用的模式：和語音一起送
+        if !model.voiceWithTransmit { problems.append("開關開著、選的是模式 \(mode.id)，卻不算「和語音一起送」") }
+        let together = transmit(frames: 3, speak: true) + Demo.silence(seconds: 0.5)
+        let plain = Demo.receive(together).flatMap(\.frames).filter { $0.decoded }
+        if !plain.isEmpty { problems.append("和語音一起送的訊號，平常的接收機卻收到了 \(plain.count) 張") }
+        let duplexReceiver = CoreReceiver()
+        duplexReceiver.setDuplex(.standard)
+        let shared = Demo.receive(together, receiver: duplexReceiver).flatMap(\.frames).filter { $0.decoded && $0.headerOK && $0.callsign == "N0CALL" }
+        if shared.count < 3 || shared.count != model.txFramesSent {
+            problems.append("和語音一起送：照同一種版面收到 \(shared.count) 張，app 說送了 \(model.txFramesSent) 張")
+        }
+        // 每一張在空中的時間：扣掉開頭的 0.3 秒與結尾的靜音，除以張數
+        let perFrame = (Double(together.count) / rate - 0.5 - AppModel.pttLeadSeconds - AppModel.voiceEndSeconds) / Double(max(shared.count, 1))
+        let expected = mode.frameSeconds * VoiceLayout.standard.slowFactor
+        if abs(perFrame - expected) > 0.1 { problems.append(String(format: "和語音一起送：每張 %.2f 秒，應該是 %.2f 秒", perFrame, expected)) }
+        var heard: [Float] = []
+        var voiceStatus = (synced: false, snrDb: 0.0, oversEnded: 0)
+        var everSynced = false
+        if let voice = VoiceReceiver(layout: .standard) {
+            let chunk = NBTV.sampleRate / 50
+            var position = 0
+            while position < together.count {
+                heard += voice.process(Array(together[position..<min(position + chunk, together.count)]))
+                let now = voice.status
+                if now.synced {
+                    everSynced = true
+                    voiceStatus.snrDb = now.snrDb   // 同步時的訊雜比（訊號沒了之後的讀數沒有意義）
+                }
+                position += chunk
+            }
+            voiceStatus.oversEnded = voice.status.oversEnded
+        } else {
+            problems.append("語音的接收端建不起來")
+        }
+        let heardSeconds = Double(heard.count) / rate
+        if !everSynced || heardSeconds < 1.5 { problems.append(String(format: "語音那一路只解出 %.1f 秒的語音（%@同步過）", heardSeconds, everSynced ? "" : "沒有")) }
+        if voiceStatus.oversEnded != 1 { problems.append("語音的結尾收到 \(voiceStatus.oversEnded) 次「結束」的標記，應該是 1 次") }
+        if Demo.power(heard) < 1e-6 { problems.append("解出來的語音是靜音") }
+        let voiceShare = share(together, 340, 1240), pictureShare = share(together, 1320, 2900)
+        if voiceShare < 0.25 || pictureShare < 0.25 || voiceShare + pictureShare < 0.97 {
+            problems.append(String(format: "頻譜不對：語音那一段佔 %.0f%%、畫面那一段佔 %.0f%%", voiceShare * 100, pictureShare * 100))
+        }
+        details.append(String(format: "和語音一起送 %d 張都收到（每張 %.2f 秒），平常的接收機收不到；語音解出 %.1f 秒、訊雜比 %.0f dB、「結束」標記 %d 次；"
+                                  + "功率：語音那一段 %.0f%%、畫面那一段 %.0f%%",
+                              shared.count, perFrame, heardSeconds, voiceStatus.snrDb, voiceStatus.oversEnded, voiceShare * 100, pictureShare * 100))
+
+        // 2. 把這一段當成收到的交給 app：畫面進「最近收到」、知道收到了語音、喇叭有聲音
+        let speaker = SampleCollector()
+        let before = model.history.count
+        model.debugStartReceiving { speaker.append($0) }
+        var sawVoice = false, voiceSnr: Double?
+        let block = NBTV.sampleRate / 5
+        var position = 0
+        while position < together.count {
+            model.debugReceive(Array(together[position..<min(position + block, together.count)]))
+            Demo.spin(0.12)   // 讓畫面的更新（每 0.1 秒）跑到
+            if model.voiceRxSynced {
+                sawVoice = true
+                voiceSnr = model.voiceRxSnrDb ?? voiceSnr
+            }
+            position += block
+        }
+        model.debugReceive(Demo.silence(seconds: 4))   // 訊號沒了：語音那一路要回到「沒有收到」
+        Demo.spin(0.3)
+        let received = model.history.count - before
+        if received != shared.count { problems.append("交給 app 接收：「最近收到」多了 \(received) 張，應該是 \(shared.count) 張") }
+        if !sawVoice { problems.append("交給 app 接收：右側欄一直不知道收到了語音") }
+        if model.voiceRxSynced { problems.append("訊號沒了之後，右側欄還顯示收到語音") }
+        let played = speaker.take()
+        if Demo.power(played) < 1e-7 { problems.append("交給 app 接收：喇叭沒有聲音") }
+        details.append(String(format: "app 接收：%d 張進了「最近收到」、右側欄顯示收到語音（訊雜比 %.0f dB）、喇叭有聲音", received, voiceSnr ?? 0))
+
+        // 3. 開關關掉：照平常的送
+        settings.voiceEnabled = false
+        Demo.spin(0.1)
+        if model.voiceWithTransmit { problems.append("開關關掉了還算「和語音一起送」") }
+        let alone = transmit(frames: 2, speak: true) + Demo.silence(seconds: 0.5)
+        let aloneFrames = Demo.receive(alone).flatMap(\.frames).filter { $0.decoded && $0.headerOK }
+        if aloneFrames.count < 2 { problems.append("開關關掉之後，平常的接收機只收到 \(aloneFrames.count) 張") }
+        let aloneVoice = share(alone, 340, 1240)
+        // 平常的訊號佔 352–2648 Hz，語音那一段本來就有畫面的載波；看的是每張的時間回到原來的
+        let alonePerFrame = (Double(alone.count) / rate - 0.5 - AppModel.pttLeadSeconds - 0.1) / Double(max(aloneFrames.count, 1))
+        if abs(alonePerFrame - mode.frameSeconds) > 0.1 { problems.append(String(format: "開關關掉之後每張 %.2f 秒，應該是 %.2f 秒", alonePerFrame, mode.frameSeconds)) }
+        details.append(String(format: "開關關掉：照平常的送，%d 張、每張 %.2f 秒（360–1220 Hz 佔 %.0f%%）", aloneFrames.count, alonePerFrame, aloneVoice * 100))
+
+        // 4. 開關開著，但選的不是 FM 用的模式：照平常的送
+        settings.voiceEnabled = true
+        if let hf = Modes.find(12) {
+            settings.txModeID = hf.id
+            Demo.spin(0.1)
+            if model.voiceWithTransmit { problems.append("模式 \(hf.id) 不是 FM 用的，卻算「和語音一起送」") }
+            let other = transmit(frames: 1, speak: true) + Demo.silence(seconds: 0.5)
+            let otherFrames = Demo.receive(other).flatMap(\.frames).filter { $0.decoded && $0.headerOK }
+            if otherFrames.isEmpty { problems.append("模式 \(hf.id)（不是 FM 用的）開關開著時，平常的接收機收不到") }
+            details.append("模式 \(hf.id) 不是 FM 用的：開關開著也照平常的送，\(otherFrames.count) 張")
+        }
+        report(name, problems.isEmpty, problems.isEmpty ? details.joined(separator: "；") : problems.joined(separator: "；"))
     }
 
     // MARK: 發射中的保險

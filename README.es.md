@@ -67,6 +67,13 @@ de 96×72 igual de rápida ampliada al mismo tamaño. El modo 4 exige unas cuatr
 (unos 0.13 segundos para decodificar una imagen en un M4 Max), así que una computadora lenta con pocos núcleos puede no dar abasto.
 También sirven solo en FM y solo se han comprobado en simulación.
 
+Los modos para FM (3 a 7 y 15) también pueden **llevar voz en directo junto con las imágenes** (experimental): la banda de audio del canal de voz en FM
+se divide en dos, con la voz de 360 a 1220 Hz usando RADE V2 de [FreeDV](https://freedv.org) y la imagen ralentizada 1.5 veces (o 1.8 veces)
+y desplazada por encima de 1335 Hz, de modo que cada imagen tarda ese tanto más. La app de macOS y la app de Windows y Linux tienen el interruptor
+«Enviar voz a la vez» en la barra lateral (en las versiones posteriores a la 0.2.1); los dos extremos tienen que activarlo y elegir la misma disposición,
+y con él desactivado todo funciona como antes. Solo se ha comprobado en simulación, aún no con equipos reales, y el propio RADE V2 sigue siendo
+una versión preliminar que FreeDV todavía no recomienda usar en el aire. Los detalles están en las [notas técnicas](docs/TECHNICAL.md#語音與畫面共用-fm-語音通道實驗中).
+
 ## Descarga
 
 Descarga el archivo de tu plataforma desde [Releases](https://github.com/pepefrog1234/NBeeTv/releases). Cada uno se compila y se prueba en una máquina de esa plataforma y con ese tipo de procesador.
@@ -196,10 +203,16 @@ cmake -S . -B build-desktop -DNBTV_BUILD_DESKTOP_APP=ON -DNBTV_BUILD_TESTS=OFF
 cmake --build build-desktop --config Release --target nbtv-gui
 ```
 
+El códec de voz que usa «Enviar voz a la vez» no se compila por defecto (los programas de los paquetes de descarga posteriores a la 0.2.1 sí lo llevan). Para incluirlo,
+añade `-DNBTV_VOICE=ON` a cualquiera de las líneas `cmake -S …` de arriba: al configurar se descargan además el código fuente de
+[rade_c](https://github.com/freedv/rade_c) y de [Opus](https://github.com/xiph/opus) y los datos de los modelos de Opus (unos 280 MB en total,
+cada uno comprobado con su SHA-256) y se compilan junto con el proyecto; no hay que instalar nada más.
+
 | Ruta | Contenido |
 | --- | --- |
 | `core/` | Biblioteca principal en C++20, independiente de la plataforma: transmisión y recepción OFDM, sincronización, estimación de canal e inferencia de la red neuronal. Su única interfaz pública es una API en C (`core/include/nbtv/nbtv.h`) |
 | `sim/` | Simulación del canal de HF |
+| `voice/` | Envoltorio del códec de voz en tiempo real (RADE V2 de FreeDV) para «Enviar voz a la vez»; opcional |
 | `tools/` | Herramientas de línea de comandos; `tools/learned/` contiene el código de entrenamiento y exportación de los modelos (Python, PyTorch) |
 | `models/` | Archivos de pesos de los modelos |
 | `apps/macos/` | La app de macOS (SwiftUI) |
@@ -211,6 +224,7 @@ cmake --build build-desktop --config Release --target nbtv-gui
 - El texto y los subtítulos salen emborronados, y las zonas pequeñas de color vivo pierden intensidad.
 - Nada autentica una trama ni su indicativo: cualquiera puede enviar imágenes con cualquier indicativo.
 - La app de Windows y Linux es nueva y solo se ha comprobado con pruebas automáticas; todavía no se ha verificado con una radio, una tarjeta de sonido, una cámara ni un puerto serie reales.
+- «Enviar voz a la vez» solo se ha comprobado en simulación. RADE V2 sigue siendo una versión preliminar: su forma de onda puede cambiar, y las versiones de antes y de después de un cambio así no se oyen entre sí.
 - El texto de ayuda de las herramientas de línea de comandos y los documentos detallados de abajo solo están en chino tradicional por ahora.
 
 ## Documentación
@@ -230,3 +244,6 @@ El código se publica bajo la [Licencia Pública General de GNU, versión 3 (GPL
 
 Los pesos de los modelos (`models/`) se entrenaron con fotos de [COCO](https://cocodataset.org/) val2017. Los derechos de autor de esas fotos pertenecen a sus fotógrafos, que las publicaron con distintas licencias Creative Commons, algunas de las cuales solo permiten el uso no comercial.
 Los pesos se ofrecen junto con el proyecto. Antes de usarlos para algo que no sean experimentos de radioafición, comprueba por tu cuenta que ese uso está permitido.
+
+Los programas de los paquetes de descarga posteriores a la 0.2.1 están enlazados además con [rade_c](https://github.com/freedv/rade_c) (BSD de 2 cláusulas) y [Opus](https://github.com/xiph/opus) (BSD de 3 cláusulas), que usa «Enviar voz a la vez».
+Los textos de sus licencias están en `THIRD-PARTY-LICENSES.txt` dentro de cada paquete (en `Resources` dentro de la app de macOS) y en [voice/LICENSES/](voice/LICENSES/) en el repositorio.

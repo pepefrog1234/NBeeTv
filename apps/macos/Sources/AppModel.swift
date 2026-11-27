@@ -157,6 +157,13 @@ final class AppModel: ObservableObject {
     @Published var serialPorts: [String] = []
     @Published var inputDeviceName = "—"
     @Published var outputDeviceName = "—"
+    // 同時送語音（見 Voice.swift）
+    @Published var microphoneName = "—"
+    @Published var speakerName = "—"
+    @Published var voiceRxSynced = false     // 收到的訊號裡有語音，而且同步到了
+    @Published var voiceRxSnrDb: Double?     // 那時候語音的訊雜比
+    @Published var voiceTxOn = false         // 這一次發射正在送語音（麥克風那一條路開起來了）
+    @Published var voiceTxLevelDb: Double?   // 那時候麥克風的音量（dBFS）；其他時候是 nil
     /// 要讓使用者看到的訊息（裝置或 PTT 出錯等），顯示在底列。
     @Published var notice: String?
     /// PTT 的指令沒有成功、電台可能還按著發射時的警告（主視窗疊一條顯示，要使用者自己按掉，見 PTTWarningBanner）；平常是 nil。
@@ -243,6 +250,12 @@ final class AppModel: ObservableObject {
     private let pttQueue = DispatchQueue(label: "nbtv.ptt", qos: .userInitiated)
     private var pttDriver: PTTDriver?
     private var onAir: [OnAirFrame] = []
+    private let voicePath = VoiceTransmitPath()
+    private var txVoiceLayout: VoiceLayout?   // 這一次發射是和語音一起送的話，用的是哪一種版面；不是的話是 nil
+    private var txVoiceActive = false         // 語音那一條路真的開起來了（麥克風開不了的話畫面照送，只是沒有語音）
+    private var txVoiceFinished = false       // 這一次發射的語音已經收尾了
+    /// 和語音一起送時，結尾留這麼久的靜音（平常是 0.1 秒）：語音的「結束」標記要在放開 PTT 之前送完
+    static let voiceEndSeconds = 0.45
     private var txSession = 0           // 每次開始或結束發射就加一；晚到的非同步結果靠它認出自己已經過期
     private var txLead: Int64 = 0       // 開頭的靜音（等電台切到發射）
     private var txEnd: Int64 = 0        // 已排進輸出佇列的最後位置
@@ -327,6 +340,13 @@ final class AppModel: ObservableObject {
         settings.$outputLevelDb.sink { [weak self] value in
             self?.engine?.output.gain = Float(pow(10.0, value / 20.0))
         }.store(in: &cancellables)
+        // 「同時送語音」的開關、版面、喇叭改了：接收照新的設定重來（發射中不動，結束回到接收時就是新的）
+        settings.$voiceEnabled.dropFirst().sink { [weak self] _ in self?.voiceSettingsChanged() }.store(in: &cancellables)
+        settings.$voiceLayout.dropFirst().sink { [weak self] _ in self?.voiceSettingsChanged() }.store(in: &cancellables)
+        settings.$speakerUID.dropFirst().sink { [weak self] _ in self?.voiceSettingsChanged() }.store(in: &cancellables)
+        settings.$microphoneUID.dropFirst().sink { [weak self] _ in
+            DispatchQueue.main.async { self?.refreshDevices() }
+        }.store(in: &cancellables)
         settings.$loopVideo.sink { [weak self] value in
             guard let self else { return }
             self.video.loop = value && !self.scheduledRun   // 定時發射中一律只播一次
@@ -361,6 +381,7 @@ final class AppModel: ObservableObject {
     func shutdown() {
         txSession += 1
         txTimer?.invalidate()
+        voicePath.stop()
         engine?.output.stop()
         if let driver = pttDriver {
             pttQueue.sync { try? driver.key(false) }
@@ -402,6 +423,8 @@ final class AppModel: ObservableObject {
         let input = AudioDevices.resolve(uid: settings.inputDeviceUID, input: true)
         inputDeviceName = input?.name ?? L("沒有輸入裝置")
         outputDeviceName = AudioDevices.resolve(uid: settings.outputDeviceUID, input: false)?.name ?? L("沒有輸出裝置")
+        microphoneName = AudioDevices.resolve(uid: settings.microphoneUID, input: true)?.name ?? L("沒有輸入裝置")
+        speakerName = AudioDevices.resolve(uid: settings.speakerUID, input: false)?.name ?? L("沒有輸出裝置")
 
         // 該用的輸入裝置和正在用的不一樣了（改了設定、裝置被拔掉或插回來、系統預設換了、取樣率改了，
         // 或是先前沒開成功）：改從現在該用的那一個接收。
@@ -442,21 +465,106 @@ final class AppModel: ObservableObject {
         guard let engine, receiveWanted, txPhase == .idle else { return }
         activeInputID = nil
         clearSyncState()
+        clearVoiceState()
         guard let device = AudioDevices.resolve(uid: settings.inputDeviceUID, input: true) else {
             notice = L("找不到音訊輸入裝置")
             return
         }
         do {
-            try engine.startReceiving(deviceID: device.id)
+            try engine.startReceiving(deviceID: device.id, voice: voiceOn ? settings.voiceLayout : nil)
             activeInputID = device.id
             activeInputRate = AudioDevices.sampleRate(device.id)
             inputDeviceName = device.name
-            DebugTap.log("開始接收：輸入「\(device.name)」，裝置取樣率 \(Int(activeInputRate)) Hz")
+            DebugTap.log("開始接收：輸入「\(device.name)」，裝置取樣率 \(Int(activeInputRate)) Hz\(voiceOn ? "，也收和語音一起送的訊號" : "")")
         } catch {
             DebugTap.log("開始接收失敗：\(error.localizedDescription)")
             notice = L("無法開啟輸入裝置「%@」：%@", device.name, error.localizedDescription)
+            return
+        }
+        startSpeaker()
+    }
+
+    // MARK: - 同時送語音
+
+    /// 「同時送語音」現在有沒有作用：app 裡有語音的編解碼器，而且開關開著。
+    var voiceOn: Bool { Voice.available && settings.voiceEnabled }
+
+    /// 現在按下發射的話會不會和語音一起送：開關開著，而且選的是 FM 用的模式。
+    /// 定時發射一律不送語音：沒有人在的時候不開麥克風。
+    var voiceWithTransmit: Bool { voiceOn && !scheduledRun && Voice.supports(Modes.find(settings.txModeID)) }
+
+    /// 解出來的語音從設定的喇叭播。開不了只是聽不到語音，接收照常。
+    private func startSpeaker() {
+        guard let engine, voiceOn else { return }
+        guard let device = AudioDevices.resolve(uid: settings.speakerUID, input: false) else {
+            notice = L("找不到播放語音的喇叭")
+            return
+        }
+        // 喇叭不可以是送去電台的那個輸出裝置：收到的語音會被送進電台的音訊輸入，電台開著 VOX 的話還會自己發射出去
+        if device.id == AudioDevices.resolve(uid: settings.outputDeviceUID, input: false)?.id {
+            notice = L("喇叭和送去電台的輸出裝置是同一個，收到的語音不會播出來：請到設定裡另外選喇叭")
+            DebugTap.log("語音的喇叭和電台的輸出裝置是同一個（「\(device.name)」）：不播")
+            return
+        }
+        do {
+            try engine.startSpeaker(deviceID: device.id)
+            speakerName = device.name
+            DebugTap.log("語音從「\(device.name)」播出")
+        } catch {
+            notice = L("無法開啟喇叭「%@」：%@", device.name, error.localizedDescription)
         }
     }
+
+    private func voiceSettingsChanged() {
+        // 這時候設定的新值還沒寫進去（@Published 是在改之前通知），所以排到下一輪再做
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.refreshDevices()
+            guard self.receiveWanted, self.txPhase == .idle else { return }
+            self.engine?.stopReceiving()
+            self.startReceiving()
+        }
+    }
+
+    /// 這一次發射要和語音一起送：打開麥克風、開始編碼。麥克風開不了的話畫面照送，只是沒有語音。
+    private func startVoicePath(_ layout: VoiceLayout, output: AudioOutput) {
+        let device = output.simulated ? nil : AudioDevices.resolve(uid: settings.microphoneUID, input: true)
+        if !output.simulated, device == nil {
+            notice = L("找不到麥克風，這次發射沒有語音")
+            return
+        }
+        // 麥克風不可以是接電台的那個輸入裝置：送出去的會是電台收到的聲音，不是自己講的話
+        if let device, device.id == AudioDevices.resolve(uid: settings.inputDeviceUID, input: true)?.id {
+            notice = L("麥克風和接電台的輸入裝置是同一個，這次發射沒有語音：請到設定裡另外選麥克風")
+            DebugTap.log("語音的麥克風和電台的輸入裝置是同一個（「\(device.name)」）：這次沒有語音")
+            return
+        }
+        do {
+            try voicePath.start(layout: layout, microphoneID: device?.id, output: output)
+            txVoiceActive = true
+            voiceTxOn = true
+            if let device { microphoneName = device.name }
+            DebugTap.log("和語音一起送：麥克風「\(device?.name ?? "（測試：不開裝置）")」，畫面放慢 \(layout.slowFactor) 倍")
+            AppModel.trace?("和語音一起送：畫面放慢 \(layout.slowFactor) 倍")
+        } catch {
+            notice = L("無法開啟麥克風「%@」：%@，這次發射沒有語音", device?.name ?? "", error.localizedDescription)
+        }
+    }
+
+    /// 測試用：不開輸入裝置就開始接收，收到的音訊由 debugReceive 給；喇叭也換成模擬的（解出來的語音交給 speakerSink）。
+    func debugStartReceiving(speakerSink: (([Float]) -> Void)? = nil) {
+        guard let engine else { return }
+        engine.speaker.simulated = true
+        engine.speaker.simulatedSink = speakerSink
+        try? engine.startReceiving(deviceID: nil, voice: voiceOn ? settings.voiceLayout : nil)
+        if voiceOn { try? engine.startSpeaker(deviceID: 0) }
+    }
+
+    /// 測試用：當成輸入裝置收到了這一段音訊。
+    func debugReceive(_ samples: [Float]) { engine?.debugReceive(samples) }
+
+    /// 測試用：正在和語音一起送時，當成麥克風收到了這一段語音。
+    func debugSpeak(_ samples: [Float]) { voicePath.speak(samples) }
 
     // MARK: - 接收
 
@@ -469,10 +577,21 @@ final class AppModel: ObservableObject {
         lastResult = .none
     }
 
+    /// 接收停下來、或重新開始時：語音那一路的狀態也清掉。
+    private func clearVoiceState() {
+        if voiceRxSynced { voiceRxSynced = false }
+        if voiceRxSnrDb != nil { voiceRxSnrDb = nil }
+    }
+
     func apply(_ update: RxUpdate) {
         guard txPhase == .idle || !live else { return }
         if update.synced || !update.frames.isEmpty { lastSignalTime = clock() }
         inputLevelDb = update.inputLevelDb
+        // 語音那一路的狀態和畫面的同步無關（對方可以只講話）
+        let voice = update.voiceSynced ?? false
+        if voice != voiceRxSynced { voiceRxSynced = voice }
+        let voiceSnr = voice ? update.voiceSnrDb.rounded() : nil
+        if voiceSnr != voiceRxSnrDb { voiceRxSnrDb = voiceSnr }
         for frame in update.frames { add(frame, time: Date()) }
         if update.synced {
             synced = true
@@ -1019,6 +1138,9 @@ final class AppModel: ObservableObject {
             queuedMonitorRows.removeAll()
         }
         publishTransmitDisplay()
+        // 和語音一起送的時候：麥克風的音量（整數的 dB，變了才更新）
+        let microphone = isOnAir && txVoiceActive && !txVoiceFinished ? voicePath.levelDb.rounded() : nil
+        if microphone != voiceTxLevelDb { voiceTxLevelDb = microphone }
         // 發射來源
         if video.url != nil {
             // 畫面只在來源是影片檔時才取；播放的位置與狀態隨時照實更新（來源是鏡頭時影片也可能開著，定時發射要用）
@@ -1165,8 +1287,13 @@ final class AppModel: ObservableObject {
         txLastRGB = nil
         txPendingImage = nil
         txEndsAfterFirst = false
+        // 這一次是不是和語音一起送，按下去的時候就定了：發射中改開關不影響這一次
+        let duplex = voiceWithTransmit ? settings.voiceLayout : nil
+        txVoiceLayout = duplex
+        txVoiceActive = false
+        txVoiceFinished = false
         let callsign = settings.callsign
-        DebugTap.log("按下發射：模式 \(mode.id)、來源 \(settings.sourceKind.rawValue)")
+        DebugTap.log("按下發射：模式 \(mode.id)、來源 \(settings.sourceKind.rawValue)\(duplex != nil ? "、和語音一起送" : "")")
         let encodeFirst = { [weak self] in
             guard let self, session == self.txSession else { return }
             self.captureSourceFrame { [weak self] capture in
@@ -1186,6 +1313,7 @@ final class AppModel: ObservableObject {
                     // 上一次若有編好卻沒送出去的幀（取消、PTT 失敗），先取消它，再把重取樣濾波器清乾淨
                     self.transmitter.discardLast()
                     _ = self.transmitter.finish()
+                    self.transmitter.setDuplex(duplex)   // 和語音一起送：發射機給的是放慢、搬好位置的「畫面那一半」
                     self.transmitter.setMode(mode.id)
                     self.transmitter.setCallsign(callsign)
                     let began = Date()
@@ -1281,6 +1409,7 @@ final class AppModel: ObservableObject {
         guard session == txSession, txPhase == .starting, let engine else { return }
         engine.stopReceiving()
         clearSyncState()
+        clearVoiceState()
         engine.resetSpectrum()
         let device = engine.output.simulated ? nil : AudioDevices.resolve(uid: settings.outputDeviceUID, input: false)
         guard device != nil || engine.output.simulated else {
@@ -1290,6 +1419,8 @@ final class AppModel: ObservableObject {
         let deviceName = device?.name ?? "模擬的輸出"
         do {
             engine.output.gain = settings.outputGain
+            engine.output.voiceStartLevel = Int(Voice.startSeconds * Double(NBTV.sampleRate))
+            engine.output.keepRendered = txVoiceLayout != nil
             try engine.output.start(deviceID: device?.id ?? 0)
             if let device { outputDeviceName = device.name }
         } catch {
@@ -1309,6 +1440,7 @@ final class AppModel: ObservableObject {
         txPulledAt = ProcessInfo.processInfo.systemUptime
         txPhase = .transmitting
         guard enqueue(first) else { return }
+        if let layout = txVoiceLayout { startVoicePath(layout, output: engine.output) }
         // 圖片序列只剩這一張：不再準備下一張，送完它就收尾
         if txEndsAfterFirst { stopAfterQueuedFrames() }
         // 來源是影片檔：開始送音訊的同時讓影片開始播放（已經在播的不動）。
@@ -1418,7 +1550,12 @@ final class AppModel: ObservableObject {
         }
 
         // 把已經送出去的部分交給頻譜分析
-        if position > txMonitored {
+        if txVoiceLayout != nil {
+            // 和語音一起送：顯示的是實際交給裝置的（畫面加語音），由輸出那邊留的那一份來
+            txMonitored = position
+            let chunk = engine.output.takeRendered()
+            if !chunk.isEmpty { engine.monitor(chunk) }
+        } else if position > txMonitored {
             var chunk: [Float] = []
             chunk.reserveCapacity(Int(position - txMonitored))
             for frame in onAir where frame.end > txMonitored && frame.start < position {
@@ -1446,8 +1583,13 @@ final class AppModel: ObservableObject {
         } else if !txPreparing {
             if txTailState == 0 {
                 queueTail()
-            } else if txTailState == 2, position >= txEnd {
-                finishTransmit()
+            } else if txTailState == 2 {
+                // 和語音一起送：剩下不到半秒時讓語音收尾（送出「結束」的標記），放開 PTT 之前它才送得完
+                if txVoiceActive, !txVoiceFinished, Double(txEnd - position) / Double(NBTV.sampleRate) < AppModel.voiceEndSeconds {
+                    txVoiceFinished = true
+                    voicePath.finish()
+                }
+                if position >= txEnd { finishTransmit() }
             }
         }
     }
@@ -1593,7 +1735,8 @@ final class AppModel: ObservableObject {
                 guard session == self.txSession, self.txPhase == .stopping, let engine = self.engine else { return }
                 // 尾巴要緊接在最後一張後面才有意義；佇列已經空了（來不及）就只補靜音
                 let late = engine.output.playedSamples >= self.txEnd
-                let block = (late ? [] : tail) + [Float](repeating: 0, count: NBTV.sampleRate / 10)
+                let quiet = self.txVoiceLayout != nil ? Int(AppModel.voiceEndSeconds * Double(NBTV.sampleRate)) : NBTV.sampleRate / 10
+                let block = (late ? [] : tail) + [Float](repeating: 0, count: quiet)
                 self.txTap?.write(block)
                 DebugTap.log("排入尾巴 \(block.count) 個取樣\(late ? "（佇列已經空了，只補靜音）" : "")")
                 engine.output.enqueue(block)
@@ -1639,8 +1782,13 @@ final class AppModel: ObservableObject {
         txLastRGB = nil
         txDisplay = nil
         queuedMonitorRows.removeAll()
+        voicePath.stop()
         engine?.output.stop()
         releasePTT()
+        txVoiceLayout = nil
+        txVoiceActive = false
+        if voiceTxOn { voiceTxOn = false }
+        voiceTxLevelDb = nil
         txPhase = .idle
         txModeID = settings.txModeID
         onAir.removeAll()
@@ -1750,7 +1898,9 @@ final class AppModel: ObservableObject {
             if let buffer = video.copyCurrentFrame() ?? video.lastFrame { latestFrame.set(buffer, turns: video.quarterTurns) }
         }
         video.loop = false   // 不管有沒有勾循環播放，定時發射只播一次；結束時改回來
-        scheduleLimit = video.duration + 2 * mode.frameSeconds + AppModel.scheduleMarginSeconds
+        // 和語音一起送的時候每一張比較久
+        let slow = voiceWithTransmit ? settings.voiceLayout.slowFactor : 1
+        scheduleLimit = video.duration + 2 * mode.frameSeconds * slow + AppModel.scheduleMarginSeconds
         startTransmit(fromStart: true)
         // 不應該發生（能不能發射上面都檢查過了）：真的沒有開始的話，把狀態收乾淨
         if txPhase == .idle { finishScheduledRun(failure: notice ?? L("沒有開始"), sent: 0) }

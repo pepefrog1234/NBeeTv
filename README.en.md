@@ -66,6 +66,13 @@ and its model is trained only for FM signal levels, so it is 1.8 dB better than 
 the computation of the other large-picture modes (about 0.13 seconds to decode one picture on an M4 Max), so a slow computer
 with few cores may not keep up. They too work only on FM and have only been checked in simulation.
 
+The FM modes (3–7 and 15) can also **carry live voice along with the pictures** (experimental): the audio band of the FM voice channel
+is split in two, with voice at 360–1220 Hz using [FreeDV](https://freedv.org)'s RADE V2 and the picture slowed down 1.5 times (or 1.8 times)
+and moved above 1335 Hz, so each picture takes that much longer. The macOS app and the Windows and Linux app have a "Send voice too" switch
+in the sidebar (in versions after 0.2.1); both ends have to turn it on and pick the same layout, and with it off everything works as before.
+It has only been checked in simulation, not yet on real radios, and RADE V2 itself is still a pre-release that FreeDV does not yet recommend
+using on the air. Details are in the [technical notes](docs/TECHNICAL.md#語音與畫面共用-fm-語音通道實驗中).
+
 ## Download
 
 Get the file for your platform from [Releases](https://github.com/pepefrog1234/NBeeTv/releases). Each one is built and tested on a machine of that platform and processor type.
@@ -195,10 +202,16 @@ cmake -S . -B build-desktop -DNBTV_BUILD_DESKTOP_APP=ON -DNBTV_BUILD_TESTS=OFF
 cmake --build build-desktop --config Release --target nbtv-gui
 ```
 
+The voice codec behind "Send voice too" is not built by default (the programs in the download packages after 0.2.1 have it). To include it, add
+`-DNBTV_VOICE=ON` to any of the `cmake -S …` lines above: the configure step then also downloads the sources of
+[rade_c](https://github.com/freedv/rade_c) and [Opus](https://github.com/xiph/opus) and Opus's model data (about 280 MB in all,
+each checked against its SHA-256) and builds them along with the project; nothing else needs to be installed.
+
 | Path | Contents |
 | --- | --- |
 | `core/` | Platform-independent C++20 core library: OFDM transmit and receive, synchronization, channel estimation and neural-network inference. Its only public interface is a C API (`core/include/nbtv/nbtv.h`) |
 | `sim/` | HF channel simulation |
+| `voice/` | Wrapper around the real-time voice codec (FreeDV's RADE V2) for "Send voice too"; optional |
 | `tools/` | Command-line tools; `tools/learned/` holds the training and export code for the models (Python, PyTorch) |
 | `models/` | Model weight files |
 | `apps/macos/` | The macOS app (SwiftUI) |
@@ -210,6 +223,7 @@ cmake --build build-desktop --config Release --target nbtv-gui
 - Text and captions get smeared, and small patches of vivid color fade.
 - Nothing authenticates a frame or its callsign: anyone can send pictures under any callsign.
 - The Windows and Linux app is new and has only been checked by automated tests; it has not yet been verified with a real radio, sound card, camera or serial port.
+- "Send voice too" has only been checked in simulation. RADE V2 is still a pre-release: its waveform may change, and versions before and after such a change cannot hear each other.
 - The help text of the command-line tools and the detailed documents below are in Traditional Chinese only for now.
 
 ## Documentation
@@ -229,3 +243,6 @@ The code is released under the [GNU General Public License, version 3 (GPL-3.0)]
 
 The model weights (`models/`) were trained on photos from [COCO](https://cocodataset.org/) val2017. The copyright in those photos belongs to their photographers, who released them under various Creative Commons licenses, some of which allow non-commercial use only.
 The weights are provided with the project. Before using them for anything other than amateur radio experiments, check for yourself that the use is allowed.
+
+The programs in the download packages after 0.2.1 are also linked with [rade_c](https://github.com/freedv/rade_c) (BSD 2-Clause) and [Opus](https://github.com/xiph/opus) (BSD 3-Clause), used by "Send voice too".
+Their license texts are in `THIRD-PARTY-LICENSES.txt` in each package (inside the app's `Resources` for the macOS app) and in [voice/LICENSES/](voice/LICENSES/) in the repository.

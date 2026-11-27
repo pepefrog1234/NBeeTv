@@ -18,6 +18,9 @@ struct RxUpdate {
     var inputLevelDb = -120.0
     var frames: [DecodedFrame] = []
     var spectrumRows: [[Float]] = []
+    /// 「同時送語音」開著時：語音那一路目前有沒有同步、訊雜比的估計。沒開著時是 nil
+    var voiceSynced: Bool?
+    var voiceSnrDb = 0.0
 
     /// 把核心的狀態抄進來。
     mutating func take(_ status: nbtv_rx_status) {
@@ -39,7 +42,14 @@ final class RadioEngine {
     var onMonitorRows: (([[Float]]) -> Void)?
 
     /// 輸出佇列要放得下開頭的靜音、一整張，再加上提早排進去的下一張；照最長的模式算，至少 14 秒。
-    let output = AudioOutput(queueSeconds: max(14, 2 * (Modes.all.map(\.frameSeconds).max() ?? 6) + 2))
+    /// （和語音一起送的時候畫面是放慢的，每一張更長。）
+    let output = AudioOutput(queueSeconds: max(14, 2 * (Modes.all.map(\.frameSeconds).max() ?? 6) * (Voice.available ? VoiceLayout.slowest : 1) + 2))
+    /// 「同時送語音」開著時，解出來的語音從這裡播。語音是一小段一小段解出來的，先墊一點才開始播。
+    let speaker: AudioOutput = {
+        let speaker = AudioOutput(queueSeconds: 2)
+        speaker.startLevel = Int(Voice.speakerStartSeconds * Double(NBTV.sampleRate))
+        return speaker
+    }()
     private let input = AudioInput()
     private let coreQueue = DispatchQueue(label: "nbtv.core", qos: .userInitiated)
     private let receiver = RadioEngine.makeReceiver()
@@ -51,6 +61,11 @@ final class RadioEngine {
     private var activeGeneration = 0
     private var pending = RxUpdate()          // 還沒交給介面的更新
     private var lastDelivery: UInt64 = 0      // 上次交給介面的時間（DispatchTime 的奈秒）
+    // 「同時送語音」開著時（voiceLayout 不是 nil）：另一個接收機收合成訊號裡的畫面，語音那一路解出來排到喇叭
+    private lazy var duplexReceiver = RadioEngine.makeReceiver()
+    private var voiceReceiver: VoiceReceiver?
+    private var voiceReceiverLayout: VoiceLayout?   // voiceReceiver 是照哪一種版面建立的
+    private var voiceLayout: VoiceLayout?
     private var rxTap: DebugTap.Stream?       // 除錯用：交給接收機的取樣原樣記到檔案（見 DebugTap）
     private var tapSynced = false             // 上一次記到紀錄檔的同步狀態
     /// 音訊每 20 毫秒進來一段，但介面不需要更新得那麼勤（整個視窗重排一次並不便宜）：
@@ -75,11 +90,23 @@ final class RadioEngine {
     }
 
     /// 從指定的輸入裝置開始接收；接收機會先清成初始狀態。
-    func startReceiving(deviceID: AudioDeviceID) throws {
+    /// voice：「同時送語音」開著時是它的版面——除了平常的訊號，也收和語音一起送的那一種，語音排到喇叭（startSpeaker）。
+    /// deviceID 是 nil 時不開任何裝置（測試用：收到的音訊由 debugReceive 給）。
+    func startReceiving(deviceID: AudioDeviceID?, voice: VoiceLayout? = nil) throws {
         generation += 1
         let current = generation
         coreQueue.sync {
             receiver.reset()
+            voiceLayout = voice
+            if let voice {
+                duplexReceiver.setDuplex(voice)   // 順便清成初始狀態
+                if voiceReceiverLayout == voice, let voiceReceiver {
+                    voiceReceiver.reset()
+                } else {
+                    voiceReceiver = VoiceReceiver(layout: voice)
+                    voiceReceiverLayout = voice
+                }
+            }
             spectrum.reset()
             pending = RxUpdate()
             activeGeneration = current
@@ -88,6 +115,7 @@ final class RadioEngine {
             rxTap = DebugTap.Stream(kind: "rx")
             tapSynced = false
         }
+        guard let deviceID else { return }
         do {
             try input.start(deviceID: deviceID)
         } catch {
@@ -96,8 +124,17 @@ final class RadioEngine {
         }
     }
 
+    /// 解出來的語音從這個裝置播。開不了時丟出錯誤：接收照常，只是聽不到語音。
+    func startSpeaker(deviceID: AudioDeviceID) throws { try speaker.start(deviceID: deviceID) }
+
+    /// 測試用：當成輸入裝置收到了這一段音訊（處理完才回來）。
+    func debugReceive(_ samples: [Float]) {
+        coreQueue.sync { process(samples) }
+    }
+
     func stopReceiving() {
         input.stop()
+        speaker.stop()
         coreQueue.sync {
             receiving = false
             rxTap?.close()
@@ -119,6 +156,31 @@ final class RadioEngine {
         coreQueue.sync { spectrum.reset() }
     }
 
+    /// 「同時送語音」開著時：同一段音訊也交給收合成訊號的那個接收機，語音那一路解出來排到喇叭。
+    private func processVoice(_ samples: [Float]) {
+        duplexReceiver.push(samples)
+        let status = duplexReceiver.status()
+        if status.synced != 0 {
+            // 對方是和語音一起送的：同步、模式、進度看這個接收機的；輸入音量還是看整段音訊的
+            let level = pending.inputLevelDb
+            pending.take(status)
+            pending.inputLevelDb = level
+        }
+        while let frame = duplexReceiver.pollFrame() {
+            DebugTap.log("接收（和語音一起送的）：收到一幀，模式 \(frame.modeID)，\(frame.decoded ? "解碼成功" : "沒有畫面")，序號 \(frame.sequence)")
+            pending.frames.append(frame)
+        }
+        guard let voiceReceiver else { return }
+        let speech = voiceReceiver.process(samples)
+        // 喇叭那邊積太多（兩邊音效卡的快慢不同）就先不排，聲音才不會愈來愈晚
+        if !speech.isEmpty, speaker.isRunning, speaker.queuedSamples < Int(Voice.speakerLimitSeconds * Double(NBTV.sampleRate)) {
+            speaker.enqueue(speech)
+        }
+        let voice = voiceReceiver.status
+        pending.voiceSynced = voice.synced
+        pending.voiceSnrDb = voice.snrDb
+    }
+
     private func process(_ samples: [Float]) {
         guard receiving else { return }
         rxTap?.write(samples)
@@ -129,6 +191,7 @@ final class RadioEngine {
             DebugTap.log("接收：收到一幀，模式 \(frame.modeID)，\(frame.decoded ? "解碼成功" : (frame.modelMissing ? "模型不符，沒有畫面" : "沒解出來"))，標頭\(frame.headerOK ? "正確" : "錯誤")，序號 \(frame.sequence)")
             pending.frames.append(frame)
         }
+        if voiceLayout != nil { processVoice(samples) }
         if pending.synced != tapSynced {
             tapSynced = pending.synced
             DebugTap.log(tapSynced ? String(format: "接收：同步到模式 %d，頻偏 %+.1f Hz，輸入 %.1f dB", pending.modeID, pending.offsetHz, pending.inputLevelDb)

@@ -36,3 +36,9 @@
 // 接收：這台電腦來不及解每一張畫面時
 "來不及解" = "Omitida (lento)";
 "這台電腦解一張畫面比收一張還久，來不及的畫面會略過" = "Este equipo tarda más en decodificar una imagen que en recibirla; las que no llegue a tiempo se omiten";
+
+// 同時送語音：設定裡語音用的麥克風與喇叭（其餘的句子沿用 macOS 版的）
+"麥克風" = "Micrófono";
+"喇叭" = "Altavoz";
+"同時送語音時自己講話用" = "Para hablar al enviar voz a la vez";
+"同時送語音時聽對方講話用" = "Para oír al otro al enviar voz a la vez";

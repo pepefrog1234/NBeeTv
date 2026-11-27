@@ -263,6 +263,7 @@ S1Match s1_agreement(const Mode& mode, const SymbolGrid& grid, const ChannelEsti
 // FM 的音訊通道在一幀之內不變（沒有衰落、沒有頻偏），會變的只有兩件事：兩邊音效卡的取樣時脈差一點，
 // 所以訊號一個符號比一個符號晚到（或早到）；以及殘餘的一點點共同相位。兩者都隨時間線性變化，
 // 由頭尾兩個參考符號量出來，中間的符號照比例內插（Receiver::process_frame_free）。
+// 音訊在送進來之前被整段移過頻率時，共同的相位不再是一點點，而是跟著時間差成比例地轉（RxTuning::band_shift_hz）。
 constexpr int kNullFirst = 58;        // 頻帶上方沒用到的頻率從第幾格開始（共 FreeTrack::kNullBins 格，到第 85 格）
 constexpr int kCyclicFirst = 16;      // 循環字首（64 個取樣）裡拿來和符號尾巴比的那一段：前面一截留給通道的拖尾，
 constexpr int kCyclicLast = 56;       // 最後幾個留給定時誤差
@@ -1182,7 +1183,12 @@ void Receiver::process_frame_free() {
         tau1 = tau0 + predicted_span;
         phi0 = phi1 = end_shift.phi;
     }
-    const double dphi = std::remainder(phi1 - phi0, kTwoPi);
+    // 頭尾之間共同的相位轉了多少。平常（FM 的音訊沒有頻偏）只是殘餘的一點點：取最短的那一圈。
+    // 音訊在送進來之前被整段移過頻率的話（RxTuning::band_shift_hz），時脈差會讓整個頻帶跟著時間差一起轉：
+    // 每晚一個取樣多轉 −2π · band_shift_hz / 12000，長的幀、時脈差大時超過半圈。所以先照量到的時間差算出該轉多少，
+    // 再取離它最近的那一圈；只有一個參考符號可用時就照算出來的。
+    const double expected_dphi = -kTwoPi * tuning_.band_shift_hz / kSampleRate * (tau1 - tau0);
+    const double dphi = head_ok && tail_ok ? expected_dphi + std::remainder(phi1 - phi0 - expected_dphi, kTwoPi) : expected_dphi;
     // 這一幀的音量是前幾幀平均的幾倍（對方或自己中途調了音量）
     double gain = 1.0;
     if (tracked && (head_ok || tail_ok)) gain = ((head_ok ? head.gain : 0.0) + (tail_ok ? end_shift.gain : 0.0)) / ((head_ok ? 1 : 0) + (tail_ok ? 1 : 0));

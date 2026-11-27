@@ -282,6 +282,11 @@ final class CoreReceiver {
 
     func reset() { nbtv_rx_reset(handle) }
 
+    /// 語音＋畫面：打開之後收的是合成訊號裡的畫面（先分出畫面那一段、還原成原來的樣子才解），平常的訊號收不到；
+    /// nil 關掉。切換時接收機回到初始狀態。
+    @discardableResult
+    func setDuplex(_ layout: VoiceLayout?) -> Bool { nbtv_rx_set_duplex(handle, layout?.code ?? NBTV_DUPLEX_OFF) == 0 }
+
     /// 要不要把最近幾幀合起來解（預設不要）。只對有配合併用權重的模型有作用；重設不會改變這個設定。
     func setMerging(_ on: Bool) { nbtv_rx_set_merging(handle, on ? 1 : 0) }
 
@@ -343,7 +348,13 @@ final class CoreTransmitter {
         return true
     }
     func setCallsign(_ callsign: String) { nbtv_tx_set_callsign(handle, callsign) }
+    /// 一幀最多有幾個取樣（語音＋畫面打開時，實際的個數可能少幾個）
     var frameSamples: Int { Int(nbtv_tx_frame_samples(handle)) }
+
+    /// 語音＋畫面：打開之後給的是「畫面那一半」（放慢、搬到畫面的頻段、音量照比例調好），每一幀在空中的時間是原來的
+    /// layout.slowFactor 倍；語音那一半另外做（VoiceSender），播放時加上去。nil 關掉。只能在兩次發射之間改（finish 之後）。
+    @discardableResult
+    func setDuplex(_ layout: VoiceLayout?) -> Bool { nbtv_tx_set_duplex(handle, layout?.code ?? NBTV_DUPLEX_OFF, 0) == 0 }
 
     /// 把一張畫面做成一幀音訊。畫面要是目前這個模式的大小（pictureSize）。
     /// 失敗（大小不對、目前的模式沒有模型）回傳 nil。
@@ -358,7 +369,8 @@ final class CoreTransmitter {
             let written = rgb.withUnsafeBytes { src in
                 nbtv_tx_encode_image(handle, src.bindMemory(to: UInt8.self).baseAddress, &samples, Int32(count), nil, &info)
             }
-            guard Int(written) == count else { return nil }
+            guard written > 0, Int(written) <= count else { return nil }
+            samples.removeLast(count - Int(written))
             var mode = nbtv_mode_info()
             guard nbtv_mode_by_id(info.mode_id, &mode) == 0 else { return nil }
             var values = [Float](repeating: 0, count: Int(mode.learned_values))
@@ -369,7 +381,8 @@ final class CoreTransmitter {
         let written = rgb.withUnsafeBytes { src in
             nbtv_tx_encode_image(handle, src.bindMemory(to: UInt8.self).baseAddress, &samples, Int32(count), &preview, &info)
         }
-        guard Int(written) == count else { return nil }
+        guard written > 0, Int(written) <= count else { return nil }
+        samples.removeLast(count - Int(written))
         return EncodedFrame(samples: samples, preview: Data(preview), modeID: Int(info.mode_id), sequence: Int(info.sequence))
     }
 
@@ -380,7 +393,7 @@ final class CoreTransmitter {
 
     /// 發射結束時取出重取樣濾波器裡剩下的尾巴。
     func finish() -> [Float] {
-        var tail = [Float](repeating: 0, count: 256)
+        var tail = [Float](repeating: 0, count: max(256, Int(nbtv_tx_tail_samples(handle))))
         let n = nbtv_tx_finish(handle, &tail, Int32(tail.count))
         return Array(tail[0..<Int(max(n, 0))])
     }

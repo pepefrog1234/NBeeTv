@@ -349,3 +349,29 @@
 "無法讀取圖片「%@」，已從序列中拿掉" = "Could not read the image “%@”; it was removed from the sequence";
 "有 %d 張圖片無法讀取，已從序列中拿掉" = "%d images could not be read; they were removed from the sequence";
 "選的圖片都無法讀取" = "None of the selected images can be read";
+
+
+// 同時送語音（語音與畫面共用 FM 語音通道）：右側欄的開關與說明、設定裡的麥克風與喇叭、相關的訊息
+"同時送語音" = "Send voice too";
+"發射時把麥克風的語音和畫面一起送，接收時也聽得到對方這樣送的語音。只有 FM 用的模式可以；畫面會放慢，每張比較久。語音用的是 FreeDV 的 RADE V2，還是測試版" = "When transmitting, sends the microphone’s voice together with the picture; when receiving, you also hear voice sent this way. FM modes only; the picture is slowed down, so each frame takes longer. Voice uses FreeDV’s RADE V2, which is still a test version";
+"窄" = "Narrow";
+"和語音一起送時的版面" = "Layout when sending with voice";
+"標準：畫面放慢 1.5 倍，佔到 2866 Hz。窄：放慢 1.8 倍，只佔到 2611 Hz，電台的音訊上緣比較窄時用。收發兩邊要選一樣的" = "Standard: the picture is slowed 1.5 times and reaches 2866 Hz. Narrow: slowed 1.8 times and reaches only 2611 Hz, for radios whose audio cuts off lower. Both ends must choose the same one";
+"語音發射中 · 麥克風 %@" = "Sending voice · microphone %@";
+"這一次發射沒有語音" = "This transmission has no voice";
+"收到語音 · 訊雜比 %@" = "Receiving voice · SNR %@";
+"收到語音" = "Receiving voice";
+"這個模式不能同時送語音：請選 FM 用的模式" = "This mode cannot carry voice: choose an FM mode";
+"和語音一起送時每張 %@（畫面放慢 %@ 倍）" = "With voice, %@ per frame (picture slowed %@ times)";
+"麥克風與喇叭" = "Microphone and speaker";
+"同時送語音時用" = "Used when sending voice too";
+"語音用的麥克風：%@" = "Microphone for voice: %@";
+"語音用的喇叭：%@" = "Speaker for voice: %@";
+"找不到播放語音的喇叭" = "Speaker for voice not found";
+"無法開啟喇叭「%@」：%@" = "Cannot open speaker “%@”: %@";
+"找不到麥克風，這次發射沒有語音" = "Microphone not found; this transmission has no voice";
+"無法開啟麥克風「%@」：%@，這次發射沒有語音" = "Cannot open microphone “%@”: %@; this transmission has no voice";
+"語音的編解碼器開不起來" = "The voice codec could not be started";
+"喇叭和送去電台的輸出裝置是同一個，收到的語音不會播出來：請到設定裡另外選喇叭" = "The speaker is the same device as the output to the radio, so received voice is not played: choose another speaker in Settings";
+"麥克風和接電台的輸入裝置是同一個，這次發射沒有語音：請到設定裡另外選麥克風" = "The microphone is the same device as the input from the radio, so this transmission has no voice: choose another microphone in Settings";
+"語音發射中" = "Sending voice";

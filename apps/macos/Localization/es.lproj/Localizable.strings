@@ -349,3 +349,29 @@
 "無法讀取圖片「%@」，已從序列中拿掉" = "No se pudo leer la imagen «%@»; se quitó de la secuencia";
 "有 %d 張圖片無法讀取，已從序列中拿掉" = "No se pudieron leer %d imágenes; se quitaron de la secuencia";
 "選的圖片都無法讀取" = "No se puede leer ninguna de las imágenes seleccionadas";
+
+
+// 同時送語音（語音與畫面共用 FM 語音通道）：右側欄的開關與說明、設定裡的麥克風與喇叭、相關的訊息
+"同時送語音" = "Enviar voz a la vez";
+"發射時把麥克風的語音和畫面一起送，接收時也聽得到對方這樣送的語音。只有 FM 用的模式可以；畫面會放慢，每張比較久。語音用的是 FreeDV 的 RADE V2，還是測試版" = "Al transmitir envía la voz del micrófono junto con la imagen, y al recibir se oye la voz que el otro envíe así. Solo con los modos para FM; la imagen se envía más despacio y cada una tarda más. La voz usa RADE V2 de FreeDV, que aún es una versión de prueba";
+"窄" = "Estrecha";
+"和語音一起送時的版面" = "Disposición al enviar con voz";
+"標準：畫面放慢 1.5 倍，佔到 2866 Hz。窄：放慢 1.8 倍，只佔到 2611 Hz，電台的音訊上緣比較窄時用。收發兩邊要選一樣的" = "Estándar: la imagen va 1,5 veces más lenta y llega hasta 2866 Hz. Estrecha: 1,8 veces más lenta y solo hasta 2611 Hz, para equipos cuyo audio corta antes por arriba. Los dos lados deben elegir la misma";
+"語音發射中 · 麥克風 %@" = "Transmitiendo voz · micrófono %@";
+"這一次發射沒有語音" = "Esta transmisión va sin voz";
+"收到語音 · 訊雜比 %@" = "Recibiendo voz · SNR %@";
+"收到語音" = "Recibiendo voz";
+"這個模式不能同時送語音：請選 FM 用的模式" = "Este modo no puede llevar voz a la vez: elija un modo para FM";
+"和語音一起送時每張 %@（畫面放慢 %@ 倍）" = "Con voz, %@ por imagen (la imagen va %@ veces más lenta)";
+"麥克風與喇叭" = "Micrófono y altavoz";
+"同時送語音時用" = "Para enviar voz a la vez";
+"語音用的麥克風：%@" = "Micrófono para la voz: %@";
+"語音用的喇叭：%@" = "Altavoz para la voz: %@";
+"找不到播放語音的喇叭" = "No se encuentra el altavoz para la voz";
+"無法開啟喇叭「%@」：%@" = "No se puede abrir el altavoz «%@»: %@";
+"找不到麥克風，這次發射沒有語音" = "No se encuentra el micrófono; esta transmisión va sin voz";
+"無法開啟麥克風「%@」：%@，這次發射沒有語音" = "No se puede abrir el micrófono «%@»: %@; esta transmisión va sin voz";
+"語音的編解碼器開不起來" = "No se pudo iniciar el códec de voz";
+"喇叭和送去電台的輸出裝置是同一個，收到的語音不會播出來：請到設定裡另外選喇叭" = "El altavoz es el mismo dispositivo que la salida hacia el equipo, así que la voz recibida no se reproduce: elija otro altavoz en los ajustes";
+"麥克風和接電台的輸入裝置是同一個，這次發射沒有語音：請到設定裡另外選麥克風" = "El micrófono es el mismo dispositivo que la entrada desde el equipo, así que esta transmisión va sin voz: elija otro micrófono en los ajustes";
+"語音發射中" = "Transmitiendo voz";

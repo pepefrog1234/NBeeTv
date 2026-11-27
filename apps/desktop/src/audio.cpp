@@ -94,6 +94,29 @@ void AudioOutput::reset() {
     std::lock_guard<std::mutex> lock(mutex_);
     enqueued_ = played_ = rendered_ = silent_ = 0;
     underruns_ = 0;
+    flowing_ = voice_flowing_ = false;
+    waited_ = voice_waited_ = 0;
+    voice_.clear();
+    rendered_tap_.clear();
+}
+
+void AudioOutput::enqueue_voice(const float* samples, std::size_t count) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const std::size_t limit = static_cast<std::size_t>(2 * kSampleRate);   // 最多積兩秒
+    const std::size_t room = voice_.size() < limit ? limit - voice_.size() : 0;
+    voice_.insert(voice_.end(), samples, samples + std::min(count, room));
+}
+
+std::int64_t AudioOutput::voice_queued_samples() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return static_cast<std::int64_t>(voice_.size());
+}
+
+std::vector<float> AudioOutput::take_rendered() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<float> taken;
+    taken.swap(rendered_tap_);
+    return taken;
 }
 
 bool AudioOutput::start(SDL_AudioDeviceID device, std::string* error) {
@@ -183,12 +206,37 @@ int AudioOutput::underruns() const {
 
 void AudioOutput::render(float* out, std::size_t count) {
     const float volume = gain.load();
+    // 墊不夠也不會一直等：等了這麼久（半秒）還是只有一點點，就是後面沒有了，把剩下的播掉
+    const std::size_t wait_limit = static_cast<std::size_t>(kSampleRate / 2);
     std::lock_guard<std::mutex> lock(mutex_);
     const std::size_t have = static_cast<std::size_t>(enqueued_ - played_);
-    const std::size_t n = std::min(have, count);
-    for (std::size_t i = 0; i < n; ++i) out[i] = volume * ring_[static_cast<std::size_t>((played_ + static_cast<std::int64_t>(i)) % static_cast<std::int64_t>(capacity_))];
+    std::size_t n = 0;
+    if (start_level > 0 && !flowing_ && have < start_level && (have == 0 || waited_ < wait_limit)) {
+        if (have > 0) waited_ += count;   // 還沒墊夠：先不取
+    } else {
+        flowing_ = true;
+        waited_ = 0;
+        n = std::min(have, count);
+        for (std::size_t i = 0; i < n; ++i) out[i] = ring_[static_cast<std::size_t>((played_ + static_cast<std::int64_t>(i)) % static_cast<std::int64_t>(capacity_))];
+        if (n < count) flowing_ = false;
+    }
     std::fill(out + n, out + count, 0.0f);
-    if (n < count && have > 0) ++underruns_;   // 這一次把佇列取空了
+    // 語音那一半有的話加上去
+    if (voice_flowing_ || voice_.size() >= std::max<std::size_t>(voice_start_level, 1) || (!voice_.empty() && voice_waited_ >= wait_limit)) {
+        voice_flowing_ = true;
+        voice_waited_ = 0;
+        const std::size_t voice = std::min(voice_.size(), count);
+        for (std::size_t i = 0; i < voice; ++i) out[i] = std::clamp(out[i] + voice_[i], -1.0f, 1.0f);
+        voice_.erase(voice_.begin(), voice_.begin() + static_cast<std::ptrdiff_t>(voice));
+        if (voice < count) voice_flowing_ = false;
+    } else if (!voice_.empty()) {
+        voice_waited_ += count;
+    }
+    if (keep_rendered && rendered_tap_.size() < static_cast<std::size_t>(2 * kSampleRate)) rendered_tap_.insert(rendered_tap_.end(), out, out + count);
+    if (volume != 1.0f) {
+        for (std::size_t i = 0; i < count; ++i) out[i] *= volume;
+    }
+    if (n > 0 && n < count) ++underruns_;   // 這一次把佇列取空了
     played_ += static_cast<std::int64_t>(n);
     rendered_ += static_cast<std::int64_t>(count);
     silent_ += static_cast<std::int64_t>(count - n);

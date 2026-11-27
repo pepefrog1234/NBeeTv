@@ -8,6 +8,7 @@ set(NBTV_APP_SOURCES
   Sources/AppModel.swift
   Sources/RadioEngine.swift
   Sources/CoreBridge.swift
+  Sources/Voice.swift
   Sources/AudioDevices.swift
   Sources/AudioIO.swift
   Sources/PTT.swift
@@ -57,6 +58,13 @@ set(NBTV_APP_RESOURCES
   ${PROJECT_SOURCE_DIR}/models/261124-9.bin
   ${PROJECT_SOURCE_DIR}/models/261124-7.bin
 )
+# 有把語音的編解碼器編進來（-DNBTV_VOICE=ON）的話，它用到的兩份第三方程式的授權條文也要跟著 app 走
+if(NBTV_VOICE)
+  list(APPEND NBTV_APP_RESOURCES
+    ${PROJECT_SOURCE_DIR}/voice/LICENSES/rade_c-LICENSE.txt
+    ${PROJECT_SOURCE_DIR}/voice/LICENSES/rade_c-source-notice.txt
+    ${PROJECT_SOURCE_DIR}/voice/LICENSES/opus-COPYING.txt)
+endif()
 # （CMake 的 Swift＋Ninja 不會照 MACOSX_PACKAGE_LOCATION 複製資源，所以在下面建置完成後自己複製。）
 
 # 介面的翻譯：原始碼裡寫的是繁體中文，其他語言在 Localization/<語言>.lproj/Localizable.strings；
@@ -85,6 +93,7 @@ set(NBTV_APP_HEADERS
   CNBTV/nbtv_shim.h
   CNBTV/module.modulemap
   ${PROJECT_SOURCE_DIR}/core/include/nbtv/nbtv.h
+  ${PROJECT_SOURCE_DIR}/voice/include/nbtv/voice.h
 )
 set_source_files_properties(${NBTV_APP_HEADERS} PROPERTIES HEADER_FILE_ONLY ON)
 
@@ -120,7 +129,8 @@ endif()
 # Swift 經由 CNBTV/module.modulemap 匯入 nbtv.h。
 target_include_directories(nbtv_mac PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/CNBTV")
 # 核心是 C++ 靜態函式庫；CMake 看到它的連結語言是 C++，會自動帶上 -lc++。
-target_link_libraries(nbtv_mac PRIVATE nbtvcore)
+# 語音的編解碼器（voice/）是選用的：沒有打開 -DNBTV_VOICE=ON 時連結到的是空殼，介面上不會出現「同時送語音」。
+target_link_libraries(nbtv_mac PRIVATE nbtvcore nbtvvoice)
 
 # ad-hoc 簽章：系統的相機／麥克風權限需要 bundle 有簽章才認得。
 # swiftc 會把相依檔（NBTV.d）寫在執行檔旁邊，也就是 bundle 的 Contents/MacOS 裡；簽章前要先拿掉。

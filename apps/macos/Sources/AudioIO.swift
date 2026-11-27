@@ -313,12 +313,52 @@ final class AudioOutput {
     private var simulationTimer: DispatchSourceTimer?
     private let simulationQueue = DispatchQueue(label: "nbtv.audio.simulated", qos: .userInitiated)
 
+    /// 佇列裡至少有這麼多個取樣才開始播（剛開始、或中途空掉之後）；0 是有多少播多少。
+    /// 一小段一小段送來的即時聲音（解出來的語音）用它先墊一點，才不會斷斷續續。要在 start 之前設定。
+    var startLevel = 0
+    private var flowing = false
+    private var waited = 0        // 佇列裡有東西、但還沒墊夠，已經等了幾個取樣
+
+    // 語音＋畫面：語音那一半另外排一條佇列，播放時一個取樣一個取樣加到主佇列的那一半上。
+    // 畫面可以提早好幾秒排好，語音到要送的那一刻才編得出來，所以兩者不能排在同一條佇列裡。
+    private let voiceRing = FloatRing(capacity: NBTV.sampleRate * 2)
+    private let voiceScratchCapacity = 16384
+    private let voiceScratch: UnsafeMutablePointer<Float>
+    /// 語音的佇列墊到這麼多個取樣才開始加（語音是一段一段編出來的）；中途空掉之後也一樣。要在 start 之前設定。
+    var voiceStartLevel = 0
+    private var voiceFlowing = false
+    private var voiceWaited = 0   // 同上，語音的佇列
+    /// 墊不夠也不會一直等：等了這麼久（半秒）還是只有一點點，就是後面沒有了，把剩下的播掉
+    private let waitLimit = NBTV.sampleRate / 2
+    /// 把實際交給裝置的取樣（兩半加起來、還沒乘輸出音量）留一份，給發射時的頻譜顯示用（takeRendered）。要在 start 之前設定。
+    var keepRendered = false
+    private let renderedRing = FloatRing(capacity: NBTV.sampleRate * 2)
+
     /// queueSeconds：佇列最多放幾秒的音訊。要放得下「目前這張還沒播完的部分＋下一張」。
     init(queueSeconds: Double = 14) {
         ring = FloatRing(capacity: Int(queueSeconds * Double(NBTV.sampleRate)))
+        voiceScratch = .allocate(capacity: voiceScratchCapacity)
+        voiceScratch.initialize(repeating: 0, count: voiceScratchCapacity)
     }
 
-    deinit { stop() }
+    deinit {
+        stop()
+        voiceScratch.deallocate()
+    }
+
+    /// 開始之前把各條佇列與計數清乾淨。
+    private func clearQueues() {
+        ring.clear()
+        voiceRing.clear()
+        renderedRing.clear()
+        flowing = false
+        voiceFlowing = false
+        waited = 0
+        voiceWaited = 0
+        underruns = 0
+        renderedFrames = 0
+        silentFrames = 0
+    }
 
     func start(deviceID: AudioDeviceID) throws {
         stop()
@@ -340,10 +380,7 @@ final class AudioOutput {
             let callback = AURenderCallbackStruct(inputProc: outputProc, inputProcRefCon: Unmanaged.passUnretained(self).toOpaque())
             try setProperty(unit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, callback, L("設定輸出回呼失敗（錯誤碼 %d）"))
             try check(AudioUnitInitialize(unit), L("初始化輸出裝置失敗（錯誤碼 %d）"))
-            ring.clear()
-            underruns = 0
-            renderedFrames = 0
-            silentFrames = 0
+            clearQueues()
             self.unit = unit
             try check(AudioOutputUnitStart(unit), L("啟動輸出裝置失敗（錯誤碼 %d）"))
         } catch {
@@ -372,10 +409,7 @@ final class AudioOutput {
 
     /// 模擬的裝置：每 10 毫秒取走這段時間該播的取樣。計數的方式和真的裝置（render）相同。
     private func startSimulation() {
-        ring.clear()
-        underruns = 0
-        renderedFrames = 0
-        silentFrames = 0
+        clearQueues()
         let began = DispatchTime.now().uptimeNanoseconds
         var taken: Int64 = 0
         let timer = DispatchSource.makeTimerSource(queue: simulationQueue)
@@ -388,14 +422,14 @@ final class AudioOutput {
             guard frames > 0 else { return }
             taken = due
             var block = [Float](repeating: 0, count: frames)
-            let got = block.withUnsafeMutableBufferPointer { self.ring.read(into: $0.baseAddress!, count: frames) }
+            let got = block.withUnsafeMutableBufferPointer { self.fill($0.baseAddress!, frames) }
             self.renderedFrames += Int64(frames)
             self.silentFrames += Int64(frames - got)
             if got > 0, got < frames { self.underruns += 1 }
             // 和真的裝置一樣照輸出音量調整（見 render），所以發射中改音量，取走的取樣也立刻跟著變
             let g = self.gain
             if g != 1.0 {
-                for index in 0..<got { block[index] *= g }
+                for index in 0..<frames { block[index] *= g }
             }
             self.simulatedSink?(block)
         }
@@ -409,6 +443,54 @@ final class AudioOutput {
     func enqueue(_ samples: [Float]) -> Bool {
         let written = samples.withUnsafeBufferPointer { ring.write($0.baseAddress!, count: $0.count) }
         return written == samples.count
+    }
+
+    /// 把語音那一半排進它自己的佇列；放不下的部分丟掉（語音晚了就不送，不能愈積愈多）。
+    func enqueueVoice(_ samples: [Float]) {
+        _ = samples.withUnsafeBufferPointer { voiceRing.write($0.baseAddress!, count: $0.count) }
+    }
+
+    /// 語音的佇列裡還有幾個取樣沒有播。
+    var voiceQueuedSamples: Int { voiceRing.available }
+
+    /// 取出從上次到現在實際交給裝置的取樣（keepRendered 打開時才有）。
+    func takeRendered() -> [Float] {
+        let count = renderedRing.available
+        guard count > 0 else { return [] }
+        var block = [Float](repeating: 0, count: count)
+        let got = block.withUnsafeMutableBufferPointer { renderedRing.read(into: $0.baseAddress!, count: count) }
+        if got < count { block.removeLast(count - got) }
+        return block
+    }
+
+    /// 即時執行緒（或模擬的裝置）：填滿這一批輸出，回傳主佇列給了幾個（其餘的是靜音）。語音那一半有的話加上去。
+    private func fill(_ dest: UnsafeMutablePointer<Float>, _ frames: Int) -> Int {
+        var got = 0
+        let ready = startLevel > 0 && !flowing ? ring.available : 0
+        if startLevel > 0, !flowing, ready < startLevel, ready == 0 || waited < waitLimit {
+            // 還沒墊夠：先不取
+            if ready > 0 { waited += frames }
+        } else {
+            flowing = true
+            waited = 0
+            got = ring.read(into: dest, count: frames)
+            if got < frames { flowing = false }
+        }
+        if got < frames { (dest + got).update(repeating: 0, count: frames - got) }
+        if frames <= voiceScratchCapacity {
+            let voiceReady = voiceFlowing ? frames : voiceRing.available
+            if voiceFlowing || voiceReady >= max(voiceStartLevel, 1) || (voiceReady > 0 && voiceWaited >= waitLimit) {
+                voiceFlowing = true
+                voiceWaited = 0
+                let voice = voiceRing.read(into: voiceScratch, count: frames)
+                if voice < frames { voiceFlowing = false }
+                for index in 0..<voice { dest[index] = min(max(dest[index] + voiceScratch[index], -1), 1) }
+            } else if voiceReady > 0 {
+                voiceWaited += frames
+            }
+        }
+        if keepRendered { renderedRing.write(dest, count: frames) }
+        return got
     }
 
     /// 把排在 position（從 start 起算第幾個取樣）之後的都丟掉。裝置已經取到 position 之後了就不動，回傳 false。
@@ -425,17 +507,14 @@ final class AudioOutput {
         guard let first = buffers.first, let data = first.mData else { return noErr }
         let frames = Int(frameCount)
         let dest = data.assumingMemoryBound(to: Float.self)
-        let got = ring.read(into: dest, count: frames)
+        let got = fill(dest, frames)
         renderedFrames += Int64(frames)
         silentFrames += Int64(frames - got)
-        if got < frames {
-            (dest + got).update(repeating: 0, count: frames - got)
-            // 佇列在播放途中空掉一次算一次（發射結束時最後那一批不滿也會算到一次）
-            if got > 0 { underruns += 1 }
-        }
+        // 佇列在播放途中空掉一次算一次（發射結束時最後那一批不滿也會算到一次）
+        if got > 0, got < frames { underruns += 1 }
         let g = gain
         if g != 1.0 {
-            for i in 0..<got { dest[i] *= g }
+            for i in 0..<frames { dest[i] *= g }
         }
         for index in 1..<buffers.count {
             if let other = buffers[index].mData { other.copyMemory(from: data, byteCount: frames * 4) }

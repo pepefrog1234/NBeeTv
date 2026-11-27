@@ -48,6 +48,14 @@ final class AppSettings: ObservableObject {
     @Published var canvasEnabled: Bool { didSet { store?.set(canvasEnabled, forKey: "canvasEnabled") } }
     @Published var canvasText: String { didSet { store?.set(canvasText, forKey: "canvasText") } }
     @Published var canvasPosition: CanvasPosition { didSet { store?.set(canvasPosition.rawValue, forKey: "canvasPosition") } }
+    /// 同時送語音（app 裡有語音的編解碼器才有，而且只對 FM 用的模式有作用）：發射時把麥克風的語音和畫面一起送，
+    /// 接收時也收對方這樣送的訊號，語音從喇叭播出來。預設關著。
+    @Published var voiceEnabled: Bool { didSet { store?.set(voiceEnabled, forKey: "voiceEnabled") } }
+    /// 和語音一起送時的版面：標準，或給音訊上緣比較窄的電台用的那一種（畫面再慢一點）
+    @Published var voiceLayout: VoiceLayout { didSet { store?.set(voiceLayout.rawValue, forKey: "voiceLayout") } }
+    /// 語音用的麥克風與喇叭的 UID；空字串表示用系統預設
+    @Published var microphoneUID: String { didSet { store?.set(microphoneUID, forKey: "microphoneUID") } }
+    @Published var speakerUID: String { didSet { store?.set(speakerUID, forKey: "speakerUID") } }
     /// 測試用：不是 nil 時，發射用它給的 PTT 驅動，不看 pttMode（自我測試用來確認 PTT 有按下、有放開）。
     var debugPTTDriver: (() -> PTTDriver)?
 
@@ -84,6 +92,10 @@ final class AppSettings: ObservableObject {
         canvasEnabled = (store?.object(forKey: "canvasEnabled") as? Bool) ?? false
         canvasText = store?.string(forKey: "canvasText") ?? ""
         canvasPosition = CanvasPosition(rawValue: store?.string(forKey: "canvasPosition") ?? "") ?? .top
+        voiceEnabled = (store?.object(forKey: "voiceEnabled") as? Bool) ?? false
+        voiceLayout = VoiceLayout(rawValue: store?.string(forKey: "voiceLayout") ?? "") ?? .standard
+        microphoneUID = store?.string(forKey: "microphoneUID") ?? ""
+        speakerUID = store?.string(forKey: "speakerUID") ?? ""
     }
 
     /// 底列與設定視窗顯示的 PTT 說明

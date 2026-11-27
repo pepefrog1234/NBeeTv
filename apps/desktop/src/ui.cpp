@@ -7,6 +7,7 @@
 #include <cstring>
 
 #include "i18n.hpp"
+#include "voice.hpp"
 #include "imgui.h"
 
 namespace nbtvgui {
@@ -1012,9 +1013,31 @@ void UI::draw_side_panel(const Rect& rect) {
     else if (app_.images_play_once()) hint = LF("以 %@ 發射，圖片送完自動停止", {settings.callsign});
     else hint = LF("以 %@ 發射，停止後自動回到接收", {settings.callsign});
     const float hint_h = paragraph_height(regular_, 11.5f, hint, width);
+    // 「同時送語音」那一列與它下面的說明（程式裡有語音的編解碼器才有）：正在和語音一起送、正在收對方的語音，或現在按下發射會怎麼送
+    const bool voice_row = voice::available();
+    std::string voice_note;
+    if (voice_row && settings.voice_enabled) {
+        const ModeInfo* chosen = modes::find(settings.tx_mode_id);
+        if (app_.voice_tx_on) {
+            voice_note = app_.voice_tx_level_db ? LF("語音發射中 · 麥克風 %@", {App::db_text(*app_.voice_tx_level_db)}) : L("語音發射中");
+        } else if (app_.is_on_air()) {
+            voice_note = L("這一次發射沒有語音");
+        } else if (app_.voice_rx_synced) {
+            voice_note = app_.voice_rx_snr_db ? LF("收到語音 · 訊雜比 %@", {App::snr_text(*app_.voice_rx_snr_db)}) : L("收到語音");
+        } else if (!voice::supports(chosen)) {
+            voice_note = L("這個模式不能同時送語音：請選 FM 用的模式");
+        } else {
+            const double slow = voice::slow_factor(settings.voice_layout);
+            char factor[16];
+            std::snprintf(factor, sizeof factor, "%.1f", slow);
+            voice_note = LF("和語音一起送時每張 %@（畫面放慢 %@ 倍）", {LF("%.2f 秒", {chosen->frame_seconds * slow}), std::string(factor)});
+        }
+    }
+    const float voice_note_h = voice_note.empty() ? 0 : paragraph_height(regular_, 12, voice_note, width);
+    const float voice_h = voice_row ? S(10) + S(30) + (voice_note.empty() ? 0 : S(4) + voice_note_h) : 0;
     // 底下那一塊（輸出音量、發射鈕、說明）與預覽以外的每一列加起來要多高
     const float bottom_block = S(22) + S(14) + S(44) + S(10) + hint_h + S(16);
-    const float below_preview = S(8) + (is_video || is_images ? S(34) : 0) + S(26) + S(38) + S(42) + S(14) + S(24) + S(40) + summary_h + S(14);
+    const float below_preview = S(8) + (is_video || is_images ? S(34) : 0) + S(26) + S(38) + S(42) + S(14) + S(24) + S(40) + summary_h + voice_h + S(14);
     float y = rect.y + S(18);
 
     // ---- 發射來源
@@ -1221,6 +1244,29 @@ void UI::draw_side_panel(const Rect& rect) {
     tooltip(busy ? LF("發射模式：%@，發射中不能更換", {mode_label}) : LF("選擇發射模式：%@", {mode_label}));
     y += S(40);
     paragraph(dl, regular_, 12, left, y, width, kTertiary, summary);
+
+    // ---- 同時送語音：開關與版面，下面一行說明。只對 FM 用的模式有作用；發射中不能改（這一次怎麼送，按下發射時就定了）
+    if (voice_row) {
+        y += summary_h + S(10);
+        const std::string standard = L("標準"), narrow = L("窄");
+        const float layout_w = std::max(S(84), text_width(bold_, 12.5f, standard) + text_width(bold_, 12.5f, narrow) + S(36));
+        const Rect layout_rect{rect.right() - S(16) - layout_w, y, layout_w, S(28)};
+        ImGui::BeginDisabled(busy);
+        if (checkbox("##voice", left, y + S(5), fitted(regular_, 12.5f, L("同時送語音"), layout_rect.x - left - S(34)), settings.voice_enabled)) {
+            settings.voice_enabled = !settings.voice_enabled;
+            app_.voice_settings_changed();
+        }
+        ImGui::EndDisabled();
+        tooltip(L("發射時把麥克風的語音和畫面一起送，接收時也聽得到對方這樣送的語音。只有 FM 用的模式可以；畫面會放慢，每張比較久。語音用的是 FreeDV 的 RADE V2，還是測試版"));
+        const int current_layout = settings.voice_layout == VoiceLayout::standard ? 0 : 1;
+        const int layout = segmented("##voicelayout", layout_rect, {standard, narrow}, current_layout, !busy && settings.voice_enabled);
+        if (layout != current_layout) {
+            settings.voice_layout = layout == 0 ? VoiceLayout::standard : VoiceLayout::narrow;
+            app_.voice_settings_changed();
+        }
+        tooltip(L("標準：畫面放慢 1.5 倍，佔到 2866 Hz。窄：放慢 1.8 倍，只佔到 2611 Hz，電台的音訊上緣比較窄時用。收發兩邊要選一樣的"));
+        if (!voice_note.empty()) paragraph(dl, regular_, 12, left, y + S(30) + S(4), width, kTertiary, voice_note);
+    }
 
     // ---- 從底下往上排：說明、發射鈕、輸出音量
     float by = rect.bottom() - S(16) - hint_h;
@@ -1495,7 +1541,8 @@ void UI::draw_settings() {
     // 設定是一個蓋在主視窗上面的對話框：開著的時候底下的東西按不到、顏色壓暗；按到外面或按 Esc 就關掉
     if (show_settings && !ImGui::IsPopupOpen("##settingsdialog")) ImGui::OpenPopup("##settingsdialog");
     if (!show_settings && !ImGui::IsPopupOpen("##settingsdialog")) return;
-    const float w = std::min(S(580), io.DisplaySize.x - S(40)), h = std::min(S(866), io.DisplaySize.y - S(24));
+    // 程式裡有語音的編解碼器時最下面多一組（語音用的麥克風與喇叭）；視窗不夠高就捲動
+    const float w = std::min(S(580), io.DisplaySize.x - S(40)), h = std::min(S(866) + (voice::available() ? S(156) : 0), io.DisplaySize.y - S(24));
     const ImVec2 corner((io.DisplaySize.x - w) / 2, (io.DisplaySize.y - h) / 2);
     ImGui::SetNextWindowPos(corner);
     ImGui::SetNextWindowSize(ImVec2(w, h));
@@ -1586,30 +1633,33 @@ void UI::draw_settings() {
     }
 
     // ---- 音訊
+    /// 選音訊裝置的一列：名稱與說明、右邊一個跳出選單的鈕。changed：選了之後要做的事
+    const auto device_row = [&](float row_y, const char* id, const std::string& name, const std::string& note, std::string& chosen, const std::vector<AudioDevice>& devices,
+                                const std::function<void()>& changed) {
+        labels(row_y, name, note);
+        const Rect anchor{field_x, row_y + field_y, field_w, S(32)};
+        const std::string popup = std::string(id) + "menu";
+        if (popup_button(id, anchor, chosen.empty() ? L("系統預設") : chosen)) ImGui::OpenPopup(popup.c_str());
+        menu(popup.c_str(), anchor, [&] {
+            if (ImGui::Selectable(L("系統預設").c_str(), chosen.empty())) {
+                chosen.clear();
+                changed();
+            }
+            for (const AudioDevice& device : devices) {
+                if (ImGui::Selectable(device.name.c_str(), device.name == chosen)) {
+                    chosen = device.name;
+                    changed();
+                }
+            }
+        });
+    };
     section(L("音訊"));
     {
         const float top = card(row_h * 2);
-        const auto device_row = [&](float row_y, const char* id, const std::string& name, const std::string& note, std::string& chosen, const std::vector<AudioDevice>& devices) {
-            labels(row_y, name, note);
-            const Rect anchor{field_x, row_y + field_y, field_w, S(32)};
-            const std::string popup = std::string(id) + "menu";
-            if (popup_button(id, anchor, chosen.empty() ? L("系統預設") : chosen)) ImGui::OpenPopup(popup.c_str());
-            menu(popup.c_str(), anchor, [&] {
-                if (ImGui::Selectable(L("系統預設").c_str(), chosen.empty())) {
-                    chosen.clear();
-                    app_.devices_changed();
-                }
-                for (const AudioDevice& device : devices) {
-                    if (ImGui::Selectable(device.name.c_str(), device.name == chosen)) {
-                        chosen = device.name;
-                        app_.devices_changed();
-                    }
-                }
-            });
-        };
-        device_row(top, "##input", L("輸入裝置"), L("從電台收進來的聲音"), settings.input_device, app_.input_devices);
+        const std::function<void()> radio_changed = [this] { app_.devices_changed(); };
+        device_row(top, "##input", L("輸入裝置"), L("從電台收進來的聲音"), settings.input_device, app_.input_devices, radio_changed);
         divider(top + row_h);
-        device_row(top + row_h, "##output", L("輸出裝置"), L("送去電台發射的聲音"), settings.output_device, app_.output_devices);
+        device_row(top + row_h, "##output", L("輸出裝置"), L("送去電台發射的聲音"), settings.output_device, app_.output_devices, radio_changed);
         y += row_h * 2 + S(16);
     }
 
@@ -1736,6 +1786,18 @@ void UI::draw_settings() {
                 if (ImGui::Selectable(i18n::native_name(language), language == settings.language)) settings.language = language;
             }
         });
+        y += row_h * 2 + S(24);
+    }
+
+    // ---- 同時送語音（程式裡有語音的編解碼器才有）：自己講話的麥克風、聽對方講話的喇叭。這兩個不是接電台的那兩個裝置。
+    // 排在最下面：上面幾組的位置和沒有這個功能時一樣
+    if (voice::available()) {
+        section(L("同時送語音"));
+        const float top = card(row_h * 2);
+        const std::function<void()> voice_changed = [this] { app_.voice_settings_changed(); };
+        device_row(top, "##microphone", L("麥克風"), L("同時送語音時自己講話用"), settings.microphone, app_.input_devices, voice_changed);
+        divider(top + row_h);
+        device_row(top + row_h, "##speaker", L("喇叭"), L("同時送語音時聽對方講話用"), settings.speaker, app_.output_devices, voice_changed);
         y += row_h * 2 + S(24);
     }
 

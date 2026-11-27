@@ -7,6 +7,7 @@ add_library(nbtvcore STATIC
   src/chanest.cpp
   src/conv_code.cpp
   src/dsp.cpp
+  src/duplex.cpp
   src/fft.cpp
   src/frame_header.cpp
   src/frame_map.cpp

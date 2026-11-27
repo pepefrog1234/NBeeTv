@@ -10,6 +10,7 @@
 #include "i18n.hpp"
 #include "png.hpp"
 #include "process.hpp"
+#include "voice.hpp"
 
 namespace nbtvgui {
 
@@ -63,7 +64,8 @@ struct App::Engine {
     static double queue_seconds() {
         double longest = 6;
         for (const ModeInfo& mode : modes::all()) longest = std::max(longest, mode.frame_seconds);
-        return std::max(14.0, 2 * longest + 2);
+        // 和語音一起送的時候畫面是放慢的，每一張更長
+        return std::max(14.0, 2 * longest * (voice::available() ? voice::slowest_factor() : 1.0) + 2);
     }
 
     static constexpr double kSkipAbove = 1.0;
@@ -72,8 +74,18 @@ struct App::Engine {
     static constexpr double kDeliveryInterval = 0.08;
 
     AudioOutput output{queue_seconds()};
+    /// 「同時送語音」開著時，解出來的語音從這裡播。語音是一小段一小段解出來的，先墊一點才開始播。
+    AudioOutput speaker{2.0};
+    /// 喇叭開著嗎（主執行緒寫，rx 那條執行緒讀）
+    std::atomic<bool> speaker_on{false};
+    /// 發射時語音走的那一條路（麥克風 → 編碼 → output 的語音佇列）。宣告在 output 後面：比它先解構
+    VoiceTransmitPath voice_path;
     AudioInput input;
     CoreReceiver receiver;       // 只在 rx 這條執行緒上使用
+    // 「同時送語音」開著時（voice_layout 有值）：另一個接收機收合成訊號裡的畫面，語音那一路解出來排到喇叭。都只在 rx 這條執行緒上使用
+    CoreReceiver duplex_receiver;
+    std::unique_ptr<VoiceReceiver> voice_receiver;
+    std::optional<VoiceLayout> voice_layout;
     CoreSpectrum spectrum;       // 只在 spectrum 這條執行緒上使用
     CoreTransmitter transmitter;
     /// 開始接收了幾次（主執行緒上讀寫）。
@@ -108,6 +120,8 @@ struct App::Engine {
     Engine() {
         // app 接收用的接收機一律把最近幾幀合起來解（畫面沒變的地方合併前面幾張，訊號弱時比較清楚也比較穩定）
         receiver.set_merging(true);
+        duplex_receiver.set_merging(true);
+        speaker.start_level = static_cast<std::size_t>(voice::kSpeakerStartSeconds * kSampleRate);
         input.on_samples = [this](std::vector<float> samples) {
             const int session = active.load();
             if (session == 0) return;
@@ -122,19 +136,30 @@ struct App::Engine {
         test_hold.store(false);
         active.store(0);  // 還排著的音訊一輪到就丟掉，兩條執行緒很快就結束
         input.stop();
+        voice_path.stop();
+        speaker_on.store(false);
+        speaker.stop();
         output.stop();
     }
 
     bool is_receiving() const { return input.running(); }
 
     /// 開始新的一次接收：接收機與頻譜先清成初始狀態，之後交進來的音訊才算這一次的。
-    void begin() {
+    /// voice：「同時送語音」開著時是它的版面——除了平常的訊號，也收和語音一起送的那一種。
+    void begin(std::optional<VoiceLayout> voice = std::nullopt) {
         const int current = ++generation;
         active.store(current);
         // 排在新的音訊前面：輪到的時候，這一次的第一段音訊還在後面
-        rx_worker.post([this] {
+        rx_worker.post([this, voice] {
             receiver.reset();
             receiver.set_decode_pictures(true);
+            voice_layout = voice;
+            if (voice) {
+                duplex_receiver.set_duplex(voice);   // 順便清成初始狀態
+                duplex_receiver.set_decode_pictures(true);
+                if (voice_receiver && voice_receiver->layout() == *voice) voice_receiver->reset();
+                else voice_receiver = VoiceReceiver::create(*voice);
+            }
             skipping = false;
             rx_pending = RxUpdate();
             rx_synced.store(false);
@@ -146,15 +171,24 @@ struct App::Engine {
     }
 
     /// 從指定的輸入裝置開始接收。
-    bool start_receiving(SDL_AudioDeviceID device, std::string* error) {
-        begin();
+    bool start_receiving(SDL_AudioDeviceID device, std::optional<VoiceLayout> voice, std::string* error) {
+        begin(voice);
         if (input.start(device, error)) return true;
         active.store(0);
         return false;
     }
 
+    /// 解出來的語音從這個裝置播。開不了時回傳 false：接收照常，只是聽不到語音。
+    bool start_speaker(SDL_AudioDeviceID device, std::string* error) {
+        const bool ok = speaker.start(device, error);
+        speaker_on.store(ok);
+        return ok;
+    }
+
     void stop_receiving() {
         input.stop();
+        speaker_on.store(false);
+        speaker.stop();
         active.store(0);
     }
 
@@ -185,9 +219,11 @@ struct App::Engine {
         if (!skipping && behind > kSkipAbove) {
             skipping = true;
             receiver.set_decode_pictures(false);
+            if (voice_layout) duplex_receiver.set_decode_pictures(false);
         } else if (skipping && behind < kResumeBelow) {
             skipping = false;
             receiver.set_decode_pictures(true);
+            if (voice_layout) duplex_receiver.set_decode_pictures(true);
         }
         receiver.push(samples.data(), static_cast<int>(samples.size()));
         const nbtv_rx_status status = receiver.status();
@@ -203,6 +239,34 @@ struct App::Engine {
         while (std::optional<DecodedFrame> frame = receiver.poll_frame()) {
             decoded = decoded || frame->decoded;
             rx_pending.frames.push_back(std::move(*frame));
+        }
+        if (voice_layout) {
+            // 同一段音訊也交給收合成訊號的那個接收機；語音那一路解出來排到喇叭
+            duplex_receiver.push(samples.data(), static_cast<int>(samples.size()));
+            const nbtv_rx_status other = duplex_receiver.status();
+            if (other.synced != 0) {
+                // 對方是和語音一起送的：同步、模式、訊雜比看這個接收機的；輸入音量還是看整段音訊的
+                rx_synced.store(true);
+                rx_pending.synced = true;
+                rx_pending.mode_id = other.mode_id;
+                rx_pending.snr_valid = other.snr_valid != 0;
+                rx_pending.snr_db = other.snr_db;
+                rx_pending.offset_hz = other.freq_offset_hz;
+            }
+            while (std::optional<DecodedFrame> frame = duplex_receiver.poll_frame()) {
+                decoded = decoded || frame->decoded;
+                rx_pending.frames.push_back(std::move(*frame));
+            }
+            if (voice_receiver) {
+                const std::vector<float> speech = voice_receiver->process(samples.data(), static_cast<int>(samples.size()));
+                // 喇叭那邊積太多（兩邊音效卡的快慢不同）就先不排，聲音才不會愈來愈晚
+                if (!speech.empty() && speaker_on.load() && speaker.queued_samples() < static_cast<std::int64_t>(voice::kSpeakerLimitSeconds * kSampleRate)) {
+                    speaker.enqueue(speech);
+                }
+                const VoiceReceiver::Status voice = voice_receiver->status();
+                rx_pending.voice_synced = voice.synced;
+                rx_pending.voice_snr_db = voice.snr_db;
+            }
         }
         if (decoded && test_hold.load()) {
             test_held.store(true);
@@ -297,6 +361,7 @@ void App::start() {
 
 void App::shutdown() {
     ++tx_session_;
+    if (engine_) engine_->voice_path.stop();
     if (engine_) engine_->output.stop();
     if (ptt_driver_) {
         const std::shared_ptr<PTTDriver> driver = ptt_driver_;
@@ -363,6 +428,10 @@ void App::refresh_devices() {
     input_device_name = input ? input->name : L("沒有輸入裝置");
     const std::optional<AudioDevice> output = resolve_audio_device(settings.output_device, false);
     output_device_name = output ? output->name : L("沒有輸出裝置");
+    const std::optional<AudioDevice> microphone = resolve_audio_device(settings.microphone, true);
+    microphone_name = microphone ? microphone->name : L("沒有輸入裝置");
+    const std::optional<AudioDevice> speaker = resolve_audio_device(settings.speaker, false);
+    speaker_name = speaker ? speaker->name : L("沒有輸出裝置");
 
     // 該用的輸入裝置和正在用的不一樣了（改了設定、裝置被拔掉或插回來，或是先前沒開成功）：改從現在該用的那一個接收。
     if (!engine_ || !receive_wanted_ || tx_phase != TxPhase::idle) return;
@@ -384,19 +453,105 @@ void App::start_receiving() {
     if (!engine_ || !receive_wanted_ || tx_phase != TxPhase::idle) return;
     active_input_.reset();
     clear_sync_state();
+    clear_voice_state();
     const std::optional<AudioDevice> device = resolve_audio_device(settings.input_device, true);
     if (!device) {
         notice = L("找不到音訊輸入裝置");
         return;
     }
     std::string error;
-    if (engine_->start_receiving(device->id, &error)) {
+    const std::optional<VoiceLayout> voice = voice_on() ? std::optional<VoiceLayout>(settings.voice_layout) : std::nullopt;
+    if (engine_->start_receiving(device->id, voice, &error)) {
         active_input_ = device->name;
         input_device_name = device->name;
-        note("開始接收：輸入「" + device->name + "」");
+        note("開始接收：輸入「" + device->name + "」" + (voice ? "，也收和語音一起送的訊號" : ""));
     } else {
         notice = LF("無法開啟輸入裝置「%@」：%@", {device->name, error});
+        return;
     }
+    start_speaker();
+}
+
+// ---------------------------------------------------------------- 同時送語音
+
+bool App::voice_on() const { return voice::available() && settings.voice_enabled; }
+
+bool App::voice_with_transmit() const { return voice_on() && !scheduled_run && voice::supports(modes::find(settings.tx_mode_id)); }
+
+void App::voice_settings_changed() {
+    settings.save();
+    refresh_devices();
+    if (!engine_ || !receive_wanted_ || tx_phase != TxPhase::idle) return;
+    engine_->stop_receiving();
+    start_receiving();
+}
+
+/// 解出來的語音從設定的喇叭播。開不了只是聽不到語音，接收照常。
+void App::start_speaker() {
+    if (!engine_ || !voice_on()) return;
+    const std::optional<AudioDevice> device = resolve_audio_device(settings.speaker, false);
+    if (!device) {
+        notice = L("找不到播放語音的喇叭");
+        return;
+    }
+    // 喇叭不可以是送去電台的那個輸出裝置：收到的語音會被送進電台的音訊輸入，電台開著 VOX 的話還會自己發射出去
+    const std::optional<AudioDevice> radio = resolve_audio_device(settings.output_device, false);
+    if (radio && radio->name == device->name) {
+        notice = L("喇叭和送去電台的輸出裝置是同一個，收到的語音不會播出來：請到設定裡另外選喇叭");
+        note("語音的喇叭和電台的輸出裝置是同一個（「" + device->name + "」）：不播");
+        return;
+    }
+    std::string error;
+    if (engine_->start_speaker(device->id, &error)) {
+        speaker_name = device->name;
+        note("語音從「" + device->name + "」播出");
+    } else {
+        notice = LF("無法開啟喇叭「%@」：%@", {device->name, error});
+    }
+}
+
+/// 這一次發射要和語音一起送：打開麥克風、開始編碼。麥克風開不了的話畫面照送，只是沒有語音。
+void App::start_voice_path(VoiceLayout layout) {
+    if (!engine_) return;
+    std::optional<AudioDevice> device;
+    if (!engine_->output.simulated) {
+        device = resolve_audio_device(settings.microphone, true);
+        if (!device) {
+            notice = L("找不到麥克風，這次發射沒有語音");
+            return;
+        }
+        // 麥克風不可以是接電台的那個輸入裝置：送出去的會是電台收到的聲音，不是自己講的話
+        const std::optional<AudioDevice> radio = resolve_audio_device(settings.input_device, true);
+        if (radio && radio->name == device->name) {
+            notice = L("麥克風和接電台的輸入裝置是同一個，這次發射沒有語音：請到設定裡另外選麥克風");
+            note("語音的麥克風和電台的輸入裝置是同一個（「" + device->name + "」）：這次沒有語音");
+            return;
+        }
+    }
+    std::string error;
+    if (engine_->voice_path.start(layout, device ? std::optional<SDL_AudioDeviceID>(device->id) : std::nullopt, &engine_->output, &error)) {
+        tx_voice_active_ = true;
+        voice_tx_on = true;
+        if (device) microphone_name = device->name;
+        note("和語音一起送：麥克風「" + (device ? device->name : std::string("（測試：不開裝置）")) + "」");
+    } else {
+        notice = LF("無法開啟麥克風「%@」：%@，這次發射沒有語音", {device ? device->name : std::string("—"), error});
+    }
+}
+
+void App::clear_voice_state() {
+    voice_rx_synced = false;
+    voice_rx_snr_db.reset();
+}
+
+void App::debug_speak(std::vector<float> samples) {
+    if (engine_) engine_->voice_path.speak(std::move(samples));
+}
+
+void App::debug_use_simulated_speaker(std::function<void(const std::vector<float>&)> sink) {
+    if (!engine_) return;
+    engine_->speaker.simulated = true;
+    engine_->speaker.simulated_sink = std::move(sink);
 }
 
 // ---------------------------------------------------------------- 接收
@@ -417,6 +572,9 @@ void App::apply(const RxUpdate& update) {
     if (update.has_status) {
         if (update.synced || !update.frames.empty()) last_signal_time_ = clock();
         input_level_db = update.input_level_db;
+        // 語音那一路的狀態和畫面的同步無關（對方可以只講話）
+        voice_rx_synced = update.voice_synced.value_or(false);
+        voice_rx_snr_db = voice_rx_synced ? std::optional<double>(std::round(update.voice_snr_db)) : std::nullopt;
         for (const DecodedFrame& frame : update.frames) add(frame, schedule::now());
         if (update.synced) {
             synced = true;
@@ -1068,6 +1226,8 @@ void App::ui_tick() {
     }
     publish_transmit_display();
     if (tx_phase == TxPhase::idle) tx_mode_id = settings.tx_mode_id;
+    // 和語音一起送的時候：麥克風的音量（整數的 dB）
+    voice_tx_level_db = engine_ && is_on_air() && tx_voice_active_ && !tx_voice_finished_ ? std::optional<double>(std::round(engine_->voice_path.level_db())) : std::nullopt;
 
     // 發射來源
     if (settings.source_kind == SourceKind::camera && camera_.running()) {
@@ -1264,12 +1424,17 @@ void App::start_transmit(bool from_start) {
     tx_last_rgb_.reset();
     tx_pending_image_.reset();
     tx_ends_after_first_ = false;
+    // 這一次是不是和語音一起送，按下去的時候就定了：發射中改開關不影響這一次
+    const std::optional<VoiceLayout> duplex = voice_with_transmit() ? std::optional<VoiceLayout>(settings.voice_layout) : std::nullopt;
+    tx_voice_layout_ = duplex;
+    tx_voice_active_ = false;
+    tx_voice_finished_ = false;
     const std::string callsign = settings.callsign;
     const int mode_id = mode->id;
-    note("按下發射：模式 " + std::to_string(mode_id));
-    const std::function<void()> encode_first = [this, session, callsign, mode_id] {
+    note("按下發射：模式 " + std::to_string(mode_id) + (duplex ? "、和語音一起送" : ""));
+    const std::function<void()> encode_first = [this, session, callsign, mode_id, duplex] {
         if (session != tx_session_) return;
-        capture_source_frame([this, session, callsign, mode_id](SourceCapture capture) {
+        capture_source_frame([this, session, callsign, mode_id, duplex](SourceCapture capture) {
             if (session != tx_session_) return;
             if (!capture.rgb) {
                 fail_transmit(L("沒有來源畫面可以發射"));
@@ -1283,11 +1448,12 @@ void App::start_transmit(bool from_start) {
             const Picture picture = apply_canvas(*capture.rgb);   // 畫布的字在這裡印上去；tx_last_rgb_ 留的是沒有印字的
             const ModeInfo* sending = modes::find(mode_id);
             const bool apart = sending != nullptr && sending->preview_apart();
-            tx_worker_->post([this, session, callsign, mode_id, picture, apart] {
+            tx_worker_->post([this, session, callsign, mode_id, picture, apart, duplex] {
                 // 上一次若有編好卻沒送出去的幀（取消、PTT 失敗），先取消它，再把重取樣濾波器清乾淨
                 CoreTransmitter& transmitter = engine_->transmitter;
                 transmitter.discard_last();
                 transmitter.finish();
+                transmitter.set_duplex(duplex);   // 和語音一起送：發射機給的是放慢、搬好位置的「畫面那一半」
                 transmitter.set_mode(mode_id);
                 transmitter.set_callsign(callsign);
                 const double began = uptime_seconds();
@@ -1346,7 +1512,10 @@ void App::debug_use_simulated_output(std::function<void(const std::vector<float>
 }
 
 void App::debug_begin_receiving() {
-    if (engine_) engine_->begin();
+    if (!engine_) return;
+    engine_->begin(voice_on() ? std::optional<VoiceLayout>(settings.voice_layout) : std::nullopt);
+    // 喇叭只有換成模擬的才開（測試不碰真的裝置）
+    if (voice_on() && engine_->speaker.simulated) engine_->start_speaker(0, nullptr);
 }
 
 void App::debug_stop_receiving() {
@@ -1401,6 +1570,7 @@ void App::go_on_air(EncodedFrame first, int session) {
     if (session != tx_session_ || tx_phase != TxPhase::starting || !engine_) return;
     engine_->stop_receiving();
     clear_sync_state();
+    clear_voice_state();
     engine_->reset_spectrum();
     std::optional<AudioDevice> device;
     if (!engine_->output.simulated) {
@@ -1411,6 +1581,8 @@ void App::go_on_air(EncodedFrame first, int session) {
         }
     }
     engine_->output.gain = settings.output_gain();
+    engine_->output.voice_start_level = static_cast<std::size_t>(voice::kStartSeconds * kSampleRate);
+    engine_->output.keep_rendered = tx_voice_layout_.has_value();
     std::string error;
     if (!engine_->output.start(device ? device->id : 0, &error)) {
         fail_transmit(LF("無法開啟輸出裝置「%@」：%@", {device ? device->name : std::string("—"), error}));
@@ -1425,6 +1597,7 @@ void App::go_on_air(EncodedFrame first, int session) {
     tx_pulled_at_ = uptime_seconds();
     tx_phase = TxPhase::transmitting;
     if (!enqueue(first)) return;
+    if (tx_voice_layout_) start_voice_path(*tx_voice_layout_);
     // 圖片序列只剩這一張：不再準備下一張，送完它就收尾
     if (tx_ends_after_first_) stop_after_queued_frames();
     // 來源是影片檔：開始送音訊的同時讓影片開始播放（已經在播的不動）。
@@ -1528,7 +1701,12 @@ void App::tx_tick() {
     }
 
     // 把已經送出去的部分交給頻譜分析
-    if (position > tx_monitored_) {
+    if (tx_voice_layout_) {
+        // 和語音一起送：顯示的是實際交給裝置的（畫面加語音），由輸出那邊留的那一份來
+        tx_monitored_ = position;
+        std::vector<float> chunk = engine_->output.take_rendered();
+        if (!chunk.empty()) engine_->monitor(std::move(chunk));
+    } else if (position > tx_monitored_) {
         std::vector<float> chunk;
         chunk.reserve(static_cast<std::size_t>(position - tx_monitored_));
         for (const OnAirFrame& frame : on_air_) {
@@ -1562,8 +1740,16 @@ void App::tx_tick() {
         // 目前這張快播完時，取來源當下那一格做下一張
         if (!tx_preparing_ && static_cast<double>(tx_end_ - position) / kSampleRate < prepare_lead()) prepare_next_frame();
     } else if (!tx_preparing_) {
-        if (tx_tail_state_ == 0) queue_tail();
-        else if (tx_tail_state_ == 2 && position >= tx_end_) finish_transmit();
+        if (tx_tail_state_ == 0) {
+            queue_tail();
+        } else if (tx_tail_state_ == 2) {
+            // 和語音一起送：剩下不到半秒時讓語音收尾（送出「結束」的標記），放開 PTT 之前它才送得完
+            if (tx_voice_active_ && !tx_voice_finished_ && static_cast<double>(tx_end_ - position) / kSampleRate < voice::kEndSeconds) {
+                tx_voice_finished_ = true;
+                engine_->voice_path.finish();
+            }
+            if (position >= tx_end_) finish_transmit();
+        }
     }
 }
 
@@ -1696,7 +1882,9 @@ void App::queue_tail() {
             // 尾巴要緊接在最後一張後面才有意義；佇列已經空了（來不及）就只補靜音
             const bool late = engine_->output.played_samples() >= tx_end_;
             std::vector<float> block = late ? std::vector<float>() : tail;
-            block.insert(block.end(), static_cast<std::size_t>(kTailSilenceSeconds * kSampleRate), 0.0f);
+            // 和語音一起送的時候留久一點：語音的「結束」標記要在放開 PTT 之前送完
+            const double quiet = tx_voice_layout_ ? std::max(kTailSilenceSeconds, voice::kEndSeconds) : kTailSilenceSeconds;
+            block.insert(block.end(), static_cast<std::size_t>(quiet * kSampleRate), 0.0f);
             engine_->output.enqueue(block);
             tx_end_ += static_cast<std::int64_t>(block.size());
             tx_tail_state_ = 2;
@@ -1737,8 +1925,13 @@ void App::end_transmit(const std::optional<std::string>& failure) {
     tx_last_rgb_.reset();
     tx_display_.reset();
     queued_monitor_rows_.clear();
+    if (engine_) engine_->voice_path.stop();
     if (engine_) engine_->output.stop();
     release_ptt();
+    tx_voice_layout_.reset();
+    tx_voice_active_ = false;
+    voice_tx_on = false;
+    voice_tx_level_db.reset();
     tx_phase = TxPhase::idle;
     tx_mode_id = settings.tx_mode_id;
     on_air_.clear();

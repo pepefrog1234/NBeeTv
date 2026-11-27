@@ -26,8 +26,12 @@ target_link_libraries(nbtv-chan PRIVATE nbtvsim)
 nbtv_add_tool(nbtv-sim nbtv_sim.cpp)
 target_link_libraries(nbtv-sim PRIVATE nbtvsim)
 nbtv_add_tool(nbtv-learned nbtv_learned.cpp)
+nbtv_add_tool(nbtv-duplex nbtv_duplex.cpp)
+# 語音的編解碼器是選用的（-DNBTV_VOICE=ON）；沒有編進來時這個工具只會說它沒有
+nbtv_add_tool(nbtv-voice nbtv_voice.cpp)
+target_link_libraries(nbtv-voice PRIVATE nbtvvoice)
 
-install(TARGETS nbtv-tx nbtv-rx nbtv-chan nbtv-sim nbtv-learned RUNTIME DESTINATION "${NBTV_INSTALL_BINDIR}")
+install(TARGETS nbtv-tx nbtv-rx nbtv-chan nbtv-sim nbtv-learned nbtv-duplex nbtv-voice RUNTIME DESTINATION "${NBTV_INSTALL_BINDIR}")
 
 # 設計工具：產生寫進核心的常數，平常不需要執行。
 nbtv_add_tool(design_preamble design/design_preamble.cpp)

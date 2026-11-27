@@ -12,6 +12,7 @@
 #include <sys/ioctl.h>
 
 #include "../../../core/include/nbtv/nbtv.h"
+#include "../../../voice/include/nbtv/voice.h"
 
 static inline nbtv_rx_frame *nbtv_shim_frame_alloc(void) { return (nbtv_rx_frame *)calloc(1, sizeof(nbtv_rx_frame)); }
 static inline void nbtv_shim_frame_free(nbtv_rx_frame *frame) { free(frame); }

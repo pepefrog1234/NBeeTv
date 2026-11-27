@@ -8,6 +8,9 @@
 #   NBeeTv-<版本>-windows-ffmpeg-source.tar         Windows 的包裡那個 ffmpeg.exe 的全部原始碼（它以 GPL 發佈）
 # 另外每次執行都留一份 screens-<平台>：桌面 app 在那個平台上不開視窗算出來的畫面（五種語言），用來看字型與版面對不對。
 #
+# 下載包裡的程式都把「同時送語音」的編解碼器（FreeDV RADE V2，-DNBTV_VOICE=ON）編進去了。它要另外取得的三份檔案
+# 由 voice-sources 這個工作先抓好（見那裡的說明）。
+#
 # 什麼時候跑：推到 main、開 PR、手動執行時，下載包留在那一次執行的 Artifacts 裡（7 天）；
 # 推版本標籤（v 開頭，例如 v0.1.0）時，另外把全部的下載包放上 GitHub Releases。
 #
@@ -116,9 +119,42 @@ jobs:
           retention-days: 7
           compression-level: 0
 
+  # 「同時送語音」的編解碼器要另外取得的三份檔案：rade_c 與 Opus 的原始碼、Opus 的模型資料（共約 280 MB）。
+  # 版本、網址與 SHA-256 寫在 voice/cmake/sources.cmake。每次執行只抓一次、核對雜湊值，交給下面六個平台的建置用，
+  # 它們設定時就不必各自再連外面的網站；那個檔沒有改的話直接用上一次抓好的（快取）。
+  voice-sources:
+    name: voice-sources
+    if: ${{ !inputs.reuse_run }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/cache@v6
+        with:
+          path: voice-sources
+          key: voice-sources-${{ hashFiles('voice/cmake/sources.cmake') }}
+
+      # 已經在資料夾裡、雜湊值也對的不會重抓
+      - name: 下載並核對 SHA-256
+        run: |
+          cmake -DOUT=voice-sources -P voice/cmake/fetch_sources.cmake
+          ls -l voice-sources
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: voice-sources
+          path: voice-sources/*
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
   build:
     name: ${{ matrix.target }}
-    needs: ffmpeg-windows
+    needs: [ffmpeg-windows, voice-sources]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
@@ -191,24 +227,33 @@ jobs:
           name: ffmpeg-windows-${{ matrix.ffmpeg_arch }}
           path: ${{ runner.temp }}/ffmpeg-bundle
 
+      # 語音的編解碼器要的三份檔案（上面的 voice-sources 抓好、核對過的）；設定時用 NBTV_VOICE_SOURCES 指過去
+      - name: 拿語音編解碼器的原始碼
+        uses: actions/download-artifact@v8
+        with:
+          name: voice-sources
+          path: ${{ runner.temp }}/voice-sources
+
       # Linux：命令列工具整個靜態連結，不挑發行版與 glibc 的版本；桌面 app 只把 C++ 的執行階段連進去（見 apps/desktop/CMakeLists.txt）。
       # macOS：命令列工具最低支援 macOS 11（NBTV.app 另外設定，見下面）。
       # Windows：C 執行階段靜態連結，使用者不必另外裝 Visual C++ 的可轉散發套件。
       # 桌面 app 用到的 SDL、Dear ImGui、stb 在這一步下載（版本固定，核對 SHA-256）。
+      # 語音的編解碼器（rade_c 與 Opus）也在這一步解開，和專案一起編譯（voice/CMakeLists.txt）。
       - name: 設定
         run: |
+          voice=(-DNBTV_VOICE=ON -DNBTV_VOICE_SOURCES="$RUNNER_TEMP/voice-sources")
           case "$RUNNER_OS" in
             Linux)
               cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DNBTV_INSTALL_FLAT=ON \
                 -DCMAKE_C_COMPILER=gcc-12 -DCMAKE_CXX_COMPILER=g++-12 \
-                -DNBTV_STATIC_TOOLS=ON -DNBTV_BUILD_DESKTOP_APP=ON ;;
+                -DNBTV_STATIC_TOOLS=ON -DNBTV_BUILD_DESKTOP_APP=ON "${voice[@]}" ;;
             macOS)
               cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DNBTV_INSTALL_FLAT=ON \
-                -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 ;;
+                -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 "${voice[@]}" ;;
             Windows)
               cmake -S . -B build -A "${{ matrix.vs_arch }}" -DNBTV_INSTALL_FLAT=ON \
                 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DNBTV_BUILD_DESKTOP_APP=ON \
-                -DNBTV_DESKTOP_BUNDLED_FFMPEG="$RUNNER_TEMP/ffmpeg-bundle" ;;
+                -DNBTV_DESKTOP_BUNDLED_FFMPEG="$RUNNER_TEMP/ffmpeg-bundle" "${voice[@]}" ;;
           esac
 
       - name: 建置
@@ -220,7 +265,8 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           cmake -S . -B build-app -G Ninja -DCMAKE_BUILD_TYPE=Release -DNBTV_BUILD_MACOS_APP=ON \
-            -DNBTV_BUILD_TESTS=OFF -DNBTV_BUILD_TOOLS=OFF -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0
+            -DNBTV_BUILD_TESTS=OFF -DNBTV_BUILD_TOOLS=OFF -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
+            -DNBTV_VOICE=ON -DNBTV_VOICE_SOURCES="$RUNNER_TEMP/voice-sources"
           cmake --build build-app
           app=build-app/apps/macos/NBTV.app
           codesign --verify --deep --strict --verbose=2 "$app"
@@ -256,6 +302,7 @@ jobs:
           mkdir -p "$work"
           cp core/tests/data/cat.ppm "$work/貓.ppm"
           cp core/tests/data/coffee.ppm core/tests/data/rocket.ppm "$work/"
+          cp build/_deps/rade_c-src/input_sample.wav "$work/說話.wav"
           archive="$PWD/dist/$PACKAGE"
           mv models models.hidden
           trap 'mv "$GITHUB_WORKSPACE/models.hidden" "$GITHUB_WORKSPACE/models"' EXIT
@@ -279,6 +326,21 @@ jobs:
           test -s frame_2.ppm
           "$tools/nbtv-sim" --mode 12 --channel poor --snr 10 --frames 8 --image 貓.ppm
           "$tools/nbtv-learned" --mode 13 --snr 10 貓.ppm coffee.ppm
+          # 語音與畫面共用一個 FM 語音通道：一段語音（rade_c 附的）編成訊號、和三張畫面合成一個音檔，
+          # 再分成兩路各自解回來。語音的編解碼器連進了執行檔，它的授權條文要在包裡。
+          "$tools/nbtv-voice" info | tee voice-info.txt
+          grep -q "RADE" voice-info.txt
+          grep -q "rade_c" "$tools/THIRD-PARTY-LICENSES.txt"
+          "$tools/nbtv-voice" encode 說話.wav 語音.iq
+          "$tools/nbtv-tx" --mode 3 --call N0CALL --rate 12000 --out 畫面.wav 貓.ppm coffee.ppm rocket.ppm
+          "$tools/nbtv-duplex" mux --picture 畫面.wav --voice 語音.iq --out 合成.wav
+          "$tools/nbtv-duplex" demux --picture 收到的畫面.wav --voice 收到的語音.iq 合成.wav
+          mkdir 一起送
+          "$tools/nbtv-rx" --json --band-shift 1650.5 --out-dir 一起送 收到的畫面.wav | tee duplex.json
+          grep -q '"callsign":"N0CALL"' duplex.json
+          grep -q '"end":true,"frames":3,"pictures":3' duplex.json
+          "$tools/nbtv-voice" decode 收到的語音.iq 解出的語音.wav | tee voice.txt
+          grep -q "收到「結束」的標記 1 次" voice.txt
 
       # 桌面 app（Windows、Linux）也一樣對著解開的那一份做，都不碰真的音訊裝置與鏡頭：
       #   1. 自我測試：收發的流程、PTT、檔案來源、定時發射、介面的每個按鈕……音訊走 SDL 的「假」驅動（走的是和真的裝置一樣的程式）；
@@ -289,6 +351,7 @@ jobs:
       # Windows 另外檢查包裡附的 ffmpeg.exe：是那種處理器的、app 用的就是它（--version 印出來的路徑），
       # 讀得了各種格式的影片、存得了影片（apps/desktop/ffmpeg/check.sh）。自我測試裡影片檔來源與存影片的項目也不准略過。
       # Linux 的包不附 ffmpeg，用的是機器上 apt 裝的。
+      # 「同時送語音」那一項也不准略過：編解碼器要真的編進去了，發射、接收、開關都走一遍。
       # 視窗程式在 Windows 上沒有主控台可以印字，所以結果一律另外寫進檔案（--report）再印出來。
       - name: 解開下載包，跑桌面 app 的檢查
         if: runner.os != 'macOS'
@@ -304,15 +367,16 @@ jobs:
             cmake -E tar xf "$archive.zip"
             exe=.exe
             window=
-            require=cjk,fonts,audio,ffmpeg
+            require=cjk,fonts,audio,ffmpeg,voice
           else
             tar -xzf "$archive.tar.gz"
             exe=
             window="xvfb-run -a"
-            require=cjk,fonts,audio,ffmpeg,hamlib
+            require=cjk,fonts,audio,ffmpeg,hamlib,voice
           fi
           gui="./$PACKAGE/nbtv-gui$exe"
           test -s "./$PACKAGE/THIRD-PARTY-LICENSES.txt"
+          grep -q "rade_c" "./$PACKAGE/THIRD-PARTY-LICENSES.txt"
           file "$gui"
           file "$gui" | grep -i -E -q "${{ matrix.gui_says }}"
           if [ "$RUNNER_OS" = Linux ]; then
@@ -364,7 +428,8 @@ jobs:
           retention-days: 7
 
       # NBTV.app 也一樣：把壓縮檔解開到別的目錄，確認簽章還在，再跑 app 自己的檢查——模型、核心收發、存檔、
-      # 影片來源、定時發射、翻譯……都不碰音訊裝置與鏡頭。
+      # 影片來源、定時發射、翻譯……都不碰音訊裝置與鏡頭。「同時送語音」那一項要是「通過」（沒有把編解碼器編進去的話
+      # 會是「略過」），它用到的兩份程式的授權條文要在 app 裡。
       - name: 解開 NBTV.app，跑它的自我測試
         if: runner.os == 'macOS'
         run: |
@@ -372,7 +437,10 @@ jobs:
           mkdir -p "$work"
           ditto -x -k "dist/$PACKAGE-app.zip" "$work"
           codesign --verify --deep --strict --verbose=2 "$work/NBTV.app"
-          "$work/NBTV.app/Contents/MacOS/NBTV" --selftest --no-devices
+          "$work/NBTV.app/Contents/MacOS/NBTV" --selftest --no-devices 2>&1 | tee "$work/selftest.txt"
+          grep -q "同時送語音：發射、接收、開關：通過" "$work/selftest.txt"
+          test -s "$work/NBTV.app/Contents/Resources/rade_c-LICENSE.txt"
+          test -s "$work/NBTV.app/Contents/Resources/opus-COPYING.txt"
 
       - uses: actions/upload-artifact@v7
         with:

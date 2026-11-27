@@ -48,6 +48,7 @@ struct SidePanel: View {
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
                 .lineHeight()
+            if Voice.available { voiceRow }
             Spacer(minLength: 4)
             volumeRow
             transmitButton
@@ -274,6 +275,53 @@ struct SidePanel: View {
     private var modeNote: String {
         if model.txPhase != .idle { return L("發射中不能更換模式；來源可以隨時切換，下一張生效") }
         return Modes.find(model.settings.txModeID)?.summary ?? ""
+    }
+
+    // MARK: 同時送語音
+
+    /// 「同時送語音」的開關與版面，下面一行說明現在的狀況。app 裡有語音的編解碼器才有這一列；
+    /// 只對 FM 用的模式有作用，發射中不能改（這一次怎麼送，按下發射時就定了）。
+    private var voiceRow: some View {
+        let settings = model.settings
+        let usable = Voice.supports(Modes.find(settings.txModeID))
+        let idle = model.txPhase == .idle
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                CheckBox(isOn: Binding(get: { settings.voiceEnabled }, set: { settings.voiceEnabled = $0 }), title: L("同時送語音"))
+                    .disabled(!idle)
+                    .help(L("發射時把麥克風的語音和畫面一起送，接收時也聽得到對方這樣送的語音。只有 FM 用的模式可以；畫面會放慢，每張比較久。語音用的是 FreeDV 的 RADE V2，還是測試版"))
+                Spacer(minLength: 0)
+                SegmentedControl(options: [(VoiceLayout.standard, L("標準")), (VoiceLayout.narrow, L("窄"))],
+                                 selection: Binding(get: { settings.voiceLayout }, set: { settings.voiceLayout = $0 }),
+                                 horizontalPadding: 9, fillWidth: false)
+                    .disabled(!idle || !settings.voiceEnabled)
+                    .opacity(settings.voiceEnabled ? 1 : 0.45)
+                    .accessibilityLabel(L("和語音一起送時的版面"))
+                    .help(L("標準：畫面放慢 1.5 倍，佔到 2866 Hz。窄：放慢 1.8 倍，只佔到 2611 Hz，電台的音訊上緣比較窄時用。收發兩邊要選一樣的"))
+            }
+            .opacity(usable || settings.voiceEnabled ? 1 : 0.6)
+            if settings.voiceEnabled {
+                Text(voiceNote)
+                    .font(Theme.ui(12))
+                    .foregroundColor(Theme.secondary)
+                    .lineSpacing(3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .lineHeight()
+            }
+        }
+    }
+
+    /// 開關下面的那一行：正在和語音一起送、正在收對方的語音，或現在按下發射會怎麼送。
+    private var voiceNote: String {
+        let settings = model.settings
+        if model.voiceTxOn { return model.voiceTxLevelDb.map { L("語音發射中 · 麥克風 %@", AppModel.dbText($0)) } ?? L("語音發射中") }
+        if model.isOnAir { return L("這一次發射沒有語音") }
+        if model.voiceRxSynced {
+            return model.voiceRxSnrDb.map { L("收到語音 · 訊雜比 %@", AppModel.snrText($0)) } ?? L("收到語音")
+        }
+        guard let mode = Modes.find(settings.txModeID), Voice.supports(mode) else { return L("這個模式不能同時送語音：請選 FM 用的模式") }
+        return L("和語音一起送時每張 %@（畫面放慢 %@ 倍）", L("%.2f 秒", mode.frameSeconds * settings.voiceLayout.slowFactor),
+                 String(format: "%.1f", settings.voiceLayout.slowFactor))
     }
 
     /// 輸出音量：送去電台的聲音大小。放在發射鈕上面，發射中可以一邊看電台的 ALC 一邊調，改了立刻生效。

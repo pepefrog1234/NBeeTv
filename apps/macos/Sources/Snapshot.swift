@@ -80,6 +80,11 @@ enum SnapshotRunner {
         let idle = makeIdleModel(rocket: rocket, workDirectory: directory)
         idle.clock = { time(14, 32, 7) }   // 示範的鐘點：下一次是 14:45
         if ProcessInfo.processInfo.environment["NBTV_SNAPSHOT_SCHEDULE"] != nil { idle.setScheduleArmed(true) }
+        // 開發用：NBTV_SNAPSHOT_VOICE=1 時「同時送語音」是勾著的（換成 FM 用的模式 5，右側欄多一行說明）；app 裡要有語音的編解碼器
+        if environment["NBTV_SNAPSHOT_VOICE"] != nil, Voice.available, let fm = Modes.find(5) {
+            idle.settings.txModeID = fm.id
+            idle.settings.voiceEnabled = true
+        }
         render(MainWindowView(placeholderControls: true).environmentObject(idle), width: 1280, height: 840,
                to: directory.appendingPathComponent("3-idle-video.png"))
 

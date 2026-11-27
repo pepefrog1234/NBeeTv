@@ -58,6 +58,14 @@ struct Settings {
     bool canvas_enabled = false;
     std::string canvas_text;
     CanvasPosition canvas_position = CanvasPosition::top;
+    /// 同時送語音（程式裡有語音的編解碼器才有，而且只對 FM 用的模式有作用）：發射時把麥克風的語音和畫面一起送，
+    /// 接收時也收對方這樣送的訊號，語音從喇叭播出來。預設關著。
+    bool voice_enabled = false;
+    /// 和語音一起送時的版面：標準，或給音訊上緣比較窄的電台用的那一種（畫面再慢一點）
+    VoiceLayout voice_layout = VoiceLayout::standard;
+    /// 語音用的麥克風與喇叭的名稱；空字串表示用系統預設
+    std::string microphone;
+    std::string speaker;
     /// 介面的語言；空字串表示跟著系統
     std::string language;
     /// 上次的視窗大小（0：用預設的）

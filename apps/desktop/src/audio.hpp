@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -63,6 +64,23 @@ public:
     std::function<void(const std::vector<float>&)> simulated_sink;
     std::optional<double> simulated_stall_after;
 
+    /// 佇列裡至少有這麼多個取樣才開始播（剛開始、或中途空掉之後）；0 是有多少播多少。
+    /// 一小段一小段送來的即時聲音（解出來的語音）用它先墊一點，才不會斷斷續續。要在 start 之前設定。
+    std::size_t start_level = 0;
+
+    // 語音＋畫面：語音那一半另外排一條佇列，播放時一個取樣一個取樣加到主佇列的那一半上。
+    // 畫面可以提早好幾秒排好，語音到要送的那一刻才編得出來，所以兩者不能排在同一條佇列裡。
+    /// 語音的佇列墊到這麼多個取樣才開始加（語音是一段一段編出來的）；中途空掉之後也一樣。要在 start 之前設定。
+    std::size_t voice_start_level = 0;
+    /// 把實際交給裝置的取樣（兩半加起來、還沒乘輸出音量）留一份，給發射時的頻譜顯示用（take_rendered）。要在 start 之前設定。
+    bool keep_rendered = false;
+    /// 把語音那一半排進它自己的佇列；放不下的部分丟掉（語音晚了就不送，不能愈積愈多）。
+    void enqueue_voice(const float* samples, std::size_t count);
+    /// 語音的佇列裡還有幾個取樣沒有播。
+    std::int64_t voice_queued_samples() const;
+    /// 取出從上次到現在實際交給裝置的取樣（keep_rendered 打開時才有）。
+    std::vector<float> take_rendered();
+
     /// 開始輸出：佇列與計數都清掉。simulated 時 device 不用。
     bool start(SDL_AudioDeviceID device, std::string* error);
     void stop();
@@ -94,6 +112,12 @@ private:
     std::int64_t rendered_ = 0;
     std::int64_t silent_ = 0;
     int underruns_ = 0;
+    bool flowing_ = false;            // 主佇列已經墊夠、正在播
+    std::size_t waited_ = 0;          // 佇列裡有東西、但還沒墊夠，已經等了幾個取樣
+    std::deque<float> voice_;         // 語音那一半
+    bool voice_flowing_ = false;
+    std::size_t voice_waited_ = 0;
+    std::vector<float> rendered_tap_; // keep_rendered：交給裝置的取樣
     SDL_AudioStream* stream_ = nullptr;
     std::vector<float> scratch_;
     std::thread simulator_;

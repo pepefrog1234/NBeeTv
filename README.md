@@ -61,6 +61,12 @@ Windows、Linux 的 app 都可以收發；只在模擬裡驗證過，還沒有�
 比模式 5 低 2.7 dB，但比同樣快的 96×72 畫面放大來看高約 3 dB。模式 4 的運算量約是其他大畫面模式的四倍（M4 Max 上解一張約 0.13 秒），
 核心少的慢電腦可能跟不上。同樣只能用在 FM，也只在模擬裡驗證過。
 
+FM 用的這幾個模式（3–7 與 15）還可以**一邊送畫面、一邊送即時的語音**（實驗中）：把 FM 語音通道的音訊頻帶切成兩段，
+語音在 360–1220 Hz，用 [FreeDV](https://freedv.org) 的 RADE V2；畫面放慢 1.5 倍（或 1.8 倍）、搬到 1335 Hz 以上，每張因此久一些。
+macOS 的 app 與 Windows、Linux 的 app 在右側欄有「同時送語音」的開關（0.2.1 之後的版本），收發兩邊都要打開、選一樣的版面；
+關著的時候和以前完全一樣。只在模擬裡驗證過，還沒有經過真的電台；RADE V2 本身也還是測試版，FreeDV 還不建議在空中使用。
+細節見[技術說明](docs/TECHNICAL.md#語音與畫面共用-fm-語音通道實驗中)。
+
 ## 下載
 
 到 [Releases](https://github.com/pepefrog1234/NBeeTv/releases) 下載自己平台的檔案。每一個都是在那個平台、那種處理器的機器上建置並跑過測試的。
@@ -190,10 +196,15 @@ cmake -S . -B build-desktop -DNBTV_BUILD_DESKTOP_APP=ON -DNBTV_BUILD_TESTS=OFF
 cmake --build build-desktop --config Release --target nbtv-gui
 ```
 
+「同時送語音」用的語音編解碼器預設不編進來（0.2.1 之後的下載包裡的程式有）。要的話，在上面的 `cmake -S …` 那一行加上 `-DNBTV_VOICE=ON`：
+設定時會另外下載 [rade_c](https://github.com/freedv/rade_c) 與 [Opus](https://github.com/xiph/opus) 的原始碼、Opus 的模型資料
+（共約 280 MB，都核對 SHA-256）一起編，不需要另外安裝什麼。
+
 | 路徑 | 內容 |
 | --- | --- |
 | `core/` | 平台無關的 C++20 核心函式庫：OFDM 收發、同步、通道估測、類神經網路的推論。對外只有一個 C API（`core/include/nbtv/nbtv.h`） |
 | `sim/` | 短波通道模擬 |
+| `voice/` | 即時語音的編解碼器（FreeDV 的 RADE V2）的包裝，給「同時送語音」用；選用 |
 | `tools/` | 命令列工具；`tools/learned/` 是模型的訓練與匯出程式（Python、PyTorch） |
 | `models/` | 模型的權重檔 |
 | `apps/macos/` | macOS 的 app（SwiftUI） |
@@ -205,6 +216,7 @@ cmake --build build-desktop --config Release --target nbtv-gui
 - 文字與字幕會被抹糊，小塊的鮮豔顏色會變淡。
 - 幀與呼號沒有驗證身分的機制，誰都可以用任何呼號送出畫面。
 - Windows 與 Linux 的 app 是新的，只有自動檢查，還沒有接著真的電台、音效卡、鏡頭與序列埠驗證過。
+- 「同時送語音」只在模擬裡驗證過。RADE V2 還是測試版，它的波形之後可能再改，改了之後新舊版本互相聽不到。
 - 命令列工具的說明與下面的詳細文件目前只有繁體中文。
 
 ## 文件
@@ -222,3 +234,6 @@ cmake --build build-desktop --config Release --target nbtv-gui
 
 模型的權重（`models/`）是用 [COCO](https://cocodataset.org/) val2017 的照片訓練的。那些照片的著作權屬於各拍攝者，各自採用不同的創用 CC 授權，其中有些限非商業使用。
 權重隨專案一起提供；要用在業餘無線電實驗以外的用途之前，請自行確認。
+
+0.2.1 之後的下載包裡的程式另外連結了 [rade_c](https://github.com/freedv/rade_c)（BSD 兩條款）與 [Opus](https://github.com/xiph/opus)（BSD 三條款），給「同時送語音」用。
+它們的授權條文在包裡的 `THIRD-PARTY-LICENSES.txt`（macOS 的 app 在 app 的 `Resources` 裡），原始碼庫裡在 [voice/LICENSES/](voice/LICENSES/)。

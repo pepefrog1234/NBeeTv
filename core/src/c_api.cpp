@@ -2,14 +2,18 @@
 #include "nbtv/nbtv.h"
 
 #include <algorithm>
+#include <climits>
+#include <cmath>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
 
 #include "callsign.hpp"
 #include "dsp.hpp"
+#include "duplex.hpp"
 #include "learned_codec.hpp"
 #include "learned_kernels.hpp"
 #include "learned_merge.hpp"
@@ -27,6 +31,10 @@ static_assert(NBTV_IMAGE_MAX_RGB_BYTES == nbtv::kMaxImageRgbBytes);
 static_assert(NBTV_IMAGE_MAX_WIDTH == nbtv::kMaxImageWidth && NBTV_IMAGE_MAX_HEIGHT == nbtv::kMaxImageHeight);
 static_assert(NBTV_CALLSIGN_MAX == nbtv::kCallsignMaxChars);
 static_assert(NBTV_SPECTRUM_BINS == nbtv::kSpectrumBins);
+static_assert(NBTV_DUPLEX_STANDARD == static_cast<int>(nbtv::DuplexLayout::Standard) && NBTV_DUPLEX_NARROW == static_cast<int>(nbtv::DuplexLayout::Narrow));
+static_assert(NBTV_DUPLEX_RATE == nbtv::kDuplexRate && NBTV_DUPLEX_PICTURE_RATE == nbtv::kDuplexPictureRate && NBTV_DUPLEX_VOICE_RATE == nbtv::kDuplexVoiceRate);
+static_assert(NBTV_DUPLEX_PICTURE_RATE == nbtv::kSampleRate);
+static_assert(NBTV_DUPLEX_OFF != NBTV_DUPLEX_STANDARD && NBTV_DUPLEX_OFF != NBTV_DUPLEX_NARROW);
 
 namespace {
 
@@ -51,6 +59,8 @@ void fill(const Mode& m, nbtv_mode_info* out) {
 
 constexpr bool valid_rate(int sample_rate) { return sample_rate == 12000 || sample_rate == 48000; }
 
+constexpr bool valid_layout(int layout) { return layout == NBTV_DUPLEX_STANDARD || layout == NBTV_DUPLEX_NARROW; }
+
 // 這個模式的一張畫面
 std::span<const std::uint8_t> rgb_span(const std::uint8_t* rgb, const Mode& mode) {
     return {rgb, static_cast<std::size_t>(mode.image_rgb_bytes())};
@@ -71,6 +81,8 @@ struct nbtv_tx {
     const Mode* mode = &nbtv::kModes.front();
     nbtv::Transmitter tx;
     nbtv::Interpolator4 up;
+    // 語音與畫面共用 FM 語音通道（nbtv_tx_set_duplex）：打開時取代上面那個重取樣，只推畫面、不推語音
+    std::optional<nbtv::DuplexTx> duplex;
     bool need_flush = false;
     std::vector<float> last_values;  // 最近編的那一張畫面的通道值（nbtv_tx_last_values）；沒有、或那一幀取消了就是空的
 
@@ -79,6 +91,7 @@ struct nbtv_tx {
         bool valid = false;
         int sequence = 0;
         nbtv::Interpolator4 up;
+        std::optional<nbtv::DuplexTx> duplex;
         bool need_flush = false;
     } undo;
 
@@ -87,10 +100,15 @@ struct nbtv_tx {
         undo.valid = true;
         undo.sequence = tx.sequence();
         undo.up = up;
+        undo.duplex = duplex;
         undo.need_flush = need_flush;
     }
 
-    int out_samples(std::size_t n) const { return static_cast<int>(n) * (rate / nbtv::kSampleRate); }
+    // 12 kHz 的 n 個取樣，送出去時最多變成幾個
+    int out_samples(std::size_t n) const {
+        if (duplex) return static_cast<int>(std::ceil(static_cast<double>(n) * 4.0 * nbtv::duplex_slow_factor(duplex->layout()))) + 8;
+        return static_cast<int>(n) * (rate / nbtv::kSampleRate);
+    }
 
     // 12 kHz 的一幀 → 輸出取樣率，寫進 samples
     int deliver(const std::vector<float>& frame, float* samples, int capacity) {
@@ -98,11 +116,16 @@ struct nbtv_tx {
             std::copy(frame.begin(), frame.end(), samples);
             return static_cast<int>(frame.size());
         }
+        need_flush = true;
+        if (duplex) {
+            duplex->push_picture(frame);
+            const int n = std::min(static_cast<int>(duplex->pending_picture()), capacity);
+            duplex->read(std::span<float>(samples, static_cast<std::size_t>(n)));
+            return n;
+        }
         std::vector<float> out;
         out.reserve(frame.size() * 4);
         up.process(frame, out);
-        need_flush = true;
-        (void)capacity;
         std::copy(out.begin(), out.end(), samples);
         return static_cast<int>(out.size());
     }
@@ -112,8 +135,23 @@ struct nbtv_rx {
     int rate = nbtv::kSampleRate;
     nbtv::Receiver rx;
     nbtv::Decimator4 down;
+    // 語音與畫面共用 FM 語音通道（nbtv_rx_set_duplex）：打開時取代上面那個重取樣，只分出畫面那一路
+    std::optional<nbtv::DuplexRx> duplex;
     std::vector<float> clean;    // 重取樣之前先整理過的取樣（非有限值換成 0，見 dsp.hpp 的 clean_sample）
     std::vector<float> scratch;
+};
+
+struct nbtv_duplex_tx {
+    explicit nbtv_duplex_tx(nbtv::DuplexLayout layout) : tx(layout) {}
+    nbtv::DuplexTx tx;
+    std::vector<float> clean;
+    std::vector<nbtv::cf> voice;
+};
+
+struct nbtv_duplex_rx {
+    explicit nbtv_duplex_rx(nbtv::DuplexLayout layout) : rx(layout) {}
+    nbtv::DuplexRx rx;
+    std::vector<nbtv::cf> voice;
 };
 
 struct nbtv_spectrum {
@@ -281,15 +319,44 @@ int nbtv_tx_discard_last(nbtv_tx* tx) {
     if (tx == nullptr || !tx->undo.valid) return -1;
     tx->tx.set_sequence(tx->undo.sequence);
     tx->up = tx->undo.up;
+    tx->duplex = tx->undo.duplex;
     tx->need_flush = tx->undo.need_flush;
     tx->undo.valid = false;
     tx->last_values.clear();  // 那一幀不算數了，它的通道值也不再給
     return 0;
 }
 
+int nbtv_tx_tail_samples(const nbtv_tx* tx) {
+    if (tx == nullptr) return 0;
+    return tx->duplex ? 2048 : 64;
+}
+
+int nbtv_tx_set_duplex(nbtv_tx* tx, int layout, float voice_gain_db) {
+    if (tx == nullptr) return -1;
+    if (layout == NBTV_DUPLEX_OFF) {
+        tx->duplex.reset();
+    } else {
+        if (!valid_layout(layout) || tx->rate != NBTV_DUPLEX_RATE) return -1;
+        tx->duplex.emplace(static_cast<nbtv::DuplexLayout>(layout));
+        tx->duplex->set_voice_gain_db(voice_gain_db);
+    }
+    tx->up.reset();
+    tx->need_flush = false;
+    tx->undo.valid = false;
+    return 0;
+}
+
 int nbtv_tx_finish(nbtv_tx* tx, float* samples, int capacity) {
     if (tx != nullptr) tx->undo.valid = false;
     if (tx == nullptr || samples == nullptr || !tx->need_flush) return 0;
+    if (tx->duplex) {
+        tx->duplex->flush_picture();
+        const int n = std::min(static_cast<int>(tx->duplex->pending_picture()), capacity);
+        tx->duplex->read(std::span<float>(samples, static_cast<std::size_t>(n)));
+        tx->duplex->reset();
+        tx->need_flush = false;
+        return n;
+    }
     // 推入足夠的 0，把濾波器裡的尾巴擠出來
     const std::size_t zeros = static_cast<std::size_t>(tx->up.delay_samples() + 3) / 4 + 1;
     std::vector<float> out;
@@ -316,6 +383,23 @@ void nbtv_rx_reset(nbtv_rx* rx) {
     if (rx == nullptr) return;
     rx->rx.reset();
     rx->down.reset();
+    if (rx->duplex) rx->duplex->reset();
+}
+
+int nbtv_rx_set_duplex(nbtv_rx* rx, int layout) {
+    if (rx == nullptr) return -1;
+    if (layout == NBTV_DUPLEX_OFF) {
+        rx->duplex.reset();
+        rx->rx.tuning().band_shift_hz = 0.0;
+    } else {
+        if (!valid_layout(layout) || rx->rate != NBTV_DUPLEX_RATE) return -1;
+        rx->duplex.emplace(static_cast<nbtv::DuplexLayout>(layout));
+        rx->duplex->enable(true, false);
+        rx->rx.tuning().band_shift_hz = nbtv::duplex_band_shift_hz(static_cast<nbtv::DuplexLayout>(layout));
+    }
+    rx->rx.reset();
+    rx->down.reset();
+    return 0;
 }
 
 void nbtv_rx_set_model(nbtv_rx* rx, const nbtv_model* model) {
@@ -334,10 +418,20 @@ void nbtv_rx_set_decode_pictures(nbtv_rx* rx, int enabled) {
     if (rx != nullptr) rx->rx.tuning().skip_pictures = enabled == 0;
 }
 
+void nbtv_rx_set_band_shift_hz(nbtv_rx* rx, double hz) {
+    if (rx != nullptr) rx->rx.tuning().band_shift_hz = std::isfinite(hz) ? hz : 0.0;
+}
+
 void nbtv_rx_push(nbtv_rx* rx, const float* samples, int count) {
     if (rx == nullptr || samples == nullptr || count <= 0) return;
     const std::span<const float> in(samples, static_cast<std::size_t>(count));
-    if (rx->rate == nbtv::kSampleRate) {
+    if (rx->duplex) {
+        // 先分出畫面那一段（DuplexRx 自己會整理壞掉的取樣），還原成 12 kHz 的取樣
+        rx->duplex->push(in);
+        rx->scratch.resize(rx->duplex->available_picture());
+        rx->duplex->read_picture(rx->scratch);
+        rx->rx.push(rx->scratch);
+    } else if (rx->rate == nbtv::kSampleRate) {
         rx->rx.push(in);
     } else {
         // 先整理再重取樣：不然一個壞掉的取樣會被重取樣濾波器抹開成一小段
@@ -425,3 +519,104 @@ int nbtv_spectrum_poll(nbtv_spectrum* sp, float* db) {
 }
 
 }  // extern "C"
+
+/* ---- 語音與畫面共用 FM 語音通道 ---- */
+
+double nbtv_duplex_slow_factor(int layout) { return valid_layout(layout) ? nbtv::duplex_slow_factor(static_cast<nbtv::DuplexLayout>(layout)) : 0.0; }
+
+double nbtv_duplex_picture_low_hz(int layout) { return valid_layout(layout) ? nbtv::kPictureLow : 0.0; }
+
+double nbtv_duplex_picture_high_hz(int layout) { return valid_layout(layout) ? nbtv::duplex_picture_high(static_cast<nbtv::DuplexLayout>(layout)) : 0.0; }
+
+double nbtv_duplex_voice_low_hz(int layout) { return valid_layout(layout) ? nbtv::kVoiceCentre - nbtv::kVoiceHalfBand : 0.0; }
+
+double nbtv_duplex_voice_high_hz(int layout) { return valid_layout(layout) ? nbtv::kVoiceCentre + nbtv::kVoiceHalfBand : 0.0; }
+
+double nbtv_duplex_band_shift_hz(int layout) { return valid_layout(layout) ? nbtv::duplex_band_shift_hz(static_cast<nbtv::DuplexLayout>(layout)) : 0.0; }
+
+nbtv_duplex_tx* nbtv_duplex_tx_create(int layout) {
+    return valid_layout(layout) ? new nbtv_duplex_tx(static_cast<nbtv::DuplexLayout>(layout)) : nullptr;
+}
+
+void nbtv_duplex_tx_destroy(nbtv_duplex_tx* tx) { delete tx; }
+
+void nbtv_duplex_tx_reset(nbtv_duplex_tx* tx) {
+    if (tx != nullptr) tx->tx.reset();
+}
+
+void nbtv_duplex_tx_set_voice_gain_db(nbtv_duplex_tx* tx, float db) {
+    if (tx != nullptr) tx->tx.set_voice_gain_db(db);
+}
+
+void nbtv_duplex_tx_push_picture(nbtv_duplex_tx* tx, const float* samples, int count) {
+    if (tx == nullptr || samples == nullptr || count <= 0) return;
+    nbtv::clean_samples(std::span<const float>(samples, static_cast<std::size_t>(count)), tx->clean);
+    tx->tx.push_picture(tx->clean);
+}
+
+void nbtv_duplex_tx_push_voice(nbtv_duplex_tx* tx, const float* iq, int count) {
+    if (tx == nullptr || iq == nullptr || count <= 0) return;
+    tx->voice.resize(static_cast<std::size_t>(count));
+    for (std::size_t i = 0; i < tx->voice.size(); ++i) tx->voice[i] = nbtv::cf(nbtv::clean_sample(iq[2 * i]), nbtv::clean_sample(iq[2 * i + 1]));
+    tx->tx.push_voice(tx->voice);
+}
+
+int nbtv_duplex_tx_pending_picture(const nbtv_duplex_tx* tx) {
+    return tx != nullptr ? static_cast<int>(std::min<std::size_t>(tx->tx.pending_picture(), INT_MAX)) : 0;
+}
+
+int nbtv_duplex_tx_pending_voice(const nbtv_duplex_tx* tx) {
+    return tx != nullptr ? static_cast<int>(std::min<std::size_t>(tx->tx.pending_voice(), INT_MAX)) : 0;
+}
+
+void nbtv_duplex_tx_read(nbtv_duplex_tx* tx, float* samples, int count) {
+    if (samples == nullptr || count <= 0) return;
+    if (tx == nullptr) {
+        std::fill_n(samples, count, 0.0f);
+        return;
+    }
+    tx->tx.read(std::span<float>(samples, static_cast<std::size_t>(count)));
+}
+
+nbtv_duplex_rx* nbtv_duplex_rx_create(int layout) {
+    return valid_layout(layout) ? new nbtv_duplex_rx(static_cast<nbtv::DuplexLayout>(layout)) : nullptr;
+}
+
+void nbtv_duplex_rx_destroy(nbtv_duplex_rx* rx) { delete rx; }
+
+void nbtv_duplex_rx_reset(nbtv_duplex_rx* rx) {
+    if (rx != nullptr) rx->rx.reset();
+}
+
+void nbtv_duplex_rx_enable(nbtv_duplex_rx* rx, int picture, int voice) {
+    if (rx != nullptr) rx->rx.enable(picture != 0, voice != 0);
+}
+
+void nbtv_duplex_rx_push(nbtv_duplex_rx* rx, const float* samples, int count) {
+    if (rx == nullptr || samples == nullptr || count <= 0) return;
+    rx->rx.push(std::span<const float>(samples, static_cast<std::size_t>(count)));
+}
+
+int nbtv_duplex_rx_available_picture(const nbtv_duplex_rx* rx) {
+    return rx != nullptr ? static_cast<int>(std::min<std::size_t>(rx->rx.available_picture(), INT_MAX)) : 0;
+}
+
+int nbtv_duplex_rx_available_voice(const nbtv_duplex_rx* rx) {
+    return rx != nullptr ? static_cast<int>(std::min<std::size_t>(rx->rx.available_voice(), INT_MAX)) : 0;
+}
+
+int nbtv_duplex_rx_read_picture(nbtv_duplex_rx* rx, float* samples, int capacity) {
+    if (rx == nullptr || samples == nullptr || capacity <= 0) return 0;
+    return static_cast<int>(rx->rx.read_picture(std::span<float>(samples, static_cast<std::size_t>(capacity))));
+}
+
+int nbtv_duplex_rx_read_voice(nbtv_duplex_rx* rx, float* iq, int capacity) {
+    if (rx == nullptr || iq == nullptr || capacity <= 0) return 0;
+    rx->voice.resize(static_cast<std::size_t>(capacity));
+    const std::size_t count = rx->rx.read_voice(rx->voice);
+    for (std::size_t i = 0; i < count; ++i) {
+        iq[2 * i] = rx->voice[i].real();
+        iq[2 * i + 1] = rx->voice[i].imag();
+    }
+    return static_cast<int>(count);
+}

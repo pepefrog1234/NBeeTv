@@ -49,7 +49,8 @@
 | `core/src/` | 核心的實作：OFDM 收發、同步、通道估測、幀的標頭、類神經網路的推論與幀的編解碼。 |
 | `core/tests/` | 單元測試與端對端測試。`data/` 是三張 96×72 的測試圖（模式 15 的測試把它們每個像素重複兩次放大成 192×144），以及各個模型的參考答案。 |
 | `sim/` | 短波通道模擬（Watterson 衰落、雜訊、頻偏、取樣時脈誤差），測試與工具共用。 |
-| `tools/` | 命令列工具：`nbtv-tx`、`nbtv-rx`、`nbtv-chan`、`nbtv-sim`、`nbtv-learned`。`design/` 是產生核心常數用的設計工具，`learned/` 是模型的訓練與匯出程式（Python）。 |
+| `voice/` | 即時語音的編解碼器（FreeDV 的 RADE V2）的包裝，給「語音與畫面共用 FM 語音通道」用。選用：預設只有空殼，`-DNBTV_VOICE=ON` 才編進來（見那一節）。 |
+| `tools/` | 命令列工具：`nbtv-tx`、`nbtv-rx`、`nbtv-chan`、`nbtv-sim`、`nbtv-learned`、`nbtv-duplex`、`nbtv-voice`。`design/` 是產生核心常數用的設計工具，`learned/` 是模型的訓練與匯出程式（Python）。 |
 | `models/` | 模型的權重檔，每個模式一份，以模型訓練完成的日期命名（年月日-當天第幾個，例如 `261123-1.bin`）：模式 11、12、15 的各約 11.8 MB，模式 13、14 的各約 46 MB。另有接收端「合併最近幾幀」用的小網路的權重，每個畫面模型各配一份（各不到 1 MB）。 |
 | `apps/macos/` | macOS 外殼（SwiftUI）。 |
 | `apps/desktop/` | Windows 與 Linux 的桌面 app `nbtv-gui`（C++、SDL 3、Dear ImGui）：版面與收發流程照 macOS 外殼。見 [apps/desktop/README.md](../apps/desktop/README.md)。 |
@@ -71,7 +72,7 @@ ctest --test-dir build --output-on-failure
 用 Visual Studio 的產生器時，建置與測試要指定組態：`cmake --build build --config Release`、`ctest --test-dir build -C Release`，
 工具在 `build/tools/Release/`。
 
-**安裝與打包**：`cmake --install build --prefix <目錄>` 把五個命令列工具裝到 `bin/`、權重檔裝到 `share/nbtv/models/`。
+**安裝與打包**：`cmake --install build --prefix <目錄>` 把命令列工具裝到 `bin/`、權重檔裝到 `share/nbtv/models/`。
 設定時加上 `-DNBTV_INSTALL_FLAT=ON` 則全部放在同一層（執行檔旁邊就是 `models/`），整個目錄可以直接打包給別人；
 GitHub 上的下載包就是這樣做的（`.github/workflows/build.yml`：Linux 的命令列工具整個靜態連結（`-DNBTV_STATIC_TOOLS=ON`），Windows 靜態連結 C 執行階段；
 Windows 與 Linux 的包裡另外有桌面 app；Windows 的包還附了從原始碼建置的 `ffmpeg.exe`，見 [apps/desktop/README.md](../apps/desktop/README.md#windows-的下載包附的-ffmpeg)）。
@@ -390,6 +391,104 @@ VHF／UHF 的 FM 語音通道和短波很不一樣：音量設對的話，音訊
 **限制**：同模式 5、6、7（只在模擬裡驗證過、不能有頻偏、禁不起短波那種衰落、沒有配「合併最近幾幀」用的權重）。
 兩個模型怎麼來的見 [tools/learned/README.md](../tools/learned/README.md)。
 
+### 語音與畫面共用 FM 語音通道（實驗中）
+
+一邊送畫面、一邊送即時的語音，兩者擠在同一個 FM 語音通道裡。做法是把通道的音訊頻帶切成兩段：
+
+| | 頻率 | 內容 |
+| --- | --- | --- |
+| 語音 | 360–1220 Hz | [FreeDV](https://freedv.org) 的 RADE V2（類神經網路的語音編解碼加數據機，約 860 Hz 寬），整段移到中心 790 Hz、濾掉頻帶外的部分 |
+| 畫面 | 1335 Hz 起 | 原來的數據機訊號**放慢播放**（頻寬跟著變窄）再往上移。標準版面放慢 1.5 倍，佔到 2866 Hz；窄版面放慢 1.8 倍，只佔到 2611 Hz |
+
+數據機、幀的格式、模型都沒有改，任何模式都可以這樣送（app 只對 FM 用的模式開放）；代價是每一張在空中的時間變成 1.5 或 1.8 倍：
+
+| 模式 | 平常 | 標準版面（1.5 倍） | 窄版面（1.8 倍） |
+| --- | --- | --- | --- |
+| 3（96×72） | 0.67 秒 | 1.00 秒 | 1.20 秒 |
+| 4 | 1.01 秒 | 1.52 秒 | 1.82 秒 |
+| 5 | 2.29 秒 | 3.44 秒 | 4.13 秒 |
+| 15 | 2.72 秒 | 4.08 秒 | 4.90 秒 |
+| 6 | 2.88 秒 | 4.32 秒 | 5.18 秒 |
+| 7 | 4.43 秒 | 6.64 秒 | 7.97 秒 |
+
+**這種用法只適合 FM**：兩段都是照絕對的音訊頻率放的，通道不能有頻偏，通帶也要夠平。
+
+**核心裡的部分**（`core/src/duplex.hpp`，C API 是 `nbtv_duplex_*`）只做合成與分離：重取樣、搬頻、濾波，不含語音的編解碼器。
+發射端把畫面搬到它的頻段、把語音的訊號（8 kHz 的複數、中心 1500 Hz，RADE V2 給的就是這種格式）搬到它的頻段，兩者相加；
+接收端反過來，畫面那一段還原成 12 kHz 的取樣交給原來的接收機，語音那一段還原成語音解碼器要的格式。
+兩路預設功率相同（語音可以調大調小，`nbtv_duplex_tx_set_voice_gain_db`），整體的大小由「兩路的峰值碰在一起也不超過滿刻度」決定，
+所以合成之後不會削波；畫面分到的功率是單獨送的一半。兩個頻段之間留了 115 Hz 的空隙給濾波器的過渡帶，
+只有語音時漏到畫面那一路的不到 −58 dB，只有畫面時漏到語音那一路的約 −43 dB（落在語音最外側的載波之外）。
+
+即時收發時另外有兩個開關，讓外殼原來排幀、收尾、取消的流程不必改：`nbtv_tx_set_duplex` 讓發射機直接給「畫面那一半」
+（放慢、搬好、音量照比例調好），語音那一半另外做，播放時兩者相加——畫面可以照原來的做法提早好幾秒排好，
+語音到要送的那一刻才編得出來；`nbtv_rx_set_duplex` 讓接收機直接收合成的訊號。
+
+**取樣時脈的差**。畫面被移過頻率之後，兩邊音效卡的取樣時脈只要差一點，訊號除了一個符號比一個符號晚到，
+整個頻帶還會一起慢慢轉（每晚一個取樣多轉的角度由移了多少 Hz 決定）。有散佈導頻的幀本來就會量殘餘的頻偏；
+沒有散佈導頻的幀（模式 3–7）頭尾兩個參考符號之間只要轉超過半圈就接不起來——標準版面下模式 7 在時脈差 100 ppm、
+模式 5、6 在 150 ppm 就整段收不到（窄版面移得更多，更早）。接收機其實已經量得到「晚了幾個取樣」，所以只要知道畫面被移了多少
+（`RxTuning::band_shift_hz`，C API 的 `nbtv_rx_set_band_shift_hz`；`nbtv_rx_set_duplex` 會自動設好），
+就能照比例算出該轉多少、取離它最近的那一圈。設了之後到 ±250 ppm 每一種模式都收得到（模擬）；沒有移過頻率的平常收訊不受影響。
+
+**模擬的結果**（寬頻 FM 語音通道的模型，不是真的電台；語音只看特徵的失真指標，數字愈小愈好，沒有雜訊時是 0.081）：
+
+- 每一幀都收到。和「同一個模式單獨、照原來的速度送」比，畫面的 PSNR 在 C/N 30 dB 時少 0.05–0.2 dB、C/N 12 dB 時少 0.2–0.4 dB，
+  其中語音在旁邊造成的不到 0.1 dB，其餘是功率分一半。語音的失真指標是 0.082（C/N 30）與 0.085（C/N 12），和單獨送幾乎一樣。
+- 10 Hz 的衰落、平均 C/N 18 dB：語音 0.15–0.16（約等於白雜訊 2 dB 時的品質），畫面和單獨送相差在 ±0.4 dB 內。
+- 語音調小對畫面幾乎沒有幫助、對語音傷害很大（同一個情況下小 6 dB 是 0.232、小 10 dB 是 0.364），所以預設同功率。
+- 電台音訊上緣很陡時，標準版面在 2800 Hz 少 0.7 dB、2700 Hz 少 2.2 dB、2600 Hz 少 3.3 dB（每一幀仍然收得到）；
+  窄版面在 2600 Hz 不受影響。下緣（語音從 360 Hz 起）很陡的高通到 400 Hz 影響不大。
+- 語音送出前一定要先濾過：RADE V2 的訊號有 −28 dB 的功率落在畫面的頻帶裡，會讓畫面的接收機偶爾誤判出沒有畫面的幀
+  （12 段各 50 秒裡 9 次，濾過之後 0 次）。核心的合成已經這樣做。
+- 核心的測試（`core/tests/test_duplex.cpp`）：畫面經過合成與分離之後，PSNR 與量到的訊雜比和直接收完全相同；
+  時脈差 ±200 ppm 收得到。和 Python 寫的原型互相解對方做的音檔、經過模擬的 FM 電台（44.1 kHz 的錄音、時脈差 60 ppm、
+  C/N 30 與 15 dB、音訊在 2700 Hz 陡降），畫面全部收到，語音的失真指標 0.081–0.091。
+
+**語音的編解碼器**在核心之外的 `voice/`（介面是 `voice/include/nbtv/voice.h`），是選用的：預設只有空殼，
+`-DNBTV_VOICE=ON` 才把 RADE V2 編進來（GitHub 上 0.2.1 之後的下載包有編進去）。它用到兩份別人的原始碼，設定時另外取得、
+各固定在一個提交並核對 SHA-256（版本與來源寫在 `voice/cmake/sources.cmake`）：
+[rade_c](https://github.com/freedv/rade_c)（RADE 的 C 實作，權重編在程式裡）與 [Opus](https://github.com/xiph/opus)
+（語音的特徵 LPCNet 與合成 FARGAN 在它裡面；另外要它的模型資料，約 184 MB）。兩者都是 BSD 授權，條文在 `voice/LICENSES/`。
+執行檔因此大約多 22 MB。運算量很小（M4 Max 上發射約佔一條執行緒的 0.6%、接收約 1.4%）。
+
+建法：rade_c 只取原始碼來編；Opus 用它自己的 CMakeLists 建成靜態函式庫，只開語音用得到的那一部分（它叫 deep PLC 的那一組）。
+不需要 autotools，所以 Linux、macOS、Windows 是同一種建法，設定時也不必另外安裝什麼；細節與幾種處理器各自的設定寫在
+`voice/CMakeLists.txt`。三份檔案（共約 280 MB）可以先抓好（`cmake -DOUT=<資料夾> -P voice/cmake/fetch_sources.cmake`），
+之後用 `-DNBTV_VOICE_SOURCES=<資料夾>` 指過去，設定時就不必連網路；CI 就是這樣做的。
+
+對照過的：
+- 包的那一層和 rade_c 自己的工具：發射端做的訊號交給它的接收工具，失真指標 0.093（它自己的發射工具是 0.096）；
+  接收端解出來的語音和它的工具解的波形相關 0.99。
+- 這種建法和 rade_c 自己的建法（Opus 用 autotools）：同一台電腦上做出來的訊號與解出來的語音逐位元相同
+  （要打開 Opus 的浮點近似，autotools 的建置預設是開的）。
+- x86 與 ARM：算出來的數值不完全一樣（Opus 的類神經網路在兩種處理器上用不同的近似），但互相解得開——
+  一邊編、另一邊解，兩個方向解出來的語音音量起伏和原來的相關都是 0.95，和同一種處理器自己編自己解一樣。
+
+建置並跑過測試的：macOS（Apple 晶片；x86_64 的版本用 Rosetta 跑）、Linux（arm64 與 x86_64，GCC 12，容器裡；x86_64 是模擬的）。
+Windows 只做到用 MinGW 交叉編譯、連結得起來，沒有執行過；微軟的編譯器（MSVC）只有 CI 上有，
+**CI 還沒有跑過這一版**，Windows 上能不能建、能不能用要等它跑過才知道。
+
+```sh
+# 只用檔案把整條路走一遍（語音的工具要 -DNBTV_VOICE=ON 的建置）
+build/tools/nbtv-tx --mode 5 --rate 12000 --call N0CALL --out 畫面.wav 大圖.ppm 大圖.ppm 大圖.ppm
+build/tools/nbtv-voice encode 語音.wav 語音.iq                       # 語音（16 或 48 kHz 的 WAV）→ 語音的訊號
+build/tools/nbtv-duplex mux --picture 畫面.wav --voice 語音.iq --out 合成.wav   # 送給電台的音檔（48 kHz）
+build/tools/nbtv-duplex demux --picture 收到的畫面.wav --voice 收到的語音.iq 合成.wav
+build/tools/nbtv-rx --band-shift 1650.5 --out-dir out 收到的畫面.wav   # 該給多少 demux 會印出來
+build/tools/nbtv-voice decode 收到的語音.iq 收到的語音.wav
+```
+
+macOS 的 app 與 Windows、Linux 的桌面 app 在右側欄都有「同時送語音」的開關（程式裡有語音的編解碼器才出現，
+只對 FM 用的模式有作用），兩邊的做法相同：細節見 [apps/macos/README.md](../apps/macos/README.md#同時送語音)，
+桌面 app 不一樣的地方見 [apps/desktop/README.md](../apps/desktop/README.md#和-macos-版不一樣的地方)。
+
+**還沒有驗證的**：真的 FM 電台——麥克風音訊路徑的頻率響應（360 Hz 與 2866 Hz 兩端）、限幅、降噪或音訊 AGC，
+是最大的未知；語音實際聽起來如何；兩個 app 的這個功能都只跑過不碰音訊裝置的自我測試，真的麥克風與喇叭還沒有用過；
+Windows 上還沒有執行過（見上面）。
+另外，**RADE V2 在 2026 年底還是測試版**：FreeDV 說波形與權重在正式發佈前可能再改（改了之後新舊版本互相聽不到），
+也還不建議在空中使用。要不要上空中請自己判斷；換版本時改 `voice/cmake/sources.cmake` 裡的提交編號與雜湊值。
+
 ### 和已經移除的模式比較
 
 這些是數位與類比模式還在的時候量的（標籤 `legacy-modes` 那一版以前），量法和上面相同，留作紀錄。
@@ -610,6 +709,8 @@ MinGW 的交叉編譯器編出來的組合語言看過（內層是八個 `vfmadd
 - 模式 4 的運算量：只在 M4 Max 上量過（分給八條執行緒時解一張 0.13 秒，只用一條是 0.67 秒；一幀 1.013 秒）。
   x86 的電腦與核心少的慢電腦上沒有量過；接收來不及時 macOS 的 app 沒有「略過畫面」的做法（桌面 app 有）。
   發射端「預覽另外解」現在只給模式 4 用，別的模式在很慢的電腦上仍然可能接不上下一張。
+- 語音與畫面共用 FM 語音通道：真的電台、真的麥克風與喇叭上還沒有試過；Windows 上還沒有執行過（要等 CI 跑過這一版）；
+  收發兩邊要自己選一樣的版面（接收端不會自己認）；語音的音量比例、喇叭的音量在 app 裡還不能調。
 - 強的窄頻干擾：自動陷波，或是把被干擾的導頻排除在通道估測之外。
 - 實機測試之後才能定的東西：收發機濾波器對頻帶邊緣的影響、削波門檻、PTT 的時序。
 - Windows 與 Linux 的桌面 app 在真的電腦與電台上的驗證（音效裝置、鏡頭、序列埠的 PTT、Windows 上的 Hamlib、Wayland）。
@@ -621,7 +722,9 @@ MinGW 的交叉編譯器編出來的組合語言看過（內層是八個 `vfmadd
 ## 授權
 
 程式碼以 GNU 通用公眾授權條款第 3 版（GPL-3.0）釋出，全文在 [LICENSE](../LICENSE)。
-核心沒有連結任何第三方的函式庫。目前沒有引用 [Airspy-TV](https://github.com/NeoChen1024/Airspy-TV)（同樣是 GPL-3.0）的程式碼；
+核心沒有連結任何第三方的函式庫。選用的語音模組（`voice/`，`-DNBTV_VOICE=ON` 才有）連結 rade_c 與 Opus，
+兩者都是 BSD 授權、和 GPL-3.0 相容，條文在 [voice/LICENSES/](../voice/LICENSES/)；有編進去的下載包與 app 裡也都附了一份
+（下載包裡是 `THIRD-PARTY-LICENSES.txt`，macOS 的 app 在它的 Resources 裡）。目前沒有引用 [Airspy-TV](https://github.com/NeoChen1024/Airspy-TV)（同樣是 GPL-3.0）的程式碼；
 授權相同，日後要引用不必再改授權。
 
 模型的權重（`models/`）是用 COCO val2017 的照片訓練的；那些照片的著作權屬於各拍攝者，各自採用不同的創用 CC 授權（有些限非商業使用）。

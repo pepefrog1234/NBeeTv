@@ -59,6 +59,8 @@ int main(int argc, char** argv) {
             "                   （沒有給的話每個模式都用 models/ 裡的，找不到就不解那個模式的畫面）\n"
             "  --merge          解每一幀之前把前面幾幀收到的值合進來：畫面沒變的地方比較清楚，訊號弱時差別最大。\n"
             "                   用的是 models/ 裡各個模型配的權重；沒有配的模式照原來的方式解\n"
+            "  --band-shift Hz  這段錄音在別處被整段往下移過這麼多 Hz（以 12 kHz 取樣為準；語音與畫面共用 FM 語音通道時\n"
+            "                   由 nbtv-duplex 分出來的畫面訊號，它會印出該給多少）。預設 0：沒有移過\n"
             "  --trace          印出同步與解碼的過程\n"
             "  --json           給程式讀的輸出：每一幀印一行 JSON、印完立刻送出，最後一行是總數\n"
             "                   （frame 是第幾幀，存檔時檔名是 frame_<frame>.ppm；標頭沒解出來時 callsign 是 null；\n"
@@ -84,6 +86,7 @@ int main(int argc, char** argv) {
     const std::string dir = args.str("out-dir", "");
     Receiver rx;
     rx.set_trace(args.has("trace"));
+    rx.tuning().band_shift_hz = args.num("band-shift", 0.0);
     // 每個模式各一份模型：先載入 models/ 裡的，--model 指定的那一份再取代實數個數、寬度與畫面大小都相同的
     auto load_model = [&](const std::string& path, bool required) {
         std::vector<std::uint8_t> bytes;

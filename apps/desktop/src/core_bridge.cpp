@@ -197,6 +197,8 @@ CoreReceiver::~CoreReceiver() { nbtv_rx_destroy(handle_); }
 
 void CoreReceiver::reset() { nbtv_rx_reset(handle_); }
 
+bool CoreReceiver::set_duplex(std::optional<VoiceLayout> layout) { return nbtv_rx_set_duplex(handle_, layout ? duplex_code(*layout) : NBTV_DUPLEX_OFF) == 0; }
+
 void CoreReceiver::set_merging(bool on) { nbtv_rx_set_merging(handle_, on ? 1 : 0); }
 
 void CoreReceiver::set_decode_pictures(bool on) { nbtv_rx_set_decode_pictures(handle_, on ? 1 : 0); }
@@ -253,6 +255,10 @@ void CoreTransmitter::set_callsign(const std::string& callsign) { nbtv_tx_set_ca
 
 int CoreTransmitter::frame_samples() const { return nbtv_tx_frame_samples(handle_); }
 
+bool CoreTransmitter::set_duplex(std::optional<VoiceLayout> layout) {
+    return nbtv_tx_set_duplex(handle_, layout ? duplex_code(*layout) : NBTV_DUPLEX_OFF, 0.0f) == 0;
+}
+
 std::optional<EncodedFrame> CoreTransmitter::encode(const Picture& picture, bool preview_apart) {
     // 核心照目前這個模式的大小讀 rgb：大小不對的畫面不能交給它
     if (picture.size != picture_size_ || picture.rgb.size() != static_cast<std::size_t>(picture_size_.rgb_bytes())) return std::nullopt;
@@ -263,7 +269,8 @@ std::optional<EncodedFrame> CoreTransmitter::encode(const Picture& picture, bool
     nbtv_tx_frame_info info{};
     const int written =
         nbtv_tx_encode_image(handle_, picture.rgb.data(), frame.samples.data(), count, preview ? preview->rgb.data() : nullptr, &info);
-    if (written != count) return std::nullopt;
+    if (written <= 0 || written > count) return std::nullopt;
+    frame.samples.resize(static_cast<std::size_t>(written));   // 語音＋畫面打開時可能比上限少幾個
     frame.preview = preview;
     frame.mode_id = info.mode_id;
     frame.sequence = info.sequence;
@@ -289,7 +296,7 @@ PicturePtr preview_from_values(const std::vector<float>& values, int mode_id) {
 bool CoreTransmitter::discard_last() { return nbtv_tx_discard_last(handle_) == 0; }
 
 std::vector<float> CoreTransmitter::finish() {
-    std::vector<float> tail(256);
+    std::vector<float> tail(static_cast<std::size_t>(std::max(256, nbtv_tx_tail_samples(handle_))));
     const int n = nbtv_tx_finish(handle_, tail.data(), static_cast<int>(tail.size()));
     tail.resize(static_cast<std::size_t>(std::max(n, 0)));
     return tail;
