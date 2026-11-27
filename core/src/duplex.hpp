@@ -13,6 +13,13 @@
 //
 // 這種用法只適合 FM：通道沒有頻偏（兩段都是照絕對的音訊頻率放的），而且通帶夠平。
 // 來歷與模擬的結果見 docs/TECHNICAL.md「語音與畫面共用 FM 語音通道」。都是串流式的：一次可以給任意長度。
+//
+// 另外有一種完全不切頻帶的版面——「疊加」（DuplexLayout::Overlay，給短波的 SSB 用）：畫面原樣（不放慢、不移頻），
+// 語音是 RADE V1 的訊號（FreeDV 正式發布的那一版，30 個載波、約 730–2225 Hz），原樣加在同一個頻帶上。兩個訊號
+// 互相當成雜訊，所以各自都掉到訊雜比 0 dB 上下的品質，只有功率差不多時兩邊才都解得出來；換來的是畫面不必放慢，
+// 而且語音就是 RADE V1 原來的訊號（只用 FreeDV 的人應該也聽得到），只裝 NBeeTv 的人收得到畫面。
+// 這個版面裡，這一層只做取樣率的轉換與兩路的比例。
+// 來歷與量到的數字見 docs/TECHNICAL.md「語音疊在畫面上（RADE V1）」。
 #pragma once
 
 #include <cstddef>
@@ -26,6 +33,7 @@ namespace nbtv {
 enum class DuplexLayout {
     Standard = 0,  // 畫面放慢 1.5 倍，佔 1335–2866 Hz
     Narrow = 1,    // 畫面放慢 1.8 倍，佔 1335–2611 Hz
+    Overlay = 2,   // 疊加：畫面原樣，RADE V1 的語音原樣加在同一個頻帶上（短波的 SSB 用）
 };
 
 inline constexpr int kDuplexRate = 48000;         // 進出電台的音訊取樣率
@@ -43,14 +51,38 @@ inline constexpr double kModemHigh = 2648.0;
 // 語音訊號交進來時的大小：複數的均方根（RADE V2 給的就是這麼大）。兩路相加的比例照這個數字算。
 inline constexpr double kVoiceNominalRms = 0.696;
 
-// 畫面放慢的倍數：一幀的時間變成原來的這麼多倍。
-constexpr double duplex_slow_factor(DuplexLayout layout) { return layout == DuplexLayout::Narrow ? 1.8 : 1.5; }
-// 畫面在空中佔的頻率範圍的上緣（Hz）；下緣是 kPictureLow。
+// 「疊加」的版面：語音是 RADE V1 的訊號，不移頻。它的 30 個載波間隔 50 Hz、以 1477.5 Hz 為中心（752.5–2202.5 Hz）。
+inline constexpr double kOverlayVoiceCentre = 1477.5;
+inline constexpr double kOverlayVoiceLow = 727.5;    // 最外面的載波再多半格
+inline constexpr double kOverlayVoiceHigh = 2227.5;
+inline constexpr double kOverlayVoiceHalfBand = 900.0;  // 接收端取解析訊號時留中心 ± 這麼多（RADE V1 自己還有一道帶通）
+inline constexpr double kOverlayVoiceStopBand = 1400.0; // 負頻率的那一半（搬到 0 之後在 −2955 Hz）要壓乾淨
+// RADE V1 給的訊號幾乎等幅（大小削在 1 以內），複數的均方根是這麼大
+inline constexpr double kOverlayVoiceNominalRms = 0.911;
+
+constexpr bool duplex_overlay(DuplexLayout layout) { return layout == DuplexLayout::Overlay; }
+// 這個版面的語音是哪一種編解碼器的訊號：2 是 RADE V2，1 是 RADE V1（語音模組的 NBTV_VOICE_RADE_V2、NBTV_VOICE_RADE_V1）。
+constexpr int duplex_voice_codec(DuplexLayout layout) { return duplex_overlay(layout) ? 1 : 2; }
+// 語音訊號交進來時複數的均方根。
+constexpr double duplex_voice_nominal_rms(DuplexLayout layout) { return duplex_overlay(layout) ? kOverlayVoiceNominalRms : kVoiceNominalRms; }
+// 語音在空中佔的頻率範圍（Hz）。
+constexpr double duplex_voice_low(DuplexLayout layout) { return duplex_overlay(layout) ? kOverlayVoiceLow : kVoiceCentre - kVoiceHalfBand; }
+constexpr double duplex_voice_high(DuplexLayout layout) { return duplex_overlay(layout) ? kOverlayVoiceHigh : kVoiceCentre + kVoiceHalfBand; }
+
+// 畫面放慢的倍數：一幀的時間變成原來的這麼多倍（疊加的版面不放慢）。
+constexpr double duplex_slow_factor(DuplexLayout layout) {
+    return layout == DuplexLayout::Overlay ? 1.0 : layout == DuplexLayout::Narrow ? 1.8 : 1.5;
+}
+// 畫面在空中佔的頻率範圍（Hz）。
+constexpr double duplex_picture_low(DuplexLayout layout) { return duplex_overlay(layout) ? kModemLow : kPictureLow; }
 constexpr double duplex_picture_high(DuplexLayout layout) {
-    return kPictureLow + (kModemHigh - kModemLow) / duplex_slow_factor(layout);
+    return duplex_overlay(layout) ? kModemHigh : kPictureLow + (kModemHigh - kModemLow) / duplex_slow_factor(layout);
 }
 // 接收端把畫面搬回原位時往下移了多少（以還原之後的 12 kHz 取樣為準的 Hz）：給接收機的 RxTuning::band_shift_hz。
-constexpr double duplex_band_shift_hz(DuplexLayout layout) { return kPictureLow * duplex_slow_factor(layout) - kModemLow; }
+// 疊加的版面沒有搬過，是 0。
+constexpr double duplex_band_shift_hz(DuplexLayout layout) {
+    return duplex_overlay(layout) ? 0.0 : kPictureLow * duplex_slow_factor(layout) - kModemLow;
+}
 
 namespace duplex_detail {
 
@@ -106,7 +138,8 @@ public:
 
     // 畫面數據機的取樣（12 kHz，核心的發射機用 12000 建立、照預設的峰均比給的）。
     void push_picture(std::span<const float> samples);
-    // 語音的訊號（8 kHz 的複數，中心 1500 Hz，均方根約 kVoiceNominalRms）。
+    // 語音的訊號（8 kHz 的複數，中心 1500 Hz，均方根約 duplex_voice_nominal_rms(layout)：
+    // 分頻的版面是 RADE V2 的，疊加的版面是 RADE V1 的）。
     void push_voice(std::span<const cf> samples);
     // 還沒被 read 取走的輸出取樣數（48 kHz）。
     std::size_t pending_picture() const { return picture_.size() - picture_read_; }

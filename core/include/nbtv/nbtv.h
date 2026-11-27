@@ -244,10 +244,11 @@ int nbtv_tx_finish(nbtv_tx *tx, float *samples, int capacity);
 int nbtv_tx_tail_samples(const nbtv_tx *tx);
 
 /*
- * 語音與畫面共用 FM 語音通道（說明在這個檔案最後一節）：打開之後，這個發射機給的是「畫面那一半」——
+ * 和語音一起送（說明在這個檔案最後一節）：打開之後，這個發射機給的是「畫面那一半」——
  * 放慢、移好位置、音量也照比例調好的取樣；外殼再把「語音那一半」（一個只推語音的 nbtv_duplex_tx 取出來的）
  * 一個取樣一個取樣加上去，就是送給電台的音訊。這樣畫面可以照原來的做法提早排好，語音到要送的那一刻才加。
- * 發射機要用 48000 建立。layout 是 NBTV_DUPLEX_STANDARD 或 NBTV_DUPLEX_NARROW；NBTV_DUPLEX_OFF 關掉（預設）。
+ * 發射機要用 48000 建立。layout 是 NBTV_DUPLEX_STANDARD、NBTV_DUPLEX_NARROW 或 NBTV_DUPLEX_OVERLAY（疊加：畫面不放慢
+ * 也不移頻，只是音量照比例調小）；NBTV_DUPLEX_OFF 關掉（預設）。
  * voice_gain_db 是語音比畫面大幾 dB，要和語音那一半的 nbtv_duplex_tx_set_voice_gain_db 給同一個值。
  * 打開時每一幀在空中的時間是原來的 nbtv_duplex_slow_factor 倍：nbtv_tx_frame_samples 跟著變大
  * （它是上限，實際寫入的個數可能少幾個，以 nbtv_tx_encode_image 的回傳值為準）。
@@ -308,6 +309,8 @@ void nbtv_rx_set_band_shift_hz(nbtv_rx *rx, double hz);
  * 回報的幀在空中實際花的時間是 frame_seconds 的 nbtv_duplex_slow_factor 倍；音量的讀數是畫面那一段的。
  * layout 是 NBTV_DUPLEX_STANDARD 或 NBTV_DUPLEX_NARROW；NBTV_DUPLEX_OFF 關掉（預設）。切換時接收機回到初始狀態。
  * 成功回傳 0；layout 不對、接收機不是 48 kHz 的回傳 -1。
+ * NBTV_DUPLEX_OVERLAY（疊加）的畫面沒有放慢也沒有搬過，平常的接收機就收得到：給它和 NBTV_DUPLEX_OFF 一樣
+ * （不限取樣率，回傳 0），不必為它另外用一個接收機。
  */
 int nbtv_rx_set_duplex(nbtv_rx *rx, int layout);
 
@@ -384,9 +387,10 @@ void nbtv_spectrum_push(nbtv_spectrum *sp, const float *samples, int count);
  */
 int nbtv_spectrum_poll(nbtv_spectrum *sp, float *db);
 
-/* ------------------------------------------------------------------ 語音與畫面共用 FM 語音通道（實驗性） */
+/* ------------------------------------------------------------------ 語音與畫面一起送（實驗性） */
 
 /*
+ * 兩種做法。第一種給 FM：
  * 把 FM 語音通道的音訊頻帶切成兩段，同時送即時的語音與畫面：
  *   語音  外面的語音編解碼器給的訊號（8 kHz 的複數、中心 1500 Hz、約 860 Hz 寬：FreeDV 的 RADE V2 就是這種格式），
  *         放在 360–1220 Hz。核心不含語音的編解碼器，只負責把它放進去、拿出來。
@@ -399,22 +403,37 @@ int nbtv_spectrum_poll(nbtv_spectrum *sp, float *db);
  *           命令列工具 nbtv-duplex 是這樣做的。
  *   即時用  發射機（48000）打開 nbtv_tx_set_duplex，它給的就是畫面那一半；語音那一半用一個只推語音的 nbtv_duplex_tx，
  *           播放時兩者相加。接收機（48000）打開 nbtv_rx_set_duplex 直接收畫面；語音用一個關掉畫面那一路的 nbtv_duplex_rx。
+ *
+ * 第二種是「疊加」（NBTV_DUPLEX_OVERLAY），給短波的 SSB：完全不切頻帶。畫面原樣（不放慢、不移頻，佔 352–2648 Hz），
+ * 語音是 FreeDV 的 RADE V1 的訊號（8 kHz 的複數，30 個載波佔 728–2228 Hz），原樣加在同一個頻帶上。兩個訊號互相
+ * 當成雜訊：各自都只剩訊雜比 0 dB 上下的品質，而且只有兩邊功率差不多時才都解得出來（語音的音量留在預設的 0 dB）。
+ * 好處是畫面不必放慢，而且語音就是 RADE V1 原來的訊號：只用 FreeDV 的人應該也聽得到（和 rade_c 的工具互相對照過），
+ * 只用這個核心（沒有語音模組）的人收得到畫面。
+ * 用法和上面一樣，只是這一層不濾也不搬，只換取樣率、調兩路的比例；接收端的畫面不必分（整段音訊直接給平常的接收機，
+ * nbtv_rx_set_duplex 給這個版面等於關掉），語音那一路給的是整段音訊的解析訊號，交給 RADE V1 的解碼器。
+ *
  * 每一個物件同一時間只能給一條執行緒用。
  */
 #define NBTV_DUPLEX_STANDARD 0 /* 畫面放慢 1.5 倍，佔 1335–2866 Hz */
 #define NBTV_DUPLEX_NARROW 1   /* 畫面放慢 1.8 倍，只佔到 2611 Hz：給音訊上緣比較窄的電台 */
+#define NBTV_DUPLEX_OVERLAY 2  /* 疊加：畫面原樣，RADE V1 的語音原樣加在同一個頻帶上（短波的 SSB 用） */
 
 #define NBTV_DUPLEX_RATE 48000         /* 合成之後、分離之前的音訊 */
 #define NBTV_DUPLEX_PICTURE_RATE 12000 /* 畫面那一路：發射機與接收機都用這個取樣率建立 */
 #define NBTV_DUPLEX_VOICE_RATE 8000    /* 語音那一路：複數，I、Q 交錯 */
 
-/* 版面的數字；layout 不是上面兩個值時都回傳 0。 */
-double nbtv_duplex_slow_factor(int layout);     /* 畫面放慢幾倍 */
+/* 版面的數字；layout 不是上面三個值時都回傳 0。 */
+double nbtv_duplex_slow_factor(int layout);     /* 畫面放慢幾倍（疊加的版面是 1：沒有放慢） */
 double nbtv_duplex_picture_low_hz(int layout);  /* 畫面在空中佔的頻率範圍 */
 double nbtv_duplex_picture_high_hz(int layout);
 double nbtv_duplex_voice_low_hz(int layout); /* 語音在空中佔的頻率範圍 */
 double nbtv_duplex_voice_high_hz(int layout);
-double nbtv_duplex_band_shift_hz(int layout); /* 給 nbtv_rx_set_band_shift_hz 的值 */
+double nbtv_duplex_band_shift_hz(int layout); /* 給 nbtv_rx_set_band_shift_hz 的值（疊加的版面是 0：沒有搬過） */
+/*
+ * 語音那一路是哪一種編解碼器的訊號：2 是 FreeDV RADE V2（分頻的兩種版面），1 是 RADE V1（疊加）。
+ * 和語音模組（nbtv/voice.h）的 NBTV_VOICE_RADE_V2、NBTV_VOICE_RADE_V1 是同樣的數字。
+ */
+int nbtv_duplex_voice_codec(int layout);
 
 typedef struct nbtv_duplex_tx nbtv_duplex_tx;
 
@@ -426,7 +445,10 @@ void nbtv_duplex_tx_reset(nbtv_duplex_tx *tx);
 void nbtv_duplex_tx_set_voice_gain_db(nbtv_duplex_tx *tx, float db);
 /* 畫面的數據機訊號：用 12000 建立的發射機給的取樣（照預設的峰均比）。 */
 void nbtv_duplex_tx_push_picture(nbtv_duplex_tx *tx, const float *samples, int count);
-/* 語音的訊號：count 個複數（iq 有 2 × count 個 float），8 kHz、中心 1500 Hz，均方根約 0.7（RADE V2 給的大小）。 */
+/*
+ * 語音的訊號：count 個複數（iq 有 2 × count 個 float），8 kHz、中心 1500 Hz。兩路的比例照編解碼器給的大小算：
+ * 分頻的版面是 RADE V2 的（均方根約 0.7），疊加的版面是 RADE V1 的（約 0.91）。
+ */
 void nbtv_duplex_tx_push_voice(nbtv_duplex_tx *tx, const float *iq, int count);
 /* 兩路各自處理好、還沒被取走的輸出取樣數（48 kHz）。 */
 int nbtv_duplex_tx_pending_picture(const nbtv_duplex_tx *tx);
@@ -446,7 +468,7 @@ void nbtv_duplex_rx_push(nbtv_duplex_rx *rx, const float *samples, int count);
 /* 分好、還沒被取走的取樣數（語音以複數的個數計）。 */
 int nbtv_duplex_rx_available_picture(const nbtv_duplex_rx *rx);
 int nbtv_duplex_rx_available_voice(const nbtv_duplex_rx *rx);
-/* 取出畫面那一路（12 kHz 的取樣），最多 capacity 個；回傳取了幾個。 */
+/* 取出畫面那一路（12 kHz 的取樣），最多 capacity 個；回傳取了幾個。疊加的版面給的就是整段音訊換成 12 kHz。 */
 int nbtv_duplex_rx_read_picture(nbtv_duplex_rx *rx, float *samples, int capacity);
 /* 取出語音那一路（8 kHz 的複數、中心 1500 Hz），最多 capacity 個複數（iq 要有 2 × capacity 個 float）；回傳取了幾個複數。 */
 int nbtv_duplex_rx_read_voice(nbtv_duplex_rx *rx, float *iq, int capacity);

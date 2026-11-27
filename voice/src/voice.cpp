@@ -1,4 +1,4 @@
-// include/nbtv/voice.h 的實作：語音的編解碼器（rade_glue.c 接的 RADE V2）前後的事——48 kHz 與 16 kHz 之間的重取樣、
+// include/nbtv/voice.h 的實作：語音的編解碼器（rade_glue.c 接的 RADE，V1 與 V2）前後的事——48 kHz 與 16 kHz 之間的重取樣、
 // 把任意長度的輸入切成編解碼器要的大小、把輸出排好等人來取。
 // 建置時沒有打開語音（NBTV_VOICE_RADE 是 0）的話，這裡只剩下「沒有」的那幾個函式。
 #include "nbtv/voice.h"
@@ -52,17 +52,26 @@ struct nbtv_voice_rx {
     int overs_ended = 0;
 };
 
+static_assert(NBTV_VOICE_RADE_V1 == NBTV_RADE_V1 && NBTV_VOICE_RADE_V2 == NBTV_RADE_V2);
+static_assert(NBTV_VOICE_RADE_V1 == nbtv::duplex_voice_codec(nbtv::DuplexLayout::Overlay) &&
+              NBTV_VOICE_RADE_V2 == nbtv::duplex_voice_codec(nbtv::DuplexLayout::Standard));
+static_assert(NBTV_VOICE_SIGNAL_RATE == nbtv::kDuplexVoiceRate);
+
 int nbtv_voice_available(void) { return 1; }
 
-const char* nbtv_voice_description(void) { return "FreeDV RADE V2 (rade_c " NBTV_VOICE_RADE_VERSION ")"; }
+const char* nbtv_voice_description(void) { return "FreeDV RADE V1 + V2 (rade_c " NBTV_VOICE_RADE_VERSION ")"; }
 
-int nbtv_voice_symbol_samples(void) { return nbtv_rade_symbol_samples(); }
+const char* nbtv_voice_codec_name(int codec) {
+    return codec == NBTV_VOICE_RADE_V1 ? "FreeDV RADE V1" : codec == NBTV_VOICE_RADE_V2 ? "FreeDV RADE V2" : "";
+}
+
+int nbtv_voice_gap_samples(int codec) { return nbtv_rade_gap_samples(codec); }
 
 /* ---- 發射 ---- */
 
-nbtv_voice_tx* nbtv_voice_tx_create(void) {
+nbtv_voice_tx* nbtv_voice_tx_create(int codec) {
     nbtv_voice_tx* tx = new nbtv_voice_tx;
-    tx->codec = nbtv_rade_tx_open();
+    tx->codec = nbtv_rade_tx_open(codec);
     if (tx->codec == nullptr) {
         delete tx;
         return nullptr;
@@ -127,9 +136,9 @@ int nbtv_voice_tx_read(nbtv_voice_tx* tx, float* iq, int capacity) {
 
 /* ---- 接收 ---- */
 
-nbtv_voice_rx* nbtv_voice_rx_create(void) {
+nbtv_voice_rx* nbtv_voice_rx_create(int codec) {
     nbtv_voice_rx* rx = new nbtv_voice_rx;
-    rx->codec = nbtv_rade_rx_open();
+    rx->codec = nbtv_rade_rx_open(codec);
     if (rx->codec == nullptr) {
         delete rx;
         return nullptr;
@@ -197,9 +206,10 @@ void nbtv_voice_rx_get_status(const nbtv_voice_rx* rx, nbtv_voice_rx_status* out
 
 int nbtv_voice_available(void) { return 0; }
 const char* nbtv_voice_description(void) { return ""; }
-int nbtv_voice_symbol_samples(void) { return 0; }
+const char* nbtv_voice_codec_name(int) { return ""; }
+int nbtv_voice_gap_samples(int) { return 0; }
 
-nbtv_voice_tx* nbtv_voice_tx_create(void) { return nullptr; }
+nbtv_voice_tx* nbtv_voice_tx_create(int) { return nullptr; }
 void nbtv_voice_tx_destroy(nbtv_voice_tx*) {}
 void nbtv_voice_tx_reset(nbtv_voice_tx*) {}
 void nbtv_voice_tx_push(nbtv_voice_tx*, const float*, int) {}
@@ -207,7 +217,7 @@ void nbtv_voice_tx_finish(nbtv_voice_tx*) {}
 int nbtv_voice_tx_available(const nbtv_voice_tx*) { return 0; }
 int nbtv_voice_tx_read(nbtv_voice_tx*, float*, int) { return 0; }
 
-nbtv_voice_rx* nbtv_voice_rx_create(void) { return nullptr; }
+nbtv_voice_rx* nbtv_voice_rx_create(int) { return nullptr; }
 void nbtv_voice_rx_destroy(nbtv_voice_rx*) {}
 void nbtv_voice_rx_reset(nbtv_voice_rx*) {}
 void nbtv_voice_rx_push(nbtv_voice_rx*, const float*, int) {}

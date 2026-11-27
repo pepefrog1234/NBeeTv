@@ -2962,6 +2962,8 @@ std::vector<float> speech_like(double seconds) {
 ///     每張的時間是放慢之後的；語音那一路解得出語音，結尾有「結束」的標記；語音在 360–1220 Hz、畫面在 1335 Hz 以上
 ///   * 把那一段音訊當成收到的交給 app：畫面進了「最近收到」，知道收到了語音，喇叭有聲音
 ///   * 開關關掉、或選的不是 FM 用的模式：照平常的送
+///   * 版面選「疊加」、短波的模式：畫面照平常的速度送，RADE V1 的語音疊在上面——平常的接收機收得到畫面，
+///     語音那一路解得出語音；交給 app 接收時每張畫面只進「最近收到」一次
 void test_voice(Check& c) {
     if (!voice::available()) return c.skip("這份程式沒有把語音的編解碼器編進來（建置時要加 -DNBTV_VOICE=ON）", "voice");
     const ModeInfo* mode = modes::find(3);
@@ -2976,9 +2978,9 @@ void test_voice(Check& c) {
     const std::vector<float> speech = speech_like(40);
     bool voice_seen = false, level_seen = false;
     /// 發射到送出 frames 張為止再按停止，回傳送出去的取樣。一邊發射、一邊當成麥克風照實際的時間在收音。
-    /// hiccup：麥克風那一頭每 0.9 秒裡有 0.25 秒沒有聲音進來，之後一次補上（電腦一時忙不過來的樣子）。
+    /// hiccup：麥克風那一頭每 0.9 秒裡有這麼多秒沒有聲音進來，之後一次補上（電腦一時忙不過來的樣子）；0 是照平常。
     /// stall：按了停止、尾巴排進去之後，主執行緒卡住這麼多秒（收尾的那幾步都晚了）；0 是照平常
-    const auto transmit = [&](int frames, bool hiccup = false, double stall = 0) {
+    const auto transmit = [&](int frames, double hiccup = 0, double stall = 0) {
         rig.sink->drain();
         rig.ptt->take();
         std::atomic<bool> talking{true};
@@ -2988,7 +2990,7 @@ void test_voice(Check& c) {
             while (talking.load()) {
                 const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - began).count();
                 const std::size_t due = std::min(speech.size(), static_cast<std::size_t>(elapsed * kSampleRate));
-                if (hiccup && std::fmod(elapsed, 0.9) > 0.65) {
+                if (hiccup > 0 && std::fmod(elapsed, 0.9) > 0.9 - hiccup) {
                     // 這一段時間沒有聲音進來
                 } else if (due > spoken) {
                     rig.app->debug_speak(std::vector<float>(speech.begin() + static_cast<std::ptrdiff_t>(spoken), speech.begin() + static_cast<std::ptrdiff_t>(due)));
@@ -3022,9 +3024,9 @@ void test_voice(Check& c) {
         double snr_db = 0;
         int overs = -1;
     };
-    const auto listen = [](const std::vector<float>& audio) {
+    const auto listen = [](const std::vector<float>& audio, VoiceLayout layout = VoiceLayout::standard) {
         Heard out;
-        const std::unique_ptr<VoiceReceiver> listener = VoiceReceiver::create(VoiceLayout::standard);
+        const std::unique_ptr<VoiceReceiver> listener = VoiceReceiver::create(layout);
         if (!listener) return out;
         for (std::size_t at = 0; at < audio.size(); at += 960) {
             const std::vector<float> speech_out = listener->process(audio.data() + at, static_cast<int>(std::min<std::size_t>(960, audio.size() - at)));
@@ -3078,7 +3080,8 @@ void test_voice(Check& c) {
     }
     c.expect(good(shared) == sent && sent >= 3, "和語音一起送：照同一種版面收到 " + std::to_string(good(shared)) + " 張，app 說送了 " + std::to_string(sent) + " 張");
     // 每一張在空中的時間：扣掉開頭的 0.3 秒、結尾的靜音與補的半秒，除以張數
-    const double per_frame = (static_cast<double>(together.size()) / kSampleRate - 0.5 - App::kPttLeadSeconds - voice::kEndSeconds) / std::max(sent, 1);
+    const double per_frame =
+        (static_cast<double>(together.size()) / kSampleRate - 0.5 - App::kPttLeadSeconds - voice::end_seconds(VoiceLayout::standard)) / std::max(sent, 1);
     const double expected = mode->frame_seconds * voice::slow_factor(VoiceLayout::standard);
     c.expect(std::fabs(per_frame - expected) < 0.1, "和語音一起送：每張 " + number(per_frame) + " 秒，應該是 " + number(expected) + " 秒");
     const Heard first = listen(together);
@@ -3099,11 +3102,11 @@ void test_voice(Check& c) {
            number(picture_share * 100, 0) + "%");
     // 這一段訊號在語音結束之前停三個符號再接著送：對方不必重新同步，「結束」的標記照樣收到。
     // （輸出在語音的佇列空掉之後，就是等到停的長度是符號的整數倍才接回去——見下面的第 7 步。）
-    const int symbol = voice::symbol_samples();
+    const int symbol = voice::gap_samples(VoiceLayout::standard);
     c.expect(symbol > 0, "語音的符號長度是 " + std::to_string(symbol));
     if (symbol > 0) {
         std::vector<float> paused = together;
-        const std::size_t back = static_cast<std::size_t>((0.5 + voice::kEndSeconds + 0.25) * kSampleRate);
+        const std::size_t back = static_cast<std::size_t>((0.5 + voice::end_seconds(VoiceLayout::standard) + 0.25) * kSampleRate);
         paused.insert(paused.begin() + static_cast<std::ptrdiff_t>(paused.size() > back ? paused.size() - back : 0), static_cast<std::size_t>(3 * symbol), 0.0f);
         const int ends = listen(paused).overs;
         c.expect(ends == 1, "訊號在結尾前停三個符號（" + std::to_string(3 * symbol) + " 個取樣）：語音的結尾收到 " + std::to_string(ends) + " 次「結束」的標記，應該是 1 次");
@@ -3141,7 +3144,7 @@ void test_voice(Check& c) {
     // 3. 發射中語音一陣一陣地來不及（電腦一時忙不過來）：送出去的語音會停一下再接著送。停的長度是符號的整數倍，
     //    對方不必重新同步；語音比平常晚了，「結束」的標記還是要送完才放開 PTT（app 會多補一點靜音等它）
     {
-        const std::vector<float> choppy = padded(transmit(3, true));
+        const std::vector<float> choppy = padded(transmit(3, 0.25));
         const int gaps = rig.app->debug_voice_gaps();
         const Heard result = listen(choppy);
         c.expect(gaps >= 1, "語音來不及：語音的佇列應該空掉過，卻沒有");
@@ -3152,7 +3155,7 @@ void test_voice(Check& c) {
 
     // 4. 按了停止、尾巴排進去之後主執行緒卡住兩秒：語音收尾的那一步晚了，「結束」的標記還是要送完才放開 PTT
     {
-        const int ends = listen(padded(transmit(2, false, 2.0))).overs;
+        const int ends = listen(padded(transmit(2, 0, 2.0))).overs;
         c.expect(ends == 1, "收尾時主執行緒卡住兩秒：語音的結尾收到 " + std::to_string(ends) + " 次「結束」的標記，應該是 1 次");
         c.info("收尾時主執行緒卡住兩秒：「結束」標記照樣送完");
     }
@@ -3177,8 +3180,12 @@ void test_voice(Check& c) {
         c.info("模式 12 不是 FM 用的：開關開著也照平常的送");
     }
 
-    // 7. 輸出的語音佇列中途空掉：下一段語音接回去的時候，停的長度是符號長度的整數倍（直接看輸出，不經過整個發射流程）
-    if (symbol > 0) {
+    // 7. 輸出的語音佇列中途空掉：下一段語音接回去的時候，停的長度是那個單位的整數倍（直接看輸出，不經過整個發射流程）。
+    //    兩版的編解碼器各看一次：RADE V2 的單位是一個符號，V1 是一個數據幀
+    for (const VoiceLayout gap_layout : {VoiceLayout::standard, VoiceLayout::overlay}) {
+        const int symbol = voice::gap_samples(gap_layout);
+        c.expect(symbol > 0, "語音中途停的單位是 " + std::to_string(symbol));
+        if (symbol <= 0) continue;
         AudioOutput output(8);
         const std::shared_ptr<Sink> trace = std::make_shared<Sink>();
         output.simulated = true;
@@ -3186,7 +3193,7 @@ void test_voice(Check& c) {
             std::lock_guard<std::mutex> lock(trace->mutex);
             trace->samples.insert(trace->samples.end(), block.begin(), block.end());
         };
-        output.voice_start_level = static_cast<std::size_t>(voice::kStartSeconds * kSampleRate);
+        output.voice_start_level = static_cast<std::size_t>(voice::start_seconds(gap_layout) * kSampleRate);
         output.voice_gap_step = static_cast<std::size_t>(symbol);
         std::string error;
         if (output.start(0, &error)) {
@@ -3212,14 +3219,82 @@ void test_voice(Check& c) {
             }
             if (last >= 0 && next > last) {
                 const std::ptrdiff_t gap = next - last - 1;
-                c.expect(gap > 0 && gap % symbol == 0, "語音的佇列空掉之後，停了 " + std::to_string(gap) + " 個取樣才接回去，不是符號長度（" + std::to_string(symbol) + "）的整數倍");
-                c.info("語音的佇列空掉之後停了 " + std::to_string(gap) + " 個取樣（" + std::to_string(gap / symbol) + " 個符號）才接回去");
+                c.expect(gap > 0 && gap % symbol == 0, "語音的佇列空掉之後，停了 " + std::to_string(gap) + " 個取樣才接回去，不是那個單位（" + std::to_string(symbol) + "）的整數倍");
+                c.info("語音的佇列空掉之後停了 " + std::to_string(gap) + " 個取樣（" + std::to_string(gap / symbol) + " 個單位，每個 " + std::to_string(symbol) + "）才接回去");
             } else {
                 c.expect(false, "語音的佇列空掉之後：兩段語音沒有都播出來");
             }
         } else {
             c.expect(false, "模擬的輸出開不起來：" + error);
         }
+    }
+
+    // 8. 版面選「疊加」、短波的模式：畫面照平常的速度送，RADE V1 的語音疊在同一個頻帶上，兩邊功率相同
+    rig.app->settings.voice_layout = VoiceLayout::overlay;
+    if (modes::find(3) != nullptr) {
+        rig.app->settings.tx_mode_id = 3;
+        c.expect(!rig.app->voice_with_transmit(), "版面選「疊加」、模式 3 是 FM 用的，不應該算「和語音一起送」");
+    }
+    if (const ModeInfo* hf = modes::find(14)) {
+        const VoiceLayout overlay = VoiceLayout::overlay;
+        rig.app->settings.tx_mode_id = hf->id;
+        c.expect(rig.app->voice_with_transmit(), "版面選「疊加」、選的是短波的模式 14：按下發射應該和語音一起送");
+        const auto pictures = [hf](const std::vector<DecodedFrame>& frames) {
+            int count = 0;
+            for (const DecodedFrame& frame : frames) count += frame.decoded && frame.mode_id == hf->id ? 1 : 0;
+            return count;
+        };
+        const int frames = 9;   // 六秒：RADE V1 的接收端要半秒多才同步
+        const std::vector<float> overlaid = padded(transmit(frames));
+        const int overlay_sent = rig.app->tx_frames_sent;
+        // 平常的接收機直接收：語音對它來說是雜訊，畫面都還在（標頭不一定每張都解得出來）
+        const std::vector<DecodedFrame> plain = decode(overlaid);
+        c.expect(pictures(plain) >= overlay_sent - 1 && pictures(plain) <= overlay_sent,
+                 "疊加：平常的接收機收到 " + std::to_string(pictures(plain)) + " 張，app 說送了 " + std::to_string(overlay_sent) + " 張");
+        // 每一張在空中的時間和平常一樣（沒有放慢）
+        const double each = (static_cast<double>(overlaid.size()) / kSampleRate - 0.5 - App::kPttLeadSeconds - voice::end_seconds(overlay)) / std::max(overlay_sent, 1);
+        c.expect(std::fabs(each - hf->frame_seconds) < 0.1, "疊加：每張 " + number(each) + " 秒，應該是 " + number(hf->frame_seconds) + " 秒");
+        // 語音那一路：RADE V1 的解碼器解得出語音，結尾有「結束」的標記；RADE V2 的那一種對它沒有反應
+        const Heard voice_out = listen(overlaid, overlay);
+        const double heard_overlay = static_cast<double>(voice_out.speech.size()) / kSampleRate;
+        c.expect(voice_out.ever_synced && heard_overlay > 1.5, "疊加：語音那一路只解出 " + number(heard_overlay, 1) + " 秒的語音");
+        c.expect(voice_out.overs == 1, "疊加：語音的結尾收到 " + std::to_string(voice_out.overs) + " 次「結束」的標記，應該是 1 次");
+        c.expect(!listen(overlaid).ever_synced, "疊加的訊號，分頻版面（RADE V2）的語音接收端不應該同步");
+        // 兩個訊號在同一個頻帶裡
+        const double band = share(overlaid, 340, 2660);
+        c.expect(band > 0.97, "疊加：頻譜不對，352–2648 Hz 只佔 " + number(band * 100, 0) + "%");
+        // 交給 app 接收：畫面進「最近收到」（每張只進一次，沒有另一個接收機重複交）、知道收到了語音、喇叭有聲音
+        const std::size_t before_overlay = rig.app->history.size();
+        speaker->take();
+        rig.app->debug_begin_receiving();
+        app_heard = false;
+        feed(overlaid);
+        const bool heard_overlay_voice = app_heard;
+        feed(demo::silence(4));
+        const int got_overlay = static_cast<int>(rig.app->history.size() - before_overlay);
+        c.expect(got_overlay >= overlay_sent - 1 && got_overlay <= overlay_sent,
+                 "疊加，交給 app 接收：「最近收到」多了 " + std::to_string(got_overlay) + " 張，送的是 " + std::to_string(overlay_sent) + " 張");
+        c.expect(heard_overlay_voice, "疊加，交給 app 接收：一直不知道收到了語音");
+        c.expect(!rig.app->voice_rx_synced, "疊加：訊號沒了之後還顯示收到語音");
+        c.expect(demo::power(speaker->take()) > 1e-7, "疊加，交給 app 接收：喇叭沒有聲音");
+        rig.app->debug_stop_receiving();
+        int headers = 0;
+        for (const DecodedFrame& frame : plain) headers += frame.decoded && frame.header_ok ? 1 : 0;
+        c.info("疊加（模式 14）：送 " + std::to_string(overlay_sent) + " 張、平常的接收機收到 " + std::to_string(pictures(plain)) + " 張（標頭正確 " +
+               std::to_string(headers) + "），每張 " + number(each) + " 秒；語音解出 " + number(heard_overlay, 1) + " 秒、「結束」標記 " +
+               std::to_string(voice_out.overs) + " 次；app 接收 " + std::to_string(got_overlay) + " 張、知道收到了語音");
+
+        // 語音一陣一陣地來不及：停的長度是 RADE V1 一個數據幀（120 毫秒）的整數倍，對方不必重新同步。
+        // V1 的語音墊了 0.24 秒才送，所以「麥克風」要停久一點（0.45 秒）佇列才會空掉。
+        // 這一步不要求「結束」的標記：V1 的接收端停超過半秒左右就會失去同步、要 0.6 秒才接回來，慢的機器上停的時間拉長、
+        // 又剛好在結尾前的話標記就收不到（停的長度對不對，上面第 7 步直接看輸出；停一到三個數據幀標記照樣收到，語音模組的測試看）
+        const std::vector<float> choppy = padded(transmit(frames, 0.45));
+        const int gaps = rig.app->debug_voice_gaps();
+        const Heard result = listen(choppy, overlay);
+        c.expect(gaps >= 1, "疊加、語音來不及：語音的佇列應該空掉過，卻沒有");
+        c.expect(result.overs <= 1, "疊加、語音來不及：語音的結尾收到 " + std::to_string(result.overs) + " 次「結束」的標記");
+        c.expect(static_cast<double>(result.speech.size()) / kSampleRate > 1.5, "疊加、語音來不及：對方只解出不到 1.5 秒的語音");
+        c.info("疊加、語音一陣一陣地來不及（中途停了 " + std::to_string(gaps) + " 次再接上）：對方照樣解得出語音（「結束」標記 " + std::to_string(result.overs) + " 次）");
     }
 }
 

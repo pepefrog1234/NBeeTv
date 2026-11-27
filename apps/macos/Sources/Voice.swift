@@ -1,46 +1,72 @@
-// 語音與畫面共用 FM 語音通道（實驗性）：一邊送畫面，一邊送即時的語音。
-// 通道的音訊頻帶切成兩段，語音在低的一段（360–1220 Hz），畫面放慢之後搬到高的一段（1335 Hz 起）。
-// 語音的編解碼器是 FreeDV 的 RADE V2（核心之外的 voice 模組）；建置時沒有把它編進來的話，Voice.available 是 false，
-// 介面上不會出現這個功能。合成與分離由核心做（nbtv.h 的 nbtv_duplex_*）。
+// 同時送語音（實驗性）：一邊送畫面，一邊送即時的語音。兩種做法、三種版面：
+//   標準、窄  給 FM 用的模式。通道的音訊頻帶切成兩段，語音在低的一段（360–1220 Hz），畫面放慢之後搬到高的一段（1335 Hz 起）。
+//             語音的編解碼器是 FreeDV 的 RADE V2。
+//   疊加      給短波的模式（SSB）。畫面原樣，FreeDV RADE V1 的語音原樣加在同一個頻帶上：兩邊互相當成雜訊，都比單獨送差，
+//             但畫面不必放慢，而且和只用 FreeDV（聽語音）或沒有語音功能的 NBeeTv（收畫面）互通。
+// 編解碼器在核心之外的 voice 模組；建置時沒有把它編進來的話，Voice.available 是 false，介面上不會出現這個功能。
+// 合成與分離由核心做（nbtv.h 的 nbtv_duplex_*）。
 import CNBTV
 import CoreAudio
 import Foundation
 
-/// 版面：畫面放慢幾倍、佔到多高的頻率。
+/// 版面：語音與畫面怎麼放在同一個音訊通道裡。
 enum VoiceLayout: String, CaseIterable {
     case standard   // 畫面放慢 1.5 倍，佔到 2866 Hz
     case narrow     // 畫面放慢 1.8 倍，只佔到 2611 Hz：給音訊上緣比較窄的電台
+    case overlay    // 疊加：畫面原樣，RADE V1 的語音原樣加在同一個頻帶上（短波的模式用）
 
-    var code: Int32 { self == .narrow ? NBTV_DUPLEX_NARROW : NBTV_DUPLEX_STANDARD }
-    /// 一幀在空中的時間是原來的幾倍
+    var code: Int32 {
+        switch self {
+        case .standard: return NBTV_DUPLEX_STANDARD
+        case .narrow: return NBTV_DUPLEX_NARROW
+        case .overlay: return NBTV_DUPLEX_OVERLAY
+        }
+    }
+    /// 介面上的名稱
+    var title: String {
+        switch self {
+        case .standard: return L("標準")
+        case .narrow: return L("窄")
+        case .overlay: return L("疊加")
+        }
+    }
+    /// 語音是直接疊在畫面上的（不是分頻）：畫面沒有動過，平常的接收機就收得到，不必另外用一個接收機
+    var isOverlay: Bool { self == .overlay }
+    /// 這個版面的語音用哪一版的編解碼器（NBTV_VOICE_RADE_V1 或 NBTV_VOICE_RADE_V2）
+    var codec: Int32 { nbtv_duplex_voice_codec(code) }
+    /// 一幀在空中的時間是原來的幾倍（疊加是 1：沒有放慢）
     var slowFactor: Double { nbtv_duplex_slow_factor(code) }
     /// 畫面佔到多高的頻率（Hz）
     var pictureHighHz: Double { nbtv_duplex_picture_high_hz(code) }
     /// 放慢最多的那一種是幾倍（輸出佇列照它配置）
     static var slowest: Double { allCases.map(\.slowFactor).max() ?? 1 }
+    /// 這個模式能不能照這個版面和語音一起送：分頻的兩種只配給 FM 用的模式（沒有導頻的，或大畫面的），疊加只配短波的模式
+    func supports(_ mode: ModeInfo?) -> Bool {
+        guard let mode else { return false }
+        return (mode.pilotFree || mode.largePicture) != isOverlay
+    }
+    /// 語音排進輸出佇列之後，墊到這麼多才開始送。語音是一段一段編出來的：RADE V2 每段 40 毫秒（墊三段），
+    /// V1 每段 120 毫秒（墊兩段）
+    var startSeconds: Double { isOverlay ? 0.24 : 0.12 }
+    /// 和語音一起送時，結尾留這麼久的靜音（平常是 0.1 秒）：語音的「結束」標記要在放開 PTT 之前送完。
+    /// 要放得下墊著的那些、最後不滿一段補滿的、和標記本身（V2 是 120 毫秒，V1 是 144 毫秒）
+    var endSeconds: Double { isOverlay ? 0.70 : 0.45 }
+    /// 語音的佇列中途空掉之後，輸出要等到停的長度是這麼多個取樣（48 kHz）的整數倍才接回去，對方的接收端才不必重新同步
+    /// （見 AudioOutput.voiceGapStep）。RADE V2 是一個符號（960 個，20 毫秒），V1 是一個數據幀（5760 個，120 毫秒）
+    var gapSamples: Int { Int(nbtv_voice_gap_samples(codec)) * NBTV.sampleRate / Int(NBTV_VOICE_SIGNAL_RATE) }
 }
 
 enum Voice {
     /// 這份 app 有沒有把語音的編解碼器編進來
     static let available = nbtv_voice_available() != 0
-    /// 編解碼器的名稱與版本，例如「FreeDV RADE V2 (rade_c 23c3746)」
+    /// 編解碼器的名稱與版本，例如「FreeDV RADE V1 + V2 (rade_c 23c3746)」
     static var codecName: String { String(cString: nbtv_voice_description()) }
-    /// 這個模式能不能和語音一起送：只有給 FM 用的模式（沒有導頻的，或大畫面的）
-    static func supports(_ mode: ModeInfo?) -> Bool {
-        guard let mode else { return false }
-        return mode.pilotFree || mode.largePicture
-    }
-    /// 語音排進輸出佇列之後，墊到這麼多才開始送（語音是一段一段編出來的，每段 40 毫秒）
-    static let startSeconds = 0.12
-    /// 語音的訊號一個符號的長度（48 kHz 的取樣數；RADE V2 是 960 個，20 毫秒）。語音的佇列中途空掉之後，輸出要等到
-    /// 停的長度是它的整數倍才接回去，對方的接收端才不必重新同步（見 AudioOutput.voiceGapStep）。
-    static let symbolSamples = Int(nbtv_voice_symbol_samples()) * NBTV.sampleRate / Int(NBTV_VOICE_SIGNAL_RATE)
     /// 喇叭那一頭：解出來的語音墊到這麼多才開始播，積到上限就先不排新的（兩邊音效卡的快慢不會剛好一樣）
     static let speakerStartSeconds = 0.15
     static let speakerLimitSeconds = 0.8
 }
 
-/// 發射端：麥克風的語音（48 kHz）→「語音那一半」的音訊（48 kHz，已經搬到語音的頻段、照比例調好音量），
+/// 發射端：麥克風的語音（48 kHz）→「語音那一半」的音訊（48 kHz，已經放到語音該在的頻段、照比例調好音量），
 /// 播放時一個取樣一個取樣加到畫面那一半上（AudioOutput.enqueueVoice）。只能在同一條佇列上用。
 final class VoiceSender {
     private let encoder: OpaquePointer
@@ -48,7 +74,7 @@ final class VoiceSender {
     private var iq = [Float](repeating: 0, count: 2 * 2048)
 
     init?(layout: VoiceLayout) {
-        guard let encoder = nbtv_voice_tx_create() else { return nil }
+        guard let encoder = nbtv_voice_tx_create(layout.codec) else { return nil }
         guard let mixer = nbtv_duplex_tx_create(layout.code) else {
             nbtv_voice_tx_destroy(encoder)
             return nil
@@ -96,7 +122,7 @@ final class VoiceSender {
     }
 }
 
-/// 接收端：電台收到的音訊（48 kHz）→ 分出語音那一段 → 解出語音（48 kHz）。只能在同一條佇列上用。
+/// 接收端：電台收到的音訊（48 kHz）→ 分出語音那一段（疊加的版面是整段音訊）→ 解出語音（48 kHz）。只能在同一條佇列上用。
 final class VoiceReceiver {
     private let splitter: OpaquePointer
     private let decoder: OpaquePointer
@@ -104,7 +130,7 @@ final class VoiceReceiver {
     private var speech = [Float](repeating: 0, count: 9600)
 
     init?(layout: VoiceLayout) {
-        guard let decoder = nbtv_voice_rx_create() else { return nil }
+        guard let decoder = nbtv_voice_rx_create(layout.codec) else { return nil }
         guard let splitter = nbtv_duplex_rx_create(layout.code) else {
             nbtv_voice_rx_destroy(decoder)
             return nil

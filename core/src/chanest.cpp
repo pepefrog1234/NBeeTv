@@ -227,7 +227,7 @@ double ChannelEstimator::first_path_delay(const Mode& mode, const SymbolGrid& gr
     return delay;
 }
 
-ChannelEstimate ChannelEstimator::estimate(const Mode& mode, const SymbolGrid& grid, int cut_from, int cut_to) const {
+ChannelEstimate ChannelEstimator::estimate(const Mode& mode, const SymbolGrid& grid, int cut_from, int cut_to, bool quiet_carriers) const {
     assert(grid.rows == mode.frame_symbols());
     assert(cut_from < 0 || (cut_from >= kPreambleSymbols && cut_from <= cut_to && cut_to <= grid.rows));
     const TimeWeights tw = time_weights(mode, cut_from, cut_to);
@@ -296,7 +296,7 @@ ChannelEstimate ChannelEstimator::estimate(const Mode& mode, const SymbolGrid& g
 
     // 1. 載波：以各載波殘差的中位數和全體的中位數相比（中位數不受少數幾列的突波影響）
     std::vector<double> carrier_ratio(kEven, 1.0);
-    std::vector<char> carrier_bad(kEven, 0);
+    std::vector<char> carrier_bad(kEven, 0);  // 1：有干擾（比一般的吵）；2：在頻帶兩端、比一般的乾淨
     {
         std::vector<std::vector<double>> per_carrier(kEven);
         std::vector<double> all;
@@ -313,6 +313,38 @@ ChannelEstimate ChannelEstimator::estimate(const Mode& mode, const SymbolGrid& g
             if (ratio > 1.0 + 5.0 / std::sqrt(static_cast<double>(v.size()))) {
                 carrier_bad[static_cast<std::size_t>(i)] = 1;
                 carrier_ratio[static_cast<std::size_t>(i)] = ratio;
+            }
+        }
+
+        // 1b. 頻帶兩端比較乾淨的載波。有別的訊號疊在頻帶中間時（例如語音疊在畫面上：RADE V1 佔 728–2228 Hz），大部分的載波
+        //     都被它蓋住，「一般的雜訊」量到的就是它；兩端它蓋不到的載波其實乾淨得多，照一般的算就太看輕它們了——
+        //     標頭的解碼最吃虧。單看一個載波分不出來（一幀裡每個載波只有十個上下的導頻，起伏太大，白雜訊下也常常偏低），
+        //     所以先把最外面的三個合起來看，明顯偏低才算這一端是乾淨的；再從最外面往裡，把偏低的載波一個一個標出來，
+        //     連著兩個不偏低就停。「明顯」取得嚴（kQuietEdgeMargin）：平常的訊號幾乎不會被誤判——模擬裡白雜訊與衰落下
+        //     四千多幀只少解出一個標頭；放寬到和上面「有干擾的載波」一樣的 5，語音疊在畫面上時標頭只多百分之三，平常卻少四個。
+        if (quiet_carriers) {
+            for (const int step : {1, -1}) {
+                const int start = step > 0 ? 0 : kEven - 1;
+                std::vector<double> outer;
+                for (int k = 0; k < kQuietEdgeCarriers; ++k) {
+                    const std::vector<double>& v = per_carrier[static_cast<std::size_t>(start + k * step)];
+                    outer.insert(outer.end(), v.begin(), v.end());
+                }
+                if (outer.size() < 12 || median(outer) / global >= 1.0 / (1.0 + kQuietEdgeMargin / std::sqrt(static_cast<double>(outer.size())))) continue;
+                int misses = 0;
+                for (int k = 0; k < kEven; ++k) {
+                    const std::size_t i = static_cast<std::size_t>(start + k * step);
+                    const std::vector<double>& v = per_carrier[i];
+                    if (carrier_bad[i] != 0 || v.size() < 4) break;  // 有干擾的，或另一端已經標過的：到此為止
+                    const double ratio = median(v) / global;
+                    if (ratio >= 1.0 / std::sqrt(1.0 + 5.0 / std::sqrt(static_cast<double>(v.size())))) {
+                        if (++misses >= 2) break;
+                        continue;
+                    }
+                    misses = 0;
+                    carrier_bad[i] = 2;
+                    carrier_ratio[i] = ratio;
+                }
             }
         }
     }
@@ -346,7 +378,7 @@ ChannelEstimate ChannelEstimator::estimate(const Mode& mode, const SymbolGrid& g
         if (row_mean[static_cast<std::size_t>(row)] > row_limit) est.row_noise[static_cast<std::size_t>(row)] = static_cast<float>(row_mean[static_cast<std::size_t>(row)]);
     }
 
-    // 3. 有干擾的載波：倍數改用沒有突波的列上的平均值（比中位數準）
+    // 3. 有干擾的（與兩端比較乾淨的）載波：倍數改用沒有突波的列上的平均值（比中位數準）
     {
         std::vector<double> sum(kEven, 0.0), count(kEven, 0.0);
         for (const Residual& r : residuals) {
@@ -356,7 +388,9 @@ ChannelEstimate ChannelEstimator::estimate(const Mode& mode, const SymbolGrid& g
         }
         for (int i = 0; i < kEven; ++i) {
             if (count[static_cast<std::size_t>(i)] > 0.0) {
-                carrier_ratio[static_cast<std::size_t>(i)] = std::max(sum[static_cast<std::size_t>(i)] / count[static_cast<std::size_t>(i)] / base, 1.0);
+                // 有干擾的至少是 1；兩端比較乾淨的最多是 1，再乾淨也只算到一般的百分之一
+                const double r = sum[static_cast<std::size_t>(i)] / count[static_cast<std::size_t>(i)] / base;
+                carrier_ratio[static_cast<std::size_t>(i)] = carrier_bad[static_cast<std::size_t>(i)] == 2 ? std::clamp(r, 0.01, 1.0) : std::max(r, 1.0);
             }
         }
     }

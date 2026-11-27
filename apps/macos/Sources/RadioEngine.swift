@@ -61,7 +61,8 @@ final class RadioEngine {
     private var activeGeneration = 0
     private var pending = RxUpdate()          // 還沒交給介面的更新
     private var lastDelivery: UInt64 = 0      // 上次交給介面的時間（DispatchTime 的奈秒）
-    // 「同時送語音」開著時（voiceLayout 不是 nil）：另一個接收機收合成訊號裡的畫面，語音那一路解出來排到喇叭
+    // 「同時送語音」開著時（voiceLayout 不是 nil）：另一個接收機收合成訊號裡的畫面，語音那一路解出來排到喇叭。
+    // 疊加的版面用不到另一個接收機：畫面沒有動過，上面那個平常的接收機就收到了
     private lazy var duplexReceiver = RadioEngine.makeReceiver()
     private var voiceReceiver: VoiceReceiver?
     private var voiceReceiverLayout: VoiceLayout?   // voiceReceiver 是照哪一種版面建立的
@@ -99,7 +100,7 @@ final class RadioEngine {
             receiver.reset()
             voiceLayout = voice
             if let voice {
-                duplexReceiver.setDuplex(voice)   // 順便清成初始狀態
+                if !voice.isOverlay { duplexReceiver.setDuplex(voice) }   // 順便清成初始狀態
                 if voiceReceiverLayout == voice, let voiceReceiver {
                     voiceReceiver.reset()
                 } else {
@@ -157,18 +158,20 @@ final class RadioEngine {
     }
 
     /// 「同時送語音」開著時：同一段音訊也交給收合成訊號的那個接收機，語音那一路解出來排到喇叭。
-    private func processVoice(_ samples: [Float]) {
-        duplexReceiver.push(samples)
-        let status = duplexReceiver.status()
-        if status.synced != 0 {
-            // 對方是和語音一起送的：同步、模式、進度看這個接收機的；輸入音量還是看整段音訊的
-            let level = pending.inputLevelDb
-            pending.take(status)
-            pending.inputLevelDb = level
-        }
-        while let frame = duplexReceiver.pollFrame() {
-            DebugTap.log("接收（和語音一起送的）：收到一幀，模式 \(frame.modeID)，\(frame.decoded ? "解碼成功" : "沒有畫面")，序號 \(frame.sequence)")
-            pending.frames.append(frame)
+    private func processVoice(_ samples: [Float], layout: VoiceLayout) {
+        if !layout.isOverlay {
+            duplexReceiver.push(samples)
+            let status = duplexReceiver.status()
+            if status.synced != 0 {
+                // 對方是和語音一起送的：同步、模式、進度看這個接收機的；輸入音量還是看整段音訊的
+                let level = pending.inputLevelDb
+                pending.take(status)
+                pending.inputLevelDb = level
+            }
+            while let frame = duplexReceiver.pollFrame() {
+                DebugTap.log("接收（和語音一起送的）：收到一幀，模式 \(frame.modeID)，\(frame.decoded ? "解碼成功" : "沒有畫面")，序號 \(frame.sequence)")
+                pending.frames.append(frame)
+            }
         }
         guard let voiceReceiver else { return }
         let speech = voiceReceiver.process(samples)
@@ -191,7 +194,7 @@ final class RadioEngine {
             DebugTap.log("接收：收到一幀，模式 \(frame.modeID)，\(frame.decoded ? "解碼成功" : (frame.modelMissing ? "模型不符，沒有畫面" : "沒解出來"))，標頭\(frame.headerOK ? "正確" : "錯誤")，序號 \(frame.sequence)")
             pending.frames.append(frame)
         }
-        if voiceLayout != nil { processVoice(samples) }
+        if let voiceLayout { processVoice(samples, layout: voiceLayout) }
         if pending.synced != tapSynced {
             tapSynced = pending.synced
             DebugTap.log(tapSynced ? String(format: "接收：同步到模式 %d，頻偏 %+.1f Hz，輸入 %.1f dB", pending.modeID, pending.offsetHz, pending.inputLevelDb)

@@ -2471,6 +2471,8 @@ enum SelfTest {
     ///     每張的時間是放慢之後的；語音那一路解得出語音，結尾有「結束」的標記；語音在 360–1220 Hz、畫面在 1335 Hz 以上
     ///   * 把那一段音訊當成收到的交給 app：畫面進了「最近收到」，右側欄知道收到了語音，喇叭有聲音
     ///   * 開關關掉、或選的不是 FM 用的模式：照平常的送
+    ///   * 版面選「疊加」、短波的模式：畫面照平常的速度送，RADE V1 的語音疊在上面——平常的接收機收得到畫面，
+    ///     語音那一路解得出語音；交給 app 接收時每張畫面只進「最近收到」一次
     private static func testVoice(_ image: Data) {
         let name = "同時送語音：發射、接收、開關"
         guard Voice.available else {
@@ -2513,9 +2515,9 @@ enum SelfTest {
         let rate = Double(NBTV.sampleRate)
 
         /// 發射到送出 frames 張為止再按停止，回傳送出去的取樣。speak：一邊發射一邊當成麥克風在收音。
-        /// hiccup：麥克風那一頭每 0.9 秒裡有 0.25 秒沒有聲音進來，之後一次補上（電腦一時忙不過來的樣子）。
+        /// hiccup：麥克風那一頭每 0.9 秒裡有這麼多秒沒有聲音進來，之後一次補上（電腦一時忙不過來的樣子）；0 是照平常。
         /// stall：按了停止、尾巴排進去之後，主執行緒卡住這麼多秒（收尾的那幾步都晚了）；0 是照平常
-        func transmit(_ label: String, frames: Int, speak: Bool, hiccup: Bool = false, stall: Double = 0) -> [Float] {
+        func transmit(_ label: String, frames: Int, speak: Bool, hiccup: Double = 0, stall: Double = 0) -> [Float] {
             _ = sent.take()
             _ = ptt.take()
             let speech = speechLike(seconds: 30)
@@ -2528,7 +2530,7 @@ enum SelfTest {
                 // 照實際經過的時間給：計時器晚了就一次補齊。（每次固定給 20 毫秒的話，計時器一晚語音就愈給愈少，
                 // 送出去的語音會一直斷——CI 上比較慢的機器就是這樣。）
                 let elapsed = Double(DispatchTime.now().uptimeNanoseconds - began) / 1e9
-                if hiccup, elapsed.truncatingRemainder(dividingBy: 0.9) > 0.65 { return }
+                if hiccup > 0, elapsed.truncatingRemainder(dividingBy: 0.9) > 0.9 - hiccup { return }
                 let due = min(speech.count, Int(elapsed * rate))
                 guard due > spoken else { return }
                 model.debugSpeak(Array(speech[spoken..<due]))
@@ -2555,8 +2557,8 @@ enum SelfTest {
             return sent.take()
         }
         /// 把一段送出去的訊號交給語音的接收端：解出來的語音、有沒有同步過、同步時的訊雜比、收到幾次「結束」的標記
-        func listen(_ samples: [Float]) -> (heard: [Float], everSynced: Bool, snrDb: Double, oversEnded: Int)? {
-            guard let voice = VoiceReceiver(layout: .standard) else { return nil }
+        func listen(_ samples: [Float], layout: VoiceLayout = .standard) -> (heard: [Float], everSynced: Bool, snrDb: Double, oversEnded: Int)? {
+            guard let voice = VoiceReceiver(layout: layout) else { return nil }
             var heard: [Float] = []
             var everSynced = false
             var snrDb = 0.0
@@ -2598,7 +2600,7 @@ enum SelfTest {
             problems.append("和語音一起送：照同一種版面收到 \(shared.count) 張，app 說送了 \(model.txFramesSent) 張")
         }
         // 每一張在空中的時間：扣掉開頭的 0.3 秒與結尾的靜音，除以張數
-        let perFrame = (Double(together.count) / rate - 0.5 - AppModel.pttLeadSeconds - AppModel.voiceEndSeconds) / Double(max(shared.count, 1))
+        let perFrame = (Double(together.count) / rate - 0.5 - AppModel.pttLeadSeconds - VoiceLayout.standard.endSeconds) / Double(max(shared.count, 1))
         let expected = mode.frameSeconds * VoiceLayout.standard.slowFactor
         if abs(perFrame - expected) > 0.1 { problems.append(String(format: "和語音一起送：每張 %.2f 秒，應該是 %.2f 秒", perFrame, expected)) }
         var heard: [Float] = []
@@ -2625,11 +2627,11 @@ enum SelfTest {
                               shared.count, perFrame, heardSeconds, voiceStatus.snrDb, voiceStatus.oversEnded, voiceShare * 100, pictureShare * 100))
         // 這一段訊號在語音結束之前停三個符號再接著送：對方不必重新同步，「結束」的標記照樣收到。
         // （輸出在語音的佇列空掉之後，就是等到停的長度是符號的整數倍才接回去——見下面的第 7 步。）
-        let symbol = Voice.symbolSamples
+        let symbol = VoiceLayout.standard.gapSamples
         if symbol <= 0 {
             problems.append("語音的符號長度是 \(symbol)")
         } else {
-            let at = max(0, together.count - Int((0.5 + AppModel.voiceEndSeconds + 0.25) * rate))
+            let at = max(0, together.count - Int((0.5 + VoiceLayout.standard.endSeconds + 0.25) * rate))
             let paused = Array(together[..<at]) + [Float](repeating: 0, count: 3 * symbol) + Array(together[at...])
             let ends = listen(paused)?.oversEnded ?? 0
             if ends != 1 { problems.append("訊號在結尾前停三個符號（\(3 * symbol) 個取樣）：語音的結尾收到 \(ends) 次「結束」的標記，應該是 1 次") }
@@ -2663,7 +2665,7 @@ enum SelfTest {
 
         // 3. 發射中語音一陣一陣地來不及（電腦一時忙不過來）：送出去的語音會停一下再接著送。停的長度是符號的整數倍，
         //    對方不必重新同步；語音比平常晚了，「結束」的標記還是要送完才放開 PTT（app 會多補一點靜音等它）
-        let choppy = transmit("語音來不及", frames: 3, speak: true, hiccup: true) + Demo.silence(seconds: 0.5)
+        let choppy = transmit("語音來不及", frames: 3, speak: true, hiccup: 0.25) + Demo.silence(seconds: 0.5)
         let gaps = model.debugVoiceGaps
         let choppyResult = listen(choppy)
         if gaps < 1 { problems.append("語音來不及：語音的佇列應該空掉過，卻沒有") }
@@ -2704,14 +2706,20 @@ enum SelfTest {
             details.append("模式 \(hf.id) 不是 FM 用的：開關開著也照平常的送，\(otherFrames.count) 張")
         }
 
-        // 7. 輸出的語音佇列中途空掉：下一段語音接回去的時候，停的長度是符號長度的整數倍（直接看輸出，不經過整個發射流程）
-        if symbol > 0 {
+        // 7. 輸出的語音佇列中途空掉：下一段語音接回去的時候，停的長度是那個單位的整數倍（直接看輸出，不經過整個發射流程）。
+        //    兩版的編解碼器各看一次：RADE V2 的單位是一個符號，V1 是一個數據幀
+        for layout in [VoiceLayout.standard, VoiceLayout.overlay] {
+            let symbol = layout.gapSamples
+            guard symbol > 0 else {
+                problems.append("語音中途停的單位是 \(symbol)（\(layout.rawValue)）")
+                continue
+            }
             let output = AudioOutput(queueSeconds: 8)
             let played = SampleCollector()
             output.simulated = true
             output.simulatedSink = { played.append($0) }
             output.gain = 1
-            output.voiceStartLevel = Int(Voice.startSeconds * rate)
+            output.voiceStartLevel = Int(layout.startSeconds * rate)
             output.voiceGapStep = symbol
             if (try? output.start(deviceID: 0)) != nil {
                 let piece = Int(0.3 * rate)
@@ -2730,14 +2738,88 @@ enum SelfTest {
                 let trace = played.take()
                 if let last = trace.lastIndex(where: { $0 > 0.25 }), let next = trace.firstIndex(where: { $0 < -0.25 }), next > last {
                     let gap = next - last - 1
-                    if gap <= 0 || gap % symbol != 0 { problems.append("語音的佇列空掉之後，停了 \(gap) 個取樣才接回去，不是符號長度（\(symbol)）的整數倍") }
-                    details.append("語音的佇列空掉之後停了 \(gap) 個取樣（\(gap / symbol) 個符號）才接回去")
+                    if gap <= 0 || gap % symbol != 0 { problems.append("語音的佇列空掉之後，停了 \(gap) 個取樣才接回去，不是那個單位（\(symbol)）的整數倍") }
+                    details.append("語音的佇列空掉之後停了 \(gap) 個取樣（\(gap / symbol) 個單位，每個 \(symbol)）才接回去")
                 } else {
                     problems.append("語音的佇列空掉之後：兩段語音沒有都播出來")
                 }
             } else {
                 problems.append("模擬的輸出開不起來")
             }
+        }
+
+        // 8. 版面選「疊加」、短波的模式：畫面照平常的速度送，RADE V1 的語音疊在同一個頻帶上，兩邊功率相同
+        settings.voiceLayout = .overlay
+        Demo.spin(0.1)
+        if let fm = Modes.find(3) {
+            settings.txModeID = fm.id
+            Demo.spin(0.1)
+            if model.voiceWithTransmit { problems.append("版面選「疊加」、模式 \(fm.id) 是 FM 用的，卻算「和語音一起送」") }
+        }
+        if let hf = Modes.find(14) {
+            let overlay = VoiceLayout.overlay
+            settings.txModeID = hf.id
+            Demo.spin(0.1)
+            if !model.voiceWithTransmit { problems.append("版面選「疊加」、選的是短波的模式 \(hf.id)，卻不算「和語音一起送」") }
+            let frames = 9   // 六秒：RADE V1 的接收端要半秒多才同步
+            let overlaid = transmit("疊加", frames: frames, speak: true) + Demo.silence(seconds: 0.5)
+            let sentFrames = model.txFramesSent
+            // 平常的接收機直接收：語音對它來說是雜訊，畫面都還在（標頭不一定每張都解得出來）
+            let pictures = Demo.receive(overlaid).flatMap(\.frames).filter { $0.decoded && $0.modeID == hf.id }
+            if pictures.count < sentFrames - 1 || pictures.count > sentFrames {
+                problems.append("疊加：平常的接收機收到 \(pictures.count) 張，app 說送了 \(sentFrames) 張")
+            }
+            // 每一張在空中的時間和平常一樣（沒有放慢）
+            let each = (Double(overlaid.count) / rate - 0.5 - AppModel.pttLeadSeconds - overlay.endSeconds) / Double(max(sentFrames, 1))
+            if abs(each - hf.frameSeconds) > 0.1 { problems.append(String(format: "疊加：每張 %.2f 秒，應該是 %.2f 秒", each, hf.frameSeconds)) }
+            // 語音那一路：RADE V1 的解碼器解得出語音，結尾有「結束」的標記；RADE V2 的那一種對它沒有反應
+            let voiceOut = listen(overlaid, layout: overlay)
+            let heardOverlay = Double(voiceOut?.heard.count ?? 0) / rate
+            if !(voiceOut?.everSynced ?? false) || heardOverlay < 1.5 {
+                problems.append(String(format: "疊加：語音那一路只解出 %.1f 秒的語音", heardOverlay))
+            }
+            if (voiceOut?.oversEnded ?? 0) != 1 { problems.append("疊加：語音的結尾收到 \(voiceOut?.oversEnded ?? 0) 次「結束」的標記，應該是 1 次") }
+            if listen(overlaid)?.everSynced ?? false { problems.append("疊加的訊號，分頻版面（RADE V2）的語音接收端卻同步了") }
+            // 兩個訊號在同一個頻帶裡
+            let band = share(overlaid, 340, 2660)
+            if band < 0.97 { problems.append(String(format: "疊加：頻譜不對，352–2648 Hz 只佔 %.0f%%", band * 100)) }
+            // 交給 app 接收：畫面進「最近收到」（每張只進一次，沒有另一個接收機重複交）、右側欄知道收到語音、喇叭有聲音
+            let speakerOverlay = SampleCollector()
+            let beforeOverlay = model.history.count
+            model.debugStartReceiving { speakerOverlay.append($0) }
+            var sawOverlayVoice = false
+            var at = 0
+            while at < overlaid.count {
+                model.debugReceive(Array(overlaid[at..<min(at + block, overlaid.count)]))
+                Demo.spin(0.12)
+                if model.voiceRxSynced { sawOverlayVoice = true }
+                at += block
+            }
+            model.debugReceive(Demo.silence(seconds: 4))
+            Demo.spin(0.3)
+            let gotOverlay = model.history.count - beforeOverlay
+            if gotOverlay < sentFrames - 1 || gotOverlay > sentFrames {
+                problems.append("疊加，交給 app 接收：「最近收到」多了 \(gotOverlay) 張，送的是 \(sentFrames) 張")
+            }
+            if !sawOverlayVoice { problems.append("疊加，交給 app 接收：右側欄一直不知道收到了語音") }
+            if model.voiceRxSynced { problems.append("疊加：訊號沒了之後，右側欄還顯示收到語音") }
+            if Demo.power(speakerOverlay.take()) < 1e-7 { problems.append("疊加，交給 app 接收：喇叭沒有聲音") }
+            details.append(String(format: "疊加（模式 %d）：送 %d 張、平常的接收機收到 %d 張（標頭正確 %d），每張 %.2f 秒；語音解出 %.1f 秒、"
+                                      + "量到的訊雜比 %.0f dB、「結束」標記 %d 次；app 接收 %d 張、顯示收到語音",
+                                  hf.id, sentFrames, pictures.count, pictures.filter(\.headerOK).count, each, heardOverlay, voiceOut?.snrDb ?? 0,
+                                  voiceOut?.oversEnded ?? 0, gotOverlay))
+
+            // 語音一陣一陣地來不及：停的長度是 RADE V1 一個數據幀（120 毫秒）的整數倍，對方不必重新同步。
+            // V1 的語音墊了 0.24 秒才送，所以「麥克風」要停久一點（0.45 秒）佇列才會空掉。
+            // 這一步不要求「結束」的標記：V1 的接收端停超過半秒左右就會失去同步、要 0.6 秒才接回來，慢的機器上停的時間拉長、
+            // 又剛好在結尾前的話標記就收不到（停的長度對不對，上面第 7 步直接看輸出；停一到三個數據幀標記照樣收到，語音模組的測試看）
+            let choppyOverlay = transmit("疊加、語音來不及", frames: frames, speak: true, hiccup: 0.45) + Demo.silence(seconds: 0.5)
+            let overlayGaps = model.debugVoiceGaps
+            let choppyOut = listen(choppyOverlay, layout: overlay)
+            if overlayGaps < 1 { problems.append("疊加、語音來不及：語音的佇列應該空掉過，卻沒有") }
+            if (choppyOut?.oversEnded ?? 0) > 1 { problems.append("疊加、語音來不及：語音的結尾收到 \(choppyOut?.oversEnded ?? 0) 次「結束」的標記") }
+            if Double(choppyOut?.heard.count ?? 0) / rate < 1.5 { problems.append("疊加、語音來不及：對方只解出不到 1.5 秒的語音") }
+            details.append("疊加、語音一陣一陣地來不及（中途停了 \(overlayGaps) 次再接上）：對方照樣解得出語音（「結束」標記 \(choppyOut?.oversEnded ?? 0) 次）")
         }
         report(name, problems.isEmpty, problems.isEmpty ? details.joined(separator: "；") : problems.joined(separator: "；"))
     }

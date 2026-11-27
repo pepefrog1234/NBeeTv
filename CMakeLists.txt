@@ -22,7 +22,7 @@ option(NBTV_MACOS_SECOND_APP "Also build NBTV 2.app, a second copy with its own 
 option(NBTV_BUILD_DESKTOP_APP "Build nbtv-gui, the desktop app for Windows and Linux (SDL3 + Dear ImGui, fetched at configure time)" OFF)
 option(NBTV_INSTALL_FLAT "Install the tools, models/ and documents side by side in one directory (portable package) instead of bin/ and share/" OFF)
 option(NBTV_STATIC_TOOLS "Link the command line tools fully statically (Linux: no dependency on the distribution or its glibc)" OFF)
-option(NBTV_VOICE "Build in the real-time voice codec (FreeDV RADE V2) for voice plus picture on FM; fetches and builds rade_c and Opus (see voice/CMakeLists.txt)" OFF)
+option(NBTV_VOICE "Build in the real-time voice codec (FreeDV RADE V1 and V2) for sending voice along with pictures; fetches and builds rade_c and Opus (see voice/CMakeLists.txt)" OFF)
 
 # 語音的編解碼器（rade_c 與 Opus）是 C 寫的。命令列工具、測試與兩個 app 都會連結它，所以 C 在這裡（它們共同的最上層）開，
 # 不在 voice/ 裡開。

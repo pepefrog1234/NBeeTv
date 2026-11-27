@@ -279,25 +279,32 @@ struct SidePanel: View {
 
     // MARK: 同時送語音
 
-    /// 「同時送語音」的開關與版面，下面一行說明現在的狀況。app 裡有語音的編解碼器才有這一列；
-    /// 只對 FM 用的模式有作用，發射中不能改（這一次怎麼送，按下發射時就定了）。
+    /// 「同時送語音」的開關與版面（下拉選單），下面一行說明現在的狀況。app 裡有語音的編解碼器才有這一列；
+    /// 模式要配得上版面才有作用（「標準」「窄」配 FM 用的模式，「疊加」配短波的），發射中不能改（這一次怎麼送，按下發射時就定了）。
     private var voiceRow: some View {
         let settings = model.settings
-        let usable = Voice.supports(Modes.find(settings.txModeID))
+        let usable = settings.voiceLayout.supports(Modes.find(settings.txModeID))
         let idle = model.txPhase == .idle
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 CheckBox(isOn: Binding(get: { settings.voiceEnabled }, set: { settings.voiceEnabled = $0 }), title: L("同時送語音"))
                     .disabled(!idle)
-                    .help(L("發射時把麥克風的語音和畫面一起送，接收時也聽得到對方這樣送的語音。只有 FM 用的模式可以；畫面會放慢，每張比較久。語音用的是 FreeDV 的 RADE V2，還是測試版"))
+                    .help(L("發射時把麥克風的語音和畫面一起送，接收時也聽得到對方這樣送的語音。FM 用的模式選「標準」或「窄」：語音用 FreeDV 的 RADE V2（還是測試版），畫面會放慢，每張比較久。短波的模式選「疊加」：語音用 FreeDV 的 RADE V1，直接疊在畫面上"))
                 Spacer(minLength: 0)
-                SegmentedControl(options: [(VoiceLayout.standard, L("標準")), (VoiceLayout.narrow, L("窄"))],
-                                 selection: Binding(get: { settings.voiceLayout }, set: { settings.voiceLayout = $0 }),
-                                 horizontalPadding: 9, fillWidth: false)
-                    .disabled(!idle || !settings.voiceEnabled)
-                    .opacity(settings.voiceEnabled ? 1 : 0.45)
-                    .accessibilityLabel(L("和語音一起送時的版面"))
-                    .help(L("標準：畫面放慢 1.5 倍，佔到 2866 Hz。窄：放慢 1.8 倍，只佔到 2611 Hz，電台的音訊上緣比較窄時用。收發兩邊要選一樣的"))
+                // 版面是下拉選單：三個選項排成一列的話，名稱比較長的語言放不下
+                Button {
+                    showPopupMenu(VoiceLayout.allCases.map { layout in
+                        PopupItem(title: layout.title, selected: layout == settings.voiceLayout) { settings.voiceLayout = layout }
+                    })
+                } label: {
+                    PopupButtonLabel(title: settings.voiceLayout.title).fixedSize(horizontal: true, vertical: false)
+                }
+                .buttonStyle(.plain)
+                .disabled(!idle || !settings.voiceEnabled)
+                .opacity(settings.voiceEnabled ? 1 : 0.45)
+                .accessibilityLabel(L("和語音一起送時的版面"))
+                .accessibilityValue(settings.voiceLayout.title)
+                .help(L("標準、窄：給 FM 用的模式，語音與畫面各佔一段頻率。標準把畫面放慢 1.5 倍，佔到 2866 Hz；窄放慢 1.8 倍，只佔到 2611 Hz，電台的音訊上緣比較窄時用。疊加：給短波的模式，畫面不放慢，語音直接疊在同一段頻率上；兩個訊號互相干擾，畫面與語音都比單獨送差，訊號夠強才值得用。只用 FreeDV 的人聽得到語音，沒有開這個功能的人照樣收得到畫面。收發兩邊要選一樣的"))
             }
             .opacity(usable || settings.voiceEnabled ? 1 : 0.6)
             if settings.voiceEnabled {
@@ -319,9 +326,12 @@ struct SidePanel: View {
         if model.voiceRxSynced {
             return model.voiceRxSnrDb.map { L("收到語音 · 訊雜比 %@", AppModel.snrText($0)) } ?? L("收到語音")
         }
-        guard let mode = Modes.find(settings.txModeID), Voice.supports(mode) else { return L("這個模式不能同時送語音：請選 FM 用的模式") }
-        return L("和語音一起送時每張 %@（畫面放慢 %@ 倍）", L("%.2f 秒", mode.frameSeconds * settings.voiceLayout.slowFactor),
-                 String(format: "%.1f", settings.voiceLayout.slowFactor))
+        let layout = settings.voiceLayout
+        guard let mode = Modes.find(settings.txModeID), layout.supports(mode) else {
+            return layout.isOverlay ? L("「疊加」要配短波的模式；FM 用的請選「標準」或「窄」") : L("「標準」「窄」要配 FM 用的模式；短波的請選「疊加」")
+        }
+        if layout.isOverlay { return L("語音疊在畫面上：每張 %@，兩邊都比單獨送差", L("%.2f 秒", mode.frameSeconds)) }
+        return L("和語音一起送時每張 %@（畫面放慢 %@ 倍）", L("%.2f 秒", mode.frameSeconds * layout.slowFactor), String(format: "%.1f", layout.slowFactor))
     }
 
     /// 輸出音量：送去電台的聲音大小。放在發射鈕上面，發射中可以一邊看電台的 ALC 一邊調，改了立刻生效。

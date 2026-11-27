@@ -32,9 +32,10 @@ static_assert(NBTV_IMAGE_MAX_WIDTH == nbtv::kMaxImageWidth && NBTV_IMAGE_MAX_HEI
 static_assert(NBTV_CALLSIGN_MAX == nbtv::kCallsignMaxChars);
 static_assert(NBTV_SPECTRUM_BINS == nbtv::kSpectrumBins);
 static_assert(NBTV_DUPLEX_STANDARD == static_cast<int>(nbtv::DuplexLayout::Standard) && NBTV_DUPLEX_NARROW == static_cast<int>(nbtv::DuplexLayout::Narrow));
+static_assert(NBTV_DUPLEX_OVERLAY == static_cast<int>(nbtv::DuplexLayout::Overlay));
 static_assert(NBTV_DUPLEX_RATE == nbtv::kDuplexRate && NBTV_DUPLEX_PICTURE_RATE == nbtv::kDuplexPictureRate && NBTV_DUPLEX_VOICE_RATE == nbtv::kDuplexVoiceRate);
 static_assert(NBTV_DUPLEX_PICTURE_RATE == nbtv::kSampleRate);
-static_assert(NBTV_DUPLEX_OFF != NBTV_DUPLEX_STANDARD && NBTV_DUPLEX_OFF != NBTV_DUPLEX_NARROW);
+static_assert(NBTV_DUPLEX_OFF != NBTV_DUPLEX_STANDARD && NBTV_DUPLEX_OFF != NBTV_DUPLEX_NARROW && NBTV_DUPLEX_OFF != NBTV_DUPLEX_OVERLAY);
 
 namespace {
 
@@ -59,7 +60,9 @@ void fill(const Mode& m, nbtv_mode_info* out) {
 
 constexpr bool valid_rate(int sample_rate) { return sample_rate == 12000 || sample_rate == 48000; }
 
-constexpr bool valid_layout(int layout) { return layout == NBTV_DUPLEX_STANDARD || layout == NBTV_DUPLEX_NARROW; }
+constexpr bool valid_layout(int layout) {
+    return layout == NBTV_DUPLEX_STANDARD || layout == NBTV_DUPLEX_NARROW || layout == NBTV_DUPLEX_OVERLAY;
+}
 
 // 這個模式的一張畫面
 std::span<const std::uint8_t> rgb_span(const std::uint8_t* rgb, const Mode& mode) {
@@ -81,7 +84,7 @@ struct nbtv_tx {
     const Mode* mode = &nbtv::kModes.front();
     nbtv::Transmitter tx;
     nbtv::Interpolator4 up;
-    // 語音與畫面共用 FM 語音通道（nbtv_tx_set_duplex）：打開時取代上面那個重取樣，只推畫面、不推語音
+    // 和語音一起送（nbtv_tx_set_duplex）：打開時取代上面那個重取樣，只推畫面、不推語音
     std::optional<nbtv::DuplexTx> duplex;
     bool need_flush = false;
     std::vector<float> last_values;  // 最近編的那一張畫面的通道值（nbtv_tx_last_values）；沒有、或那一幀取消了就是空的
@@ -135,7 +138,8 @@ struct nbtv_rx {
     int rate = nbtv::kSampleRate;
     nbtv::Receiver rx;
     nbtv::Decimator4 down;
-    // 語音與畫面共用 FM 語音通道（nbtv_rx_set_duplex）：打開時取代上面那個重取樣，只分出畫面那一路
+    // 語音與畫面共用 FM 語音通道（nbtv_rx_set_duplex）：打開時取代上面那個重取樣，只分出畫面那一路。
+    // 疊加的版面用不到：畫面沒有動過，照平常收
     std::optional<nbtv::DuplexRx> duplex;
     std::vector<float> clean;    // 重取樣之前先整理過的取樣（非有限值換成 0，見 dsp.hpp 的 clean_sample）
     std::vector<float> scratch;
@@ -392,7 +396,8 @@ void nbtv_rx_reset(nbtv_rx* rx) {
 
 int nbtv_rx_set_duplex(nbtv_rx* rx, int layout) {
     if (rx == nullptr) return -1;
-    if (layout == NBTV_DUPLEX_OFF) {
+    if (layout == NBTV_DUPLEX_OFF || layout == NBTV_DUPLEX_OVERLAY) {
+        // 疊加的版面：畫面沒有放慢也沒有搬過，照平常收就是了（語音疊在上面，接收機把它當成雜訊）
         rx->duplex.reset();
         rx->rx.tuning().band_shift_hz = 0.0;
     } else {
@@ -524,19 +529,21 @@ int nbtv_spectrum_poll(nbtv_spectrum* sp, float* db) {
 
 }  // extern "C"
 
-/* ---- 語音與畫面共用 FM 語音通道 ---- */
+/* ---- 語音與畫面一起送 ---- */
 
 double nbtv_duplex_slow_factor(int layout) { return valid_layout(layout) ? nbtv::duplex_slow_factor(static_cast<nbtv::DuplexLayout>(layout)) : 0.0; }
 
-double nbtv_duplex_picture_low_hz(int layout) { return valid_layout(layout) ? nbtv::kPictureLow : 0.0; }
+double nbtv_duplex_picture_low_hz(int layout) { return valid_layout(layout) ? nbtv::duplex_picture_low(static_cast<nbtv::DuplexLayout>(layout)) : 0.0; }
 
 double nbtv_duplex_picture_high_hz(int layout) { return valid_layout(layout) ? nbtv::duplex_picture_high(static_cast<nbtv::DuplexLayout>(layout)) : 0.0; }
 
-double nbtv_duplex_voice_low_hz(int layout) { return valid_layout(layout) ? nbtv::kVoiceCentre - nbtv::kVoiceHalfBand : 0.0; }
+double nbtv_duplex_voice_low_hz(int layout) { return valid_layout(layout) ? nbtv::duplex_voice_low(static_cast<nbtv::DuplexLayout>(layout)) : 0.0; }
 
-double nbtv_duplex_voice_high_hz(int layout) { return valid_layout(layout) ? nbtv::kVoiceCentre + nbtv::kVoiceHalfBand : 0.0; }
+double nbtv_duplex_voice_high_hz(int layout) { return valid_layout(layout) ? nbtv::duplex_voice_high(static_cast<nbtv::DuplexLayout>(layout)) : 0.0; }
 
 double nbtv_duplex_band_shift_hz(int layout) { return valid_layout(layout) ? nbtv::duplex_band_shift_hz(static_cast<nbtv::DuplexLayout>(layout)) : 0.0; }
+
+int nbtv_duplex_voice_codec(int layout) { return valid_layout(layout) ? nbtv::duplex_voice_codec(static_cast<nbtv::DuplexLayout>(layout)) : 0; }
 
 nbtv_duplex_tx* nbtv_duplex_tx_create(int layout) {
     return valid_layout(layout) ? new nbtv_duplex_tx(static_cast<nbtv::DuplexLayout>(layout)) : nullptr;

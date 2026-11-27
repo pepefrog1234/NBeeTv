@@ -1024,8 +1024,10 @@ void UI::draw_side_panel(const Rect& rect) {
             voice_note = L("這一次發射沒有語音");
         } else if (app_.voice_rx_synced) {
             voice_note = app_.voice_rx_snr_db ? LF("收到語音 · 訊雜比 %@", {App::snr_text(*app_.voice_rx_snr_db)}) : L("收到語音");
-        } else if (!voice::supports(chosen)) {
-            voice_note = L("這個模式不能同時送語音：請選 FM 用的模式");
+        } else if (!voice::supports(chosen, settings.voice_layout)) {
+            voice_note = voice::is_overlay(settings.voice_layout) ? L("「疊加」要配短波的模式；FM 用的請選「標準」或「窄」") : L("「標準」「窄」要配 FM 用的模式；短波的請選「疊加」");
+        } else if (voice::is_overlay(settings.voice_layout)) {
+            voice_note = LF("語音疊在畫面上：每張 %@，兩邊都比單獨送差", {LF("%.2f 秒", {chosen->frame_seconds})});
         } else {
             const double slow = voice::slow_factor(settings.voice_layout);
             char factor[16];
@@ -1245,11 +1247,13 @@ void UI::draw_side_panel(const Rect& rect) {
     y += S(40);
     paragraph(dl, regular_, 12, left, y, width, kTertiary, summary);
 
-    // ---- 同時送語音：開關與版面，下面一行說明。只對 FM 用的模式有作用；發射中不能改（這一次怎麼送，按下發射時就定了）
+    // ---- 同時送語音：開關與版面，下面一行說明。模式要配得上版面才有作用（「標準」「窄」配 FM 用的模式，「疊加」配短波的）；
+    //      發射中不能改（這一次怎麼送，按下發射時就定了）。版面是下拉選單：三個選項排成一列的話，名稱比較長的語言放不下
     if (voice_row) {
         y += summary_h + S(10);
-        const std::string standard = L("標準"), narrow = L("窄");
-        const float layout_w = std::max(S(84), text_width(bold_, 12.5f, standard) + text_width(bold_, 12.5f, narrow) + S(36));
+        float layout_w = 0;   // 照最長的那個名稱留寬度：換版面時這個鈕不會忽大忽小
+        for (const VoiceLayout each : voice::kLayouts) layout_w = std::max(layout_w, text_width(regular_, 12.5f, voice::layout_title(each)));
+        layout_w += S(10) + S(8) + S(12) + S(10);
         const Rect layout_rect{rect.right() - S(16) - layout_w, y, layout_w, S(28)};
         ImGui::BeginDisabled(busy);
         if (checkbox("##voice", left, y + S(5), fitted(regular_, 12.5f, L("同時送語音"), layout_rect.x - left - S(34)), settings.voice_enabled)) {
@@ -1257,14 +1261,31 @@ void UI::draw_side_panel(const Rect& rect) {
             app_.voice_settings_changed();
         }
         ImGui::EndDisabled();
-        tooltip(L("發射時把麥克風的語音和畫面一起送，接收時也聽得到對方這樣送的語音。只有 FM 用的模式可以；畫面會放慢，每張比較久。語音用的是 FreeDV 的 RADE V2，還是測試版"));
-        const int current_layout = settings.voice_layout == VoiceLayout::standard ? 0 : 1;
-        const int layout = segmented("##voicelayout", layout_rect, {standard, narrow}, current_layout, !busy && settings.voice_enabled);
-        if (layout != current_layout) {
-            settings.voice_layout = layout == 0 ? VoiceLayout::standard : VoiceLayout::narrow;
-            app_.voice_settings_changed();
+        tooltip(L("發射時把麥克風的語音和畫面一起送，接收時也聽得到對方這樣送的語音。FM 用的模式選「標準」或「窄」：語音用 FreeDV 的 RADE V2（還是測試版），畫面會放慢，每張比較久。短波的模式選「疊加」：語音用 FreeDV 的 RADE V1，直接疊在畫面上"));
+        if (popup_button("##voicelayout", layout_rect, voice::layout_title(settings.voice_layout), !busy && settings.voice_enabled)) ImGui::OpenPopup("##voicelayoutmenu");
+        tooltip(L("標準、窄：給 FM 用的模式，語音與畫面各佔一段頻率。標準把畫面放慢 1.5 倍，佔到 2866 Hz；窄放慢 1.8 倍，只佔到 2611 Hz，電台的音訊上緣比較窄時用。疊加：給短波的模式，畫面不放慢，語音直接疊在同一段頻率上；兩個訊號互相干擾，畫面與語音都比單獨送差，訊號夠強才值得用。只用 FreeDV 的人聽得到語音，沒有開這個功能的人照樣收得到畫面。收發兩邊要選一樣的"));
+        ImGui::SetNextWindowPos(ImVec2(layout_rect.x, layout_rect.bottom() + S(4)));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(6), S(6)));
+        ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, S(8));
+        ImGui::PushStyleColor(ImGuiCol_PopupBg, kMenu);
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, kMenuSelected);
+        ImGui::PushStyleColor(ImGuiCol_Header, kMenuSelected);
+        ImGui::PushStyleColor(ImGuiCol_Text, kText);
+        if (ImGui::BeginPopup("##voicelayoutmenu")) {
+            close_popup_on_escape();
+            ImGui::PushFont(regular_, 12.5f * scale_);
+            for (const VoiceLayout each : voice::kLayouts) {
+                if (ImGui::Selectable(voice::layout_title(each).c_str(), each == settings.voice_layout, ImGuiSelectableFlags_None, ImVec2(layout_w - S(12), 0)) &&
+                    each != settings.voice_layout) {
+                    settings.voice_layout = each;
+                    app_.voice_settings_changed();
+                }
+            }
+            ImGui::PopFont();
+            ImGui::EndPopup();
         }
-        tooltip(L("標準：畫面放慢 1.5 倍，佔到 2866 Hz。窄：放慢 1.8 倍，只佔到 2611 Hz，電台的音訊上緣比較窄時用。收發兩邊要選一樣的"));
+        ImGui::PopStyleColor(4);
+        ImGui::PopStyleVar(2);
         if (!voice_note.empty()) paragraph(dl, regular_, 12, left, y + S(30) + S(4), width, kTertiary, voice_note);
     }
 

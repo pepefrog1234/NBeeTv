@@ -67,8 +67,12 @@ Settings demo_settings(SourceKind source) {
         settings.canvas_enabled = true;
     }
     settings.show_frame_snr = std::getenv("NBTV_SNAPSHOT_SNR") != nullptr;
-    // 開發用：NBTV_SNAPSHOT_VOICE=1 時「同時送語音」是勾著的（程式裡要有語音的編解碼器；配 NBTV_SNAPSHOT_FM=1 看 FM 用的模式下的樣子）
-    settings.voice_enabled = std::getenv("NBTV_SNAPSHOT_VOICE") != nullptr;
+    // 開發用：NBTV_SNAPSHOT_VOICE=1 時「同時送語音」是勾著的（程式裡要有語音的編解碼器；配 NBTV_SNAPSHOT_FM=1 看 FM 用的模式下的樣子）；
+    // NBTV_SNAPSHOT_VOICE=overlay 時版面選「疊加」（配短波的模式）
+    if (const char* voice = std::getenv("NBTV_SNAPSHOT_VOICE")) {
+        settings.voice_enabled = true;
+        if (std::string(voice) == "overlay") settings.voice_layout = VoiceLayout::overlay;
+    }
     return settings;
 }
 

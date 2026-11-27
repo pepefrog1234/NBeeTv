@@ -12,13 +12,21 @@ extern "C" {
 
 #define NBTV_RADE_SPEECH_FRAME 160
 
-/* 訊號的一個符號有幾個複數（含循環字首）。 */
-int nbtv_rade_symbol_samples(void);
+/* 哪一版的 RADE（rade_c 兩版都有，權重也都編在裡面）。數字和 nbtv/voice.h 的 NBTV_VOICE_RADE_V1、_V2 相同。 */
+#define NBTV_RADE_V1 1
+#define NBTV_RADE_V2 2
+
+/*
+ * 訊號中途停下來再接回去時，停的長度要是幾個複數的整數倍，對方的接收端才不必重新同步。
+ * V2 是一個符號（含循環字首，160 個）；V1 是一個數據幀（4 個資料符號加 1 個導頻符號，960 個）。version 不對回傳 0。
+ */
+int nbtv_rade_gap_samples(int version);
 
 /* ---- 發射 ---- */
 typedef struct nbtv_rade_tx nbtv_rade_tx;
 
-nbtv_rade_tx *nbtv_rade_tx_open(void);
+/* version 是 NBTV_RADE_V1 或 NBTV_RADE_V2；不對回傳 NULL。 */
+nbtv_rade_tx *nbtv_rade_tx_open(int version);
 void nbtv_rade_tx_close(nbtv_rade_tx *tx);
 void nbtv_rade_tx_reset(nbtv_rade_tx *tx);
 /* 一次呼叫最多寫出幾個複數（iq 要有兩倍這麼多個 float）。 */
@@ -31,7 +39,7 @@ int nbtv_rade_tx_finish(nbtv_rade_tx *tx, float *iq);
 /* ---- 接收 ---- */
 typedef struct nbtv_rade_rx nbtv_rade_rx;
 
-nbtv_rade_rx *nbtv_rade_rx_open(void);
+nbtv_rade_rx *nbtv_rade_rx_open(int version);
 void nbtv_rade_rx_close(nbtv_rade_rx *rx);
 void nbtv_rade_rx_reset(nbtv_rade_rx *rx);
 /* 下一次 nbtv_rade_rx_push 要給幾個複數（每次不一定一樣：接收端靠它跟著對方的時脈），以及最多會要幾個。 */
@@ -43,6 +51,7 @@ int nbtv_rade_rx_max_speech(const nbtv_rade_rx *rx);
 int nbtv_rade_rx_push(nbtv_rade_rx *rx, const float *iq, float *speech, int *ended);
 int nbtv_rade_rx_synced(nbtv_rade_rx *rx);
 float nbtv_rade_rx_snr_db(nbtv_rade_rx *rx);
+/* 兩邊取樣時脈的差。V1 不估這個數字：一律是 0。 */
 float nbtv_rade_rx_clock_ppm(nbtv_rade_rx *rx);
 
 #ifdef __cplusplus

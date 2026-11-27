@@ -1,8 +1,11 @@
-// 語音與畫面共用 FM 語音通道（duplex.hpp）：重取樣、搬頻、兩路的合成與分離，
+// 語音與畫面一起送（duplex.hpp）：重取樣、搬頻、兩路的合成與分離，
 // 以及畫面經過這一層之後原來的接收機照樣收得到（包括兩邊音效卡的取樣時脈有差的時候）。
-// 核心不含語音的編解碼器，這裡的「語音」是替身：和 RADE V2 同樣位置、同樣寬的一組單音。
+// 三種版面：FM 語音通道分頻的兩種，和語音直接疊在畫面上的「疊加」。
+// 核心不含語音的編解碼器，這裡的「語音」是替身：和 RADE V2（或 V1）同樣位置、同樣寬的一組單音。
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <span>
@@ -48,9 +51,11 @@ void test_resampler() {
         int up, down;
         double in_rate, pass, stop;
     };
-    // 兩種版面畫面那一路的往上、往下，以及語音那一路的
+    // 兩種分頻的版面畫面那一路的往上、往下，以及語音那一路的；最後四個是疊加的版面的（畫面 12 kHz ↔ 48 kHz，語音留到 3 kHz）
     for (const Case& c : {Case{6, 1, 8000.0, 2891.0, 5109.0}, Case{1, 6, 48000.0, 2891.0, 5109.0}, Case{36, 5, 12000.0 / 1.8, 2636.0, 4031.0},
-                          Case{5, 36, 48000.0, 2636.0, 4031.0}, Case{6, 1, 8000.0, 1335.0, 6665.0}, Case{1, 6, 48000.0, 1335.0, 6665.0}}) {
+                          Case{5, 36, 48000.0, 2636.0, 4031.0}, Case{6, 1, 8000.0, 1335.0, 6665.0}, Case{1, 6, 48000.0, 1335.0, 6665.0},
+                          Case{4, 1, 12000.0, 2673.0, 9327.0}, Case{1, 4, 48000.0, 2673.0, 9327.0}, Case{6, 1, 8000.0, 3000.0, 5000.0},
+                          Case{1, 6, 48000.0, 3000.0, 5000.0}}) {
         const double out_rate = c.in_rate * c.up / c.down;
         const std::size_t count = static_cast<std::size_t>(c.in_rate);  // 一秒
         double worst_pass = 0.0, worst_stop = 0.0;
@@ -147,24 +152,69 @@ void test_numbers() {
     CHECK_NEAR(duplex_band_shift_hz(DuplexLayout::Narrow), 2051.0, 1e-9);
     // 語音的上緣到畫面的下緣之間留了一段空隙
     CHECK(kVoiceCentre + kVoiceHalfBand < kPictureLow && kVoiceCentre + kVoiceStopBand <= kPictureLow);
+    CHECK_NEAR(duplex_voice_low(DuplexLayout::Standard), 360.0, 1e-9);
+    CHECK_NEAR(duplex_voice_high(DuplexLayout::Narrow), 1220.0, 1e-9);
+    CHECK_NEAR(duplex_picture_low(DuplexLayout::Standard), kPictureLow, 0.0);
+    CHECK_EQ(duplex_voice_codec(DuplexLayout::Standard), 2);
+    CHECK_EQ(duplex_voice_codec(DuplexLayout::Narrow), 2);
+    // 疊加：畫面沒有放慢也沒有搬；語音是 RADE V1 的，整個落在畫面的頻帶裡
+    const DuplexLayout overlay = DuplexLayout::Overlay;
+    CHECK_NEAR(duplex_slow_factor(overlay), 1.0, 0.0);
+    CHECK_NEAR(duplex_picture_low(overlay), kModemLow, 0.0);
+    CHECK_NEAR(duplex_picture_high(overlay), kModemHigh, 0.0);
+    CHECK_NEAR(duplex_band_shift_hz(overlay), 0.0, 0.0);
+    CHECK_EQ(duplex_voice_codec(overlay), 1);
+    CHECK(duplex_voice_low(overlay) > duplex_picture_low(overlay) && duplex_voice_high(overlay) < duplex_picture_high(overlay));
+    CHECK_NEAR(0.5 * (duplex_voice_low(overlay) + duplex_voice_high(overlay)), kOverlayVoiceCentre, 1e-9);
 }
 
-// 語音的替身：8 kHz 的複數、中心 1500 Hz，14 個載波相隔 62.5 Hz（RADE V2 的位置），均方根 kVoiceNominalRms。
-// 各個載波的相位取成包絡起伏小的那一種。128 個取樣重複一次。
-constexpr int kVoiceTones = 14;
-constexpr double kVoiceToneSpacing = 62.5;
+// 語音的替身：8 kHz 的複數，一組等距的單音，均方根是那一版 RADE 平常的大小。各個載波的相位取成包絡起伏小的那一種。
+//   V2  中心 1500 Hz，14 個載波相隔 62.5 Hz。128 個取樣重複一次
+//   V1  中心 1477.5 Hz，30 個載波相隔 50 Hz。3200 個取樣重複一次
+struct VoiceTones {
+    double centre;
+    int tones;
+    double spacing;
+    double rms;
+    std::size_t period;  // 幾個取樣重複一次：看這麼長（或它的整數倍）時各個單音彼此正交
+    double hz(int k) const { return centre + (k - 0.5 * (tones - 1)) * spacing; }
+};
+constexpr VoiceTones kLikeV2{kVoiceInputCentre, 14, 62.5, kVoiceNominalRms, 128};
+constexpr VoiceTones kLikeV1{kOverlayVoiceCentre, 30, 50.0, kOverlayVoiceNominalRms, 3200};
 
-double voice_tone_hz(int k) { return kVoiceInputCentre + (k - 0.5 * (kVoiceTones - 1)) * kVoiceToneSpacing; }
-
-std::vector<cf> stand_in_voice(std::size_t count) {
+std::vector<cf> stand_in_voice(std::size_t count, const VoiceTones& like = kLikeV2) {
     std::vector<cf> v(count);
     for (std::size_t n = 0; n < count; ++n) {
         cd acc(0, 0);
-        for (int k = 0; k < kVoiceTones; ++k) {
-            acc += std::polar(1.0, kTwoPi * voice_tone_hz(k) * static_cast<double>(n) / kDuplexVoiceRate + kPi * k * k / kVoiceTones);
+        for (int k = 0; k < like.tones; ++k) {
+            acc += std::polar(1.0, kTwoPi * like.hz(k) * static_cast<double>(n) / kDuplexVoiceRate + kPi * k * k / like.tones);
         }
-        v[n] = cf(acc * (kVoiceNominalRms / std::sqrt(static_cast<double>(kVoiceTones))));
+        v[n] = cf(acc * (like.rms / std::sqrt(static_cast<double>(like.tones))));
     }
+    return v;
+}
+
+// 像雜訊的替身，給「疊加」用：畫面的接收機眼裡，RADE V1 的訊號就是 728–2228 Hz 裡的一層雜訊。和它一樣 30 個載波、
+// 每個符號（含循環字首 24 ms）各載波換一次隨機的相位，大小削到 1 以內（它的訊號也是削成幾乎等幅的），均方根約 0.9。
+std::vector<cf> noise_like_voice(std::size_t count, std::uint64_t seed) {
+    constexpr int kBody = 160, kPrefix = 32;
+    Rng rng(seed);
+    std::vector<cf> v;
+    v.reserve(count + kBody + kPrefix);
+    while (v.size() < count) {
+        std::array<double, 30> phase{};
+        for (double& p : phase) p = kTwoPi * rng.uniform();
+        std::array<cd, kBody> body{};
+        for (int n = 0; n < kBody; ++n) {
+            cd acc(0, 0);
+            for (int k = 0; k < kLikeV1.tones; ++k) acc += std::polar(1.0, kTwoPi * kLikeV1.hz(k) * n / kDuplexVoiceRate + phase[static_cast<std::size_t>(k)]);
+            acc *= 1.6 / std::sqrt(static_cast<double>(kLikeV1.tones));  // 均方根 1.6：削到 1 之後剩 0.9 左右
+            body[static_cast<std::size_t>(n)] = std::abs(acc) > 1.0 ? acc / std::abs(acc) : acc;
+        }
+        for (int n = kBody - kPrefix; n < kBody; ++n) v.push_back(cf(body[static_cast<std::size_t>(n)]));
+        for (int n = 0; n < kBody; ++n) v.push_back(cf(body[static_cast<std::size_t>(n)]));
+    }
+    v.resize(count);
     return v;
 }
 
@@ -174,24 +224,24 @@ struct VoiceQuality {
     double ripple_db = 200.0;  // 最強與最弱的單音差幾 dB
 };
 
-// 收到的語音訊號裡，替身的 14 個單音各有多大。看 [from, from + length)，length 取 128 的倍數（各個單音彼此正交）。
-VoiceQuality voice_quality(std::span<const cf> got, std::size_t from, std::size_t length) {
+// 收到的語音訊號裡，替身的那些單音各有多大。看 [from, from + length)，length 取 like.period 的倍數（各個單音彼此正交）。
+VoiceQuality voice_quality(std::span<const cf> got, std::size_t from, std::size_t length, const VoiceTones& like = kLikeV2) {
     VoiceQuality q;
     if (from + length > got.size() || length == 0) return q;
     double total = 0.0, tones = 0.0, strongest = 0.0, weakest = 1e30;
     for (std::size_t n = from; n < from + length; ++n) total += std::norm(got[n]);
     total /= static_cast<double>(length);
-    for (int k = 0; k < kVoiceTones; ++k) {
+    for (int k = 0; k < like.tones; ++k) {
         cd acc(0, 0);
         for (std::size_t n = from; n < from + length; ++n) {
-            acc += cd(got[n]) * std::polar(1.0, -kTwoPi * voice_tone_hz(k) * static_cast<double>(n) / kDuplexVoiceRate);
+            acc += cd(got[n]) * std::polar(1.0, -kTwoPi * like.hz(k) * static_cast<double>(n) / kDuplexVoiceRate);
         }
         const double power = std::norm(acc / static_cast<double>(length));
         tones += power;
         strongest = std::max(strongest, power);
         weakest = std::min(weakest, power);
     }
-    q.gain_db = 10.0 * std::log10(std::max(tones, 1e-20) / (kVoiceNominalRms * kVoiceNominalRms));
+    q.gain_db = 10.0 * std::log10(std::max(tones, 1e-20) / (like.rms * like.rms));
     q.snr_db = 10.0 * std::log10(std::max(tones, 1e-20) / std::max(total - tones, 1e-20));
     q.ripple_db = 10.0 * std::log10(std::max(strongest, 1e-20) / std::max(weakest, 1e-20));
     return q;
@@ -246,18 +296,21 @@ std::vector<float> picture_signal(const Mode& mode, int frames) {
 
 struct Reception {
     int good = 0;       // 有畫面、標頭也對的幀數
+    int pictures = 0;   // 有畫面的幀數（標頭對不對都算）
     int reported = 0;   // 接收機交出來的幀數
     double psnr = 0.0;  // good 的那些對原圖的平均
     double snr = 0.0;   // 接收機量到的訊雜比的平均
 };
 
-Reception receive(const Mode& mode, std::span<const float> audio, double band_shift_hz) {
+Reception receive(const Mode& mode, std::span<const float> audio, double band_shift_hz, bool quiet_carriers = true) {
     Receiver rx;
     attach_models(rx);
     rx.tuning().band_shift_hz = band_shift_hz;
+    rx.tuning().quiet_carriers = quiet_carriers;
     Reception r;
     for (const RxFrame& f : run_receiver(rx, audio)) {
         ++r.reported;
+        r.pictures += (f.decoded && f.mode_id == mode.id) ? 1 : 0;
         if (!(f.decoded && f.header_ok && f.callsign == "N0CALL" && f.mode_id == mode.id)) continue;
         ++r.good;
         r.psnr += test_images::psnr(f.rgb, test_images::load(test_images::kNames[f.sequence % 3], mode.image_width, mode.image_height));
@@ -357,6 +410,101 @@ void test_isolation_and_levels() {
     }
 }
 
+// 「疊加」的版面：畫面與語音都不濾、不搬，這一層只換取樣率、調比例。
+void test_overlay() {
+    const DuplexLayout layout = DuplexLayout::Overlay;
+    const Mode& mode = *find_mode(14);
+    const int frames = 6;
+    const std::vector<float> picture = picture_signal(mode, frames);
+    const std::vector<float> frames_only(picture.begin() + 3000, picture.end() - 6000);
+    const Reception direct = receive(mode, picture, 0.0);
+    CHECK_EQ(direct.good, frames);
+
+    // 只有畫面：原樣過去、原樣回來，只是小了一點（留給語音的份）。接收機收到的和直接收的一樣
+    const std::vector<float> picture_air = combine(layout, picture, {});
+    CHECK_NEAR(static_cast<double>(picture_air.size()), 4.0 * static_cast<double>(picture.size()), 4.0 * 1200.0 + 8.0);
+    const Separated from_picture = separate(layout, picture_air);
+    const Reception through = receive(mode, from_picture.picture, 0.0);
+    CHECK_EQ(through.good, frames);
+    CHECK_EQ(through.reported, frames);
+    CHECK_NEAR(through.psnr, direct.psnr, 0.1);
+    CHECK_NEAR(through.snr, direct.snr, 1.0);
+
+    // 只有語音（替身）：送出去的就是它的實部；接收端語音那一路交出來的是解析訊號，各個單音原樣回來。
+    // 畫面的接收機對它沒有反應
+    const std::vector<cf> voice = stand_in_voice(8000 * 4, kLikeV1);
+    const std::vector<float> voice_air = combine(layout, {}, voice);
+    const Separated from_voice = separate(layout, voice_air);
+    const std::size_t whole = kLikeV1.period * (from_voice.voice.size() / 2 / kLikeV1.period);
+    const VoiceQuality alone = voice_quality(from_voice.voice, from_voice.voice.size() / 4, whole, kLikeV1);
+    CHECK(alone.snr_db > 45.0);
+    CHECK(alone.ripple_db < 0.3);
+    CHECK_EQ(receive(mode, from_voice.picture, 0.0).reported, 0);
+
+    // 音量：預設兩路功率相同；語音調大、調小 6 dB 就差 6 dB，合起來的峰值仍然在滿刻度以內
+    const double picture_power = mean_power(std::span<const float>(combine(layout, frames_only, {})).subspan(4800, 4 * frames_only.size() - 9600));
+    const double voice_power = mean_power(std::span<const float>(voice_air).subspan(4800, voice_air.size() - 9600));
+    CHECK_NEAR(10.0 * std::log10(voice_power / picture_power), 0.0, 0.4);
+    CHECK_NEAR(alone.gain_db, 10.0 * std::log10(2.0 * voice_power / (kLikeV1.rms * kLikeV1.rms)), 0.1);
+    const std::vector<cf> noisy_voice = noise_like_voice(static_cast<std::size_t>(frames_only.size() * 2 / 3), 7);
+    {
+        double power = 0.0;
+        float peak = 0.0f;
+        for (cf v : noisy_voice) {
+            power += std::norm(v);
+            peak = std::max(peak, std::abs(v));
+        }
+        // 這個替身的大小和 RADE V1 給的差不多
+        CHECK_NEAR(std::sqrt(power / static_cast<double>(noisy_voice.size())), kOverlayVoiceNominalRms, 0.06);
+        CHECK(peak <= 1.0001f);
+    }
+    for (float db : {6.0f, 0.0f, -6.0f}) {
+        const std::vector<float> v = combine(layout, {}, voice, db), p = combine(layout, frames_only, {}, db);
+        CHECK_NEAR(10.0 * std::log10(mean_power(std::span<const float>(v).subspan(4800, v.size() - 9600)) /
+                                     mean_power(std::span<const float>(p).subspan(4800, 4 * frames_only.size() - 9600))),
+                   db, 0.4);
+        float peak = 0.0f;
+        for (float s : combine(layout, frames_only, noisy_voice, db)) peak = std::max(peak, std::fabs(s));
+        CHECK(peak < 1.0f);
+    }
+
+    // 兩個一起、功率相同：語音對畫面來說是蓋住大半個頻帶、和它一樣強的雜訊，畫面還是解得出來（畫質掉幾 dB）；
+    // 語音那一路交出來的訊號裡，語音與畫面各佔一半左右
+    const std::vector<cf> long_voice = noise_like_voice(static_cast<std::size_t>(picture.size() * 2 / 3), 11);
+    const std::vector<float> air = combine(layout, picture, long_voice);
+    float peak = 0.0f;
+    for (float v : air) peak = std::max(peak, std::fabs(v));
+    CHECK(peak < 1.0f && peak > 0.5f);
+    const Separated got = separate(layout, air);
+    const Reception together = receive(mode, got.picture, 0.0);
+    CHECK(together.pictures >= frames - 1);
+    CHECK(together.good >= frames / 2);
+    CHECK(together.psnr > direct.psnr - 7.0 && together.psnr < direct.psnr - 1.0);
+    // 語音小 12 dB 時，畫面幾乎不受影響
+    const Reception quiet_voice = receive(mode, separate(layout, combine(layout, picture, long_voice, -12.0f)).picture, 0.0);
+    CHECK_EQ(quiet_voice.good, frames);
+    CHECK(quiet_voice.psnr > direct.psnr - 2.0);
+    std::printf("  疊加、模式 %d：只有畫面 %d/%d 幀、PSNR %.2f dB（直接收 %.2f）；語音（替身）單獨來回 %.1f dB、各載波相差 %.2f dB；\n"
+                "    和一樣強的語音一起：%d 張畫面（標頭正確 %d）、PSNR %.2f dB、量到的訊雜比 %.1f dB、合成後峰值 %.2f；語音小 12 dB：%d 幀、%.2f dB\n",
+                mode.id, through.good, frames, through.psnr, direct.psnr, alone.snr_db, alone.ripple_db, together.pictures, together.good, together.psnr,
+                together.snr, static_cast<double>(peak), quiet_voice.good, quiet_voice.psnr);
+
+    // 接收機自己看得出頻帶兩端（語音蓋不到的載波）比較乾淨（RxTuning::quiet_carriers）：標頭因此比較常解得出來。
+    // 多送幾幀才看得出差別；只有畫面的時候開不開都一樣
+    const int many = 24;
+    const std::vector<float> long_picture = picture_signal(mode, many);
+    const std::vector<float> long_air = combine(layout, long_picture, noise_like_voice(static_cast<std::size_t>(long_picture.size() * 2 / 3), 5));
+    const std::vector<float> long_got = separate(layout, long_air).picture;
+    const Reception with_rule = receive(mode, long_got, 0.0, true), without_rule = receive(mode, long_got, 0.0, false);
+    CHECK(with_rule.pictures >= many - 1 && without_rule.pictures >= many - 1);
+    CHECK(with_rule.good >= without_rule.good);
+    const Reception plain_with = receive(mode, long_picture, 0.0, true), plain_without = receive(mode, long_picture, 0.0, false);
+    CHECK_EQ(plain_with.good, many);
+    CHECK_EQ(plain_without.good, many);
+    CHECK_NEAR(plain_with.psnr, plain_without.psnr, 0.01);
+    std::printf("    %d 幀、和一樣強的語音一起：標頭正確 %d 張（不看兩端比較乾淨的載波時 %d 張）\n", many, with_rule.good, without_rule.good);
+}
+
 // 把一段 48 kHz 的音訊當成接收端的取樣時脈快了 ppm（負值是慢了）重新取樣：四點內插，訊號都在 3 kHz 以下，誤差很小
 std::vector<float> with_clock_offset(std::span<const float> x, double ppm) {
     std::vector<float> y;
@@ -400,7 +548,7 @@ void test_streaming() {
     std::vector<float> picture(6000);
     for (float& v : picture) v = static_cast<float>(0.2 * rng.gauss());
     const std::vector<cf> voice = stand_in_voice(4000);
-    for (DuplexLayout layout : {DuplexLayout::Standard, DuplexLayout::Narrow}) {
+    for (DuplexLayout layout : {DuplexLayout::Standard, DuplexLayout::Narrow, DuplexLayout::Overlay}) {
         DuplexTx whole(layout), pieces(layout);
         std::vector<float> none(64, 1.0f);
         whole.read(none);  // 還沒有東西：靜音
@@ -475,6 +623,7 @@ int main() {
     test_together(DuplexLayout::Narrow, 3, 3);
     test_together(DuplexLayout::Standard, 5, 2);   // 192×144、沒有散佈導頻
     test_together(DuplexLayout::Narrow, 14, 3);    // 有散佈導頻的
+    test_overlay();
     test_clock_offset();
     return check::finish("duplex");
 }

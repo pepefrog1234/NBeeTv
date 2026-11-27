@@ -76,6 +76,15 @@ y desplazada por encima de 1335 Hz, de modo que cada imagen tarda ese tanto más
 y con él desactivado todo funciona como antes. Solo se ha comprobado en simulación, aún no con equipos reales, y el propio RADE V2 sigue siendo
 una versión preliminar que FreeDV todavía no recomienda usar en el aire. Los detalles están en las [notas técnicas](docs/TECHNICAL.md#語音與畫面共用-fm-語音通道實驗中).
 
+Los modos para HF (11 a 14) también pueden llevar voz, de otra manera (experimental): con la disposición «Superpuesta» la imagen se envía a su velocidad normal
+y la voz, con RADE V1 de FreeDV (la versión publicada), se pone encima en las mismas frecuencias y con la misma potencia. Las dos señales se interfieren
+entre sí, de modo que tanto la imagen como la voz salen claramente peor que enviadas por separado (en simulación las imágenes del modo 14 pierden 4 dB
+y la voz queda más o menos como RADE V1 solo con una SNR de −1 dB); solo compensa con señal fuerte. A cambio la imagen no se ralentiza,
+la voz sale como una señal RADE V1 sin modificar, así que quien solo tenga FreeDV también debería oírla (comprobado en ambos sentidos con las
+herramientas de referencia de RADE, aún no con el propio FreeDV), y un NBeeTv sin esta función sigue recibiendo las imágenes. La idea viene de un operador de HF que usó los dos programas
+a la vez; ya integrada, también se ha comprobado solo en simulación, aún no con equipos reales.
+Los detalles están en las [notas técnicas](docs/TECHNICAL.md#語音疊在畫面上rade-v1實驗中).
+
 ## Descarga
 
 Descarga el archivo de tu plataforma desde [Releases](https://github.com/pepefrog1234/NBeeTv/releases). Cada uno se compila y se prueba en una máquina de esa plataforma y con ese tipo de procesador.
@@ -214,7 +223,7 @@ cada uno comprobado con su SHA-256) y se compilan junto con el proyecto; no hay 
 | --- | --- |
 | `core/` | Biblioteca principal en C++20, independiente de la plataforma: transmisión y recepción OFDM, sincronización, estimación de canal e inferencia de la red neuronal. Su única interfaz pública es una API en C (`core/include/nbtv/nbtv.h`) |
 | `sim/` | Simulación del canal de HF |
-| `voice/` | Envoltorio del códec de voz en tiempo real (RADE V2 de FreeDV) para «Enviar voz a la vez»; opcional |
+| `voice/` | Envoltorio del códec de voz en tiempo real (RADE V1 y V2 de FreeDV) para «Enviar voz a la vez»; opcional |
 | `tools/` | Herramientas de línea de comandos; `tools/learned/` contiene el código de entrenamiento y exportación de los modelos (Python, PyTorch) |
 | `models/` | Archivos de pesos de los modelos |
 | `apps/macos/` | La app de macOS (SwiftUI) |
@@ -227,6 +236,7 @@ cada uno comprobado con su SHA-256) y se compilan junto con el proyecto; no hay 
 - Nada autentica una trama ni su indicativo: cualquiera puede enviar imágenes con cualquier indicativo.
 - La app de Windows y Linux es nueva y solo se ha comprobado con pruebas automáticas; todavía no se ha verificado con una radio, una tarjeta de sonido, una cámara ni un puerto serie reales.
 - «Enviar voz a la vez» solo se ha comprobado en simulación. RADE V2 sigue siendo una versión preliminar: su forma de onda puede cambiar, y las versiones de antes y de después de un cambio así no se oyen entre sí.
+  La disposición «Superpuesta» usa RADE V1, una forma de onda ya publicada, pero al ponerla encima de la imagen cada una de las dos se queda más o menos con la calidad de una SNR de 0 dB.
 - El texto de ayuda de las herramientas de línea de comandos y los documentos detallados de abajo solo están en chino tradicional por ahora.
 
 ## Documentación

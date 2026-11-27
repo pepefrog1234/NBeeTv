@@ -14,20 +14,32 @@ bool available() { return nbtv_voice_available() != 0; }
 
 std::string codec_name() { return nbtv_voice_description(); }
 
-bool supports(const ModeInfo* mode) { return mode != nullptr && (mode->pilot_free() || mode->large_picture()); }
+std::string layout_title(VoiceLayout layout) {
+    return layout == VoiceLayout::overlay ? L("疊加") : layout == VoiceLayout::narrow ? L("窄") : L("標準");
+}
+
+bool supports(const ModeInfo* mode, VoiceLayout layout) {
+    return mode != nullptr && (mode->pilot_free() || mode->large_picture()) != is_overlay(layout);
+}
 
 double slow_factor(VoiceLayout layout) { return nbtv_duplex_slow_factor(duplex_code(layout)); }
 
-double slowest_factor() { return std::max(slow_factor(VoiceLayout::standard), slow_factor(VoiceLayout::narrow)); }
+double slowest_factor() {
+    double slowest = 1.0;
+    for (VoiceLayout layout : kLayouts) slowest = std::max(slowest, slow_factor(layout));
+    return slowest;
+}
 
-int symbol_samples() { return nbtv_voice_symbol_samples() * (kSampleRate / NBTV_VOICE_SIGNAL_RATE); }
+int gap_samples(VoiceLayout layout) {
+    return nbtv_voice_gap_samples(nbtv_duplex_voice_codec(duplex_code(layout))) * (kSampleRate / NBTV_VOICE_SIGNAL_RATE);
+}
 
 }  // namespace voice
 
 // ---------------------------------------------------------------- 發射端
 
 std::unique_ptr<VoiceSender> VoiceSender::create(VoiceLayout layout) {
-    nbtv_voice_tx* encoder = nbtv_voice_tx_create();
+    nbtv_voice_tx* encoder = nbtv_voice_tx_create(nbtv_duplex_voice_codec(duplex_code(layout)));
     if (encoder == nullptr) return nullptr;
     nbtv_duplex_tx* mixer = nbtv_duplex_tx_create(duplex_code(layout));
     if (mixer == nullptr) {
@@ -74,7 +86,7 @@ std::vector<float> VoiceSender::take() {
 // ---------------------------------------------------------------- 接收端
 
 std::unique_ptr<VoiceReceiver> VoiceReceiver::create(VoiceLayout layout) {
-    nbtv_voice_rx* decoder = nbtv_voice_rx_create();
+    nbtv_voice_rx* decoder = nbtv_voice_rx_create(nbtv_duplex_voice_codec(duplex_code(layout)));
     if (decoder == nullptr) return nullptr;
     nbtv_duplex_rx* splitter = nbtv_duplex_rx_create(duplex_code(layout));
     if (splitter == nullptr) {

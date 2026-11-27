@@ -54,13 +54,16 @@ struct Picture {
 };
 using PicturePtr = std::shared_ptr<const Picture>;
 
-/// 語音與畫面共用 FM 語音通道（見 voice.hpp）的版面：畫面放慢幾倍、佔到多高的頻率。
+/// 同時送語音（見 voice.hpp）的版面：語音與畫面怎麼放在同一個音訊通道裡。
 enum class VoiceLayout {
     standard,   // 畫面放慢 1.5 倍，佔到 2866 Hz
     narrow,     // 畫面放慢 1.8 倍，只佔到 2611 Hz：給音訊上緣比較窄的電台
+    overlay,    // 疊加：畫面原樣，RADE V1 的語音原樣加在同一個頻帶上（短波的模式用）
 };
 /// 核心的 C API 用的版面代碼
-constexpr int duplex_code(VoiceLayout layout) { return layout == VoiceLayout::narrow ? NBTV_DUPLEX_NARROW : NBTV_DUPLEX_STANDARD; }
+constexpr int duplex_code(VoiceLayout layout) {
+    return layout == VoiceLayout::overlay ? NBTV_DUPLEX_OVERLAY : layout == VoiceLayout::narrow ? NBTV_DUPLEX_NARROW : NBTV_DUPLEX_STANDARD;
+}
 
 /// 把輸入整理成可以傳送的呼號（轉大寫、去掉不能用的字元、最多 9 個字元）。
 std::string normalize_callsign(const std::string& text);
@@ -220,7 +223,8 @@ public:
     /// 一幀最多有幾個取樣（語音＋畫面打開時，實際的個數可能少幾個）
     int frame_samples() const;
     /// 語音＋畫面：打開之後給的是「畫面那一半」（放慢、搬到畫面的頻段、音量照比例調好），每一幀在空中的時間是原來的
-    /// voice::slow_factor 倍；語音那一半另外做（VoiceSender），播放時加上去。給空的關掉。只能在兩次發射之間改（finish 之後）。
+    /// voice::slow_factor 倍（疊加的版面不放慢，只是照比例調小）；語音那一半另外做（VoiceSender），播放時加上去。給空的關掉。
+    /// 只能在兩次發射之間改（finish 之後）。
     bool set_duplex(std::optional<VoiceLayout> layout);
     /// 目前這個模式的畫面大小：encode 只收這個大小的畫面
     PictureSize picture_size() const { return picture_size_; }

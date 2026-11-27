@@ -68,6 +68,13 @@ macOS 的 app 與 Windows、Linux 的 app 在右側欄有「同時送語音」�
 關著的時候和以前完全一樣。只在模擬裡驗證過，還沒有經過真的電台；RADE V2 本身也還是測試版，FreeDV 還不建議在空中使用。
 細節見[技術說明](docs/TECHNICAL.md#語音與畫面共用-fm-語音通道實驗中)。
 
+短波用的模式（11–14）也可以同時送語音，做法不一樣（實驗中）：版面選「疊加」，畫面照原來的速度送，語音用 FreeDV 的 RADE V1
+（正式發布的那一版），原樣疊在同一段頻率上，兩邊功率相同。兩個訊號互相干擾，所以畫面與語音都比單獨送差一截
+（模擬裡模式 14 的畫面少 4 dB，語音相當於單獨送時訊雜比 −1 dB 左右的品質），訊號夠強才值得用；換來的是畫面不必放慢，
+而且送出去的語音就是 RADE V1 原來的訊號，只用 FreeDV 的人應該也聽得到（和 RADE 的參考程式互相對照過，還沒有和 FreeDV 本身試過），
+沒有開這個功能的 NBeeTv 照樣收得到畫面。這是一位短波的使用者同時開著兩個程式試出來的做法；
+整合進來之後同樣只在模擬裡驗證過，還沒有經過真的電台。細節見[技術說明](docs/TECHNICAL.md#語音疊在畫面上rade-v1實驗中)。
+
 ## 下載
 
 到 [Releases](https://github.com/pepefrog1234/NBeeTv/releases) 下載自己平台的檔案。每一個都是在那個平台、那種處理器的機器上建置並跑過測試的。
@@ -205,7 +212,7 @@ cmake --build build-desktop --config Release --target nbtv-gui
 | --- | --- |
 | `core/` | 平台無關的 C++20 核心函式庫：OFDM 收發、同步、通道估測、類神經網路的推論。對外只有一個 C API（`core/include/nbtv/nbtv.h`） |
 | `sim/` | 短波通道模擬 |
-| `voice/` | 即時語音的編解碼器（FreeDV 的 RADE V2）的包裝，給「同時送語音」用；選用 |
+| `voice/` | 即時語音的編解碼器（FreeDV 的 RADE V1 與 V2）的包裝，給「同時送語音」用；選用 |
 | `tools/` | 命令列工具；`tools/learned/` 是模型的訓練與匯出程式（Python、PyTorch） |
 | `models/` | 模型的權重檔 |
 | `apps/macos/` | macOS 的 app（SwiftUI） |
@@ -218,6 +225,7 @@ cmake --build build-desktop --config Release --target nbtv-gui
 - 幀與呼號沒有驗證身分的機制，誰都可以用任何呼號送出畫面。
 - Windows 與 Linux 的 app 是新的，只有自動檢查，還沒有接著真的電台、音效卡、鏡頭與序列埠驗證過。
 - 「同時送語音」只在模擬裡驗證過。RADE V2 還是測試版，它的波形之後可能再改，改了之後新舊版本互相聽不到。
+  「疊加」用的 RADE V1 是正式發布的波形，但它和畫面疊在一起之後，兩邊各自只剩訊雜比 0 dB 上下的品質。
 - 命令列工具的說明與下面的詳細文件目前只有繁體中文。
 
 ## 文件

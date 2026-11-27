@@ -8,7 +8,7 @@
 #   NBeeTv-<版本>-windows-ffmpeg-source.tar         Windows 的包裡那個 ffmpeg.exe 的全部原始碼（它以 GPL 發佈）
 # 另外每次執行都留一份 screens-<平台>：桌面 app 在那個平台上不開視窗算出來的畫面（五種語言），用來看字型與版面對不對。
 #
-# 下載包裡的程式都把「同時送語音」的編解碼器（FreeDV RADE V2，-DNBTV_VOICE=ON）編進去了。它要另外取得的三份檔案
+# 下載包裡的程式都把「同時送語音」的編解碼器（FreeDV RADE V1 與 V2，-DNBTV_VOICE=ON）編進去了。它要另外取得的三份檔案
 # 由 voice-sources 這個工作先抓好（見那裡的說明）。
 #
 # 什麼時候跑：推到 main、開 PR、手動執行時，下載包留在那一次執行的 Artifacts 裡（7 天）；
@@ -341,6 +341,18 @@ jobs:
           grep -q '"end":true,"frames":3,"pictures":3' duplex.json
           "$tools/nbtv-voice" decode 收到的語音.iq 解出的語音.wav | tee voice.txt
           grep -q "收到「結束」的標記 1 次" voice.txt
+          # 語音疊在畫面上（短波的 SSB 用）：同一段語音改用 RADE V1 編，原樣加在三張短波模式的畫面上，兩邊功率相同。
+          # 兩個訊號互相當成雜訊：合成的音檔直接交給平常的接收機，三張畫面都要解得出來；語音那一路要一路同步到「結束」的標記。
+          "$tools/nbtv-voice" encode --codec v1 說話.wav 語音v1.iq
+          "$tools/nbtv-tx" --mode 13 --call N0CALL --rate 12000 --out 短波畫面.wav 貓.ppm coffee.ppm rocket.ppm
+          "$tools/nbtv-duplex" mux --layout overlay --picture 短波畫面.wav --voice 語音v1.iq --out 疊加.wav
+          mkdir 疊加
+          "$tools/nbtv-rx" --json --out-dir 疊加 疊加.wav | tee overlay.json
+          grep -q '"callsign":"N0CALL"' overlay.json
+          grep -q '"end":true,"frames":3,"pictures":3' overlay.json
+          "$tools/nbtv-duplex" demux --layout overlay --voice 疊加的語音.iq 疊加.wav
+          "$tools/nbtv-voice" decode --codec v1 疊加的語音.iq 疊加解出的語音.wav | tee voice-v1.txt
+          grep -q "收到「結束」的標記 1 次" voice-v1.txt
 
       # 桌面 app（Windows、Linux）也一樣對著解開的那一份做，都不碰真的音訊裝置與鏡頭：
       #   1. 自我測試：收發的流程、PTT、檔案來源、定時發射、介面的每個按鈕……音訊走 SDL 的「假」驅動（走的是和真的裝置一樣的程式）；

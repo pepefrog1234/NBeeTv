@@ -254,8 +254,6 @@ final class AppModel: ObservableObject {
     private var txVoiceLayout: VoiceLayout?   // 這一次發射是和語音一起送的話，用的是哪一種版面；不是的話是 nil
     private var txVoiceActive = false         // 語音那一條路真的開起來了（麥克風開不了的話畫面照送，只是沒有語音）
     private var txVoiceFinished = false       // 這一次發射的語音已經收尾了
-    /// 和語音一起送時，結尾留這麼久的靜音（平常是 0.1 秒）：語音的「結束」標記要在放開 PTT 之前送完
-    static let voiceEndSeconds = 0.45
     private var txSession = 0           // 每次開始或結束發射就加一；晚到的非同步結果靠它認出自己已經過期
     private var txLead: Int64 = 0       // 開頭的靜音（等電台切到發射）
     private var txEnd: Int64 = 0        // 已排進輸出佇列的最後位置
@@ -489,9 +487,9 @@ final class AppModel: ObservableObject {
     /// 「同時送語音」現在有沒有作用：app 裡有語音的編解碼器，而且開關開著。
     var voiceOn: Bool { Voice.available && settings.voiceEnabled }
 
-    /// 現在按下發射的話會不會和語音一起送：開關開著，而且選的是 FM 用的模式。
+    /// 現在按下發射的話會不會和語音一起送：開關開著，而且選的模式配得上選的版面（「標準」「窄」配 FM 用的模式，「疊加」配短波的）。
     /// 定時發射一律不送語音：沒有人在的時候不開麥克風。
-    var voiceWithTransmit: Bool { voiceOn && !scheduledRun && Voice.supports(Modes.find(settings.txModeID)) }
+    var voiceWithTransmit: Bool { voiceOn && !scheduledRun && settings.voiceLayout.supports(Modes.find(settings.txModeID)) }
 
     /// 解出來的語音從設定的喇叭播。開不了只是聽不到語音，接收照常。
     private func startSpeaker() {
@@ -544,8 +542,9 @@ final class AppModel: ObservableObject {
             txVoiceActive = true
             voiceTxOn = true
             if let device { microphoneName = device.name }
-            DebugTap.log("和語音一起送：麥克風「\(device?.name ?? "（測試：不開裝置）")」，畫面放慢 \(layout.slowFactor) 倍")
-            AppModel.trace?("和語音一起送：畫面放慢 \(layout.slowFactor) 倍")
+            let how = layout.isOverlay ? "語音疊在畫面上（RADE V1），畫面不放慢" : "畫面放慢 \(layout.slowFactor) 倍"
+            DebugTap.log("和語音一起送：麥克風「\(device?.name ?? "（測試：不開裝置）")」，\(how)")
+            AppModel.trace?("和語音一起送：\(how)")
         } catch {
             notice = L("無法開啟麥克風「%@」：%@，這次發射沒有語音", device?.name ?? "", error.localizedDescription)
         }
@@ -1422,8 +1421,8 @@ final class AppModel: ObservableObject {
         let deviceName = device?.name ?? "模擬的輸出"
         do {
             engine.output.gain = settings.outputGain
-            engine.output.voiceStartLevel = Int(Voice.startSeconds * Double(NBTV.sampleRate))
-            engine.output.voiceGapStep = Voice.symbolSamples
+            engine.output.voiceStartLevel = Int((txVoiceLayout?.startSeconds ?? 0) * Double(NBTV.sampleRate))
+            engine.output.voiceGapStep = txVoiceLayout?.gapSamples ?? 0
             engine.output.keepRendered = txVoiceLayout != nil
             try engine.output.start(deviceID: device?.id ?? 0)
             if let device { outputDeviceName = device.name }
@@ -1589,7 +1588,7 @@ final class AppModel: ObservableObject {
                 queueTail()
             } else if txTailState == 2 {
                 // 和語音一起送：剩下不到半秒時讓語音收尾（送出「結束」的標記），放開 PTT 之前它才送得完
-                if txVoiceActive, !txVoiceFinished, Double(txEnd - position) / Double(NBTV.sampleRate) < AppModel.voiceEndSeconds {
+                if txVoiceActive, !txVoiceFinished, let layout = txVoiceLayout, Double(txEnd - position) / Double(NBTV.sampleRate) < layout.endSeconds {
                     txVoiceFinished = true
                     voicePath.finish()
                     // 語音剩下的（最後一小段語音與「結束」的標記）這時候都排進語音的佇列了，要在放開 PTT 之前播完。
@@ -1751,7 +1750,7 @@ final class AppModel: ObservableObject {
                 guard session == self.txSession, self.txPhase == .stopping, let engine = self.engine else { return }
                 // 尾巴要緊接在最後一張後面才有意義；佇列已經空了（來不及）就只補靜音
                 let late = engine.output.playedSamples >= self.txEnd
-                let quiet = self.txVoiceLayout != nil ? Int(AppModel.voiceEndSeconds * Double(NBTV.sampleRate)) : NBTV.sampleRate / 10
+                let quiet = self.txVoiceLayout.map { Int($0.endSeconds * Double(NBTV.sampleRate)) } ?? NBTV.sampleRate / 10
                 let block = (late ? [] : tail) + [Float](repeating: 0, count: quiet)
                 self.txTap?.write(block)
                 DebugTap.log("排入尾巴 \(block.count) 個取樣\(late ? "（佇列已經空了，只補靜音）" : "")")

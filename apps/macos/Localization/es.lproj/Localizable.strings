@@ -353,15 +353,18 @@
 
 // 同時送語音（語音與畫面共用 FM 語音通道）：右側欄的開關與說明、設定裡的麥克風與喇叭、相關的訊息
 "同時送語音" = "Enviar voz a la vez";
-"發射時把麥克風的語音和畫面一起送，接收時也聽得到對方這樣送的語音。只有 FM 用的模式可以；畫面會放慢，每張比較久。語音用的是 FreeDV 的 RADE V2，還是測試版" = "Al transmitir envía la voz del micrófono junto con la imagen, y al recibir se oye la voz que el otro envíe así. Solo con los modos para FM; la imagen se envía más despacio y cada una tarda más. La voz usa RADE V2 de FreeDV, que aún es una versión de prueba";
+"發射時把麥克風的語音和畫面一起送，接收時也聽得到對方這樣送的語音。FM 用的模式選「標準」或「窄」：語音用 FreeDV 的 RADE V2（還是測試版），畫面會放慢，每張比較久。短波的模式選「疊加」：語音用 FreeDV 的 RADE V1，直接疊在畫面上" = "Al transmitir envía la voz del micrófono junto con la imagen, y al recibir se oye la voz que el otro envíe así. Con los modos para FM elija Estándar o Estrecha: la voz usa RADE V2 de FreeDV (aún una versión de prueba) y la imagen se envía más despacio, así que cada una tarda más. Con los modos para HF elija Superpuesta: la voz usa RADE V1 de FreeDV, puesta directamente encima de la imagen";
 "窄" = "Estrecha";
 "和語音一起送時的版面" = "Disposición al enviar con voz";
-"標準：畫面放慢 1.5 倍，佔到 2866 Hz。窄：放慢 1.8 倍，只佔到 2611 Hz，電台的音訊上緣比較窄時用。收發兩邊要選一樣的" = "Estándar: la imagen va 1,5 veces más lenta y llega hasta 2866 Hz. Estrecha: 1,8 veces más lenta y solo hasta 2611 Hz, para equipos cuyo audio corta antes por arriba. Los dos lados deben elegir la misma";
+"疊加" = "Superpuesta";
+"標準、窄：給 FM 用的模式，語音與畫面各佔一段頻率。標準把畫面放慢 1.5 倍，佔到 2866 Hz；窄放慢 1.8 倍，只佔到 2611 Hz，電台的音訊上緣比較窄時用。疊加：給短波的模式，畫面不放慢，語音直接疊在同一段頻率上；兩個訊號互相干擾，畫面與語音都比單獨送差，訊號夠強才值得用。只用 FreeDV 的人聽得到語音，沒有開這個功能的人照樣收得到畫面。收發兩邊要選一樣的" = "Estándar y Estrecha son para los modos de FM: la voz y la imagen ocupan cada una su parte de la banda de audio. Estándar envía la imagen 1,5 veces más lenta y llega hasta 2866 Hz; Estrecha, 1,8 veces más lenta y solo hasta 2611 Hz, para equipos cuyo audio corta antes por arriba. Superpuesta es para los modos de HF: la imagen no va más lenta y la voz se pone encima, en las mismas frecuencias. Las dos señales se interfieren entre sí, de modo que la imagen y la voz salen peor que enviadas por separado; solo compensa con señal fuerte. Quien solo tenga FreeDV oye la voz, y quien no use esta función recibe igualmente la imagen. Los dos lados deben elegir la misma";
 "語音發射中 · 麥克風 %@" = "Transmitiendo voz · micrófono %@";
 "這一次發射沒有語音" = "Esta transmisión va sin voz";
 "收到語音 · 訊雜比 %@" = "Recibiendo voz · SNR %@";
 "收到語音" = "Recibiendo voz";
-"這個模式不能同時送語音：請選 FM 用的模式" = "Este modo no puede llevar voz a la vez: elija un modo para FM";
+"「標準」「窄」要配 FM 用的模式；短波的請選「疊加」" = "Estándar y Estrecha son para FM; con los modos de HF elija Superpuesta";
+"「疊加」要配短波的模式；FM 用的請選「標準」或「窄」" = "Superpuesta es para los modos de HF; con FM elija Estándar o Estrecha";
+"語音疊在畫面上：每張 %@，兩邊都比單獨送差" = "Voz encima de la imagen: %@ por imagen; ambas salen peor que por separado";
 "和語音一起送時每張 %@（畫面放慢 %@ 倍）" = "Con voz, %@ por imagen (la imagen va %@ veces más lenta)";
 "麥克風與喇叭" = "Micrófono y altavoz";
 "同時送語音時用" = "Para enviar voz a la vez";

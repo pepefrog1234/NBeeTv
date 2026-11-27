@@ -75,6 +75,15 @@ in the sidebar (in versions after 0.2.1); both ends have to turn it on and pick 
 It has only been checked in simulation, not yet on real radios, and RADE V2 itself is still a pre-release that FreeDV does not yet recommend
 using on the air. Details are in the [technical notes](docs/TECHNICAL.md#語音與畫面共用-fm-語音通道實驗中).
 
+The HF modes (11–14) can carry voice too, in a different way (experimental): choose the "Overlay" layout and the picture is sent at its usual speed
+while the voice, using FreeDV's RADE V1 (the released version), is laid over the same frequencies at the same power. The two signals interfere
+with each other, so both picture and voice come out clearly worse than when sent alone (in simulation mode 14 pictures lose 4 dB and the voice
+is about as good as RADE V1 alone at an SNR of −1 dB); it is only worth using on a strong signal. In return the picture is not slowed down,
+the voice goes out as an unmodified RADE V1 signal, so stations with only FreeDV should hear it too (checked both ways against RADE's reference
+tools, not yet against FreeDV itself), and NBeeTv without this feature still receives the pictures. The idea comes from an HF operator who
+ran the two programs side by side; built in, it has likewise only been checked in simulation, not yet on real radios.
+Details are in the [technical notes](docs/TECHNICAL.md#語音疊在畫面上rade-v1實驗中).
+
 ## Download
 
 Get the file for your platform from [Releases](https://github.com/pepefrog1234/NBeeTv/releases). Each one is built and tested on a machine of that platform and processor type.
@@ -213,7 +222,7 @@ each checked against its SHA-256) and builds them along with the project; nothin
 | --- | --- |
 | `core/` | Platform-independent C++20 core library: OFDM transmit and receive, synchronization, channel estimation and neural-network inference. Its only public interface is a C API (`core/include/nbtv/nbtv.h`) |
 | `sim/` | HF channel simulation |
-| `voice/` | Wrapper around the real-time voice codec (FreeDV's RADE V2) for "Send voice too"; optional |
+| `voice/` | Wrapper around the real-time voice codec (FreeDV's RADE V1 and V2) for "Send voice too"; optional |
 | `tools/` | Command-line tools; `tools/learned/` holds the training and export code for the models (Python, PyTorch) |
 | `models/` | Model weight files |
 | `apps/macos/` | The macOS app (SwiftUI) |
@@ -226,6 +235,7 @@ each checked against its SHA-256) and builds them along with the project; nothin
 - Nothing authenticates a frame or its callsign: anyone can send pictures under any callsign.
 - The Windows and Linux app is new and has only been checked by automated tests; it has not yet been verified with a real radio, sound card, camera or serial port.
 - "Send voice too" has only been checked in simulation. RADE V2 is still a pre-release: its waveform may change, and versions before and after such a change cannot hear each other.
+  The "Overlay" layout uses RADE V1, a released waveform, but once it is laid over the picture each of the two is left with roughly the quality of a 0 dB SNR.
 - The help text of the command-line tools and the detailed documents below are in Traditional Chinese only for now.
 
 ## Documentation

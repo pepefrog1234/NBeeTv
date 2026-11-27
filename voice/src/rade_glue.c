@@ -3,6 +3,11 @@
  *   發射  語音幀 → LPCNet 的特徵（每幀 36 個數）→ 湊滿 rade_n_features_in_out() 個 → rade_tx → 訊號
  *   接收  訊號（每次 rade_nin() 個）→ rade_rx → 特徵 → FARGAN 合成語音（開頭 5 幀拿來暖機，不出聲）
  * 和它們一樣，這個檔案不含 Opus 的 config.h：語音的特徵與合成走的是不分 CPU 的那條路。
+ *
+ * rade_c 的同一組函式兩版都能用（rade_open 的旗標有沒有 RADE_MODE_V2），差別只在一段有多長：
+ *   V2  一段 4 個語音幀（40 ms）、訊號 320 個複數；「結束」的標記不帶資料
+ *   V1  一段 12 個語音幀（120 ms）、訊號 960 個複數（一個數據幀）；「結束」的標記裡可以帶資料（呼號），這裡沒有放
+ * V1 的發射端不開它的帶通濾波器（rade_open 的預設；模擬裡開了也沒有比較好）。
  */
 #include "rade_glue.h"
 
@@ -25,13 +30,20 @@
 #error "語音幀的長度和 LPCNet 的不一樣"
 #endif
 
-int nbtv_rade_symbol_samples(void) { return RADE_V2_SYM_LEN; }
-
-static struct rade *open_context(void) {
-    static char name[] = "";
-    rade_initialize();
-    return rade_open(name, RADE_MODE_V2 | RADE_USE_C_ENCODER | RADE_USE_C_DECODER | RADE_VERBOSE_0);
+int nbtv_rade_gap_samples(int version) {
+    if (version == NBTV_RADE_V2) return RADE_V2_SYM_LEN;
+    if (version == NBTV_RADE_V1) return RADE_NMF;
+    return 0;
 }
+
+static struct rade *open_context(int version) {
+    static char name[] = "";
+    if (version != NBTV_RADE_V1 && version != NBTV_RADE_V2) return NULL;
+    rade_initialize();
+    return rade_open(name, (version == NBTV_RADE_V2 ? RADE_MODE_V2 : 0) | RADE_USE_C_ENCODER | RADE_USE_C_DECODER | RADE_VERBOSE_0);
+}
+
+static int is_v2(const struct rade *rade) { return (rade->flags & RADE_MODE_V2) != 0; }
 
 /* ------------------------------------------------------------------ 發射 */
 
@@ -55,10 +67,10 @@ static int copy_signal(const RADE_COMP *signal, int count, float *iq) {
     return count;
 }
 
-nbtv_rade_tx *nbtv_rade_tx_open(void) {
+nbtv_rade_tx *nbtv_rade_tx_open(int version) {
     nbtv_rade_tx *tx = (nbtv_rade_tx *)calloc(1, sizeof *tx);
     if (tx == NULL) return NULL;
-    tx->rade = open_context();
+    tx->rade = open_context(version);
     tx->encoder = lpcnet_encoder_create();
     if (tx->rade != NULL) {
         tx->frames_per_step = rade_n_features_in_out(tx->rade) / FEATURE_SIZE;
@@ -87,8 +99,12 @@ void nbtv_rade_tx_close(nbtv_rade_tx *tx) {
 
 void nbtv_rade_tx_reset(nbtv_rade_tx *tx) {
     if (tx == NULL) return;
-    /* rade_c 沒有「重來」的函式：把發射那一半重新初始化（rade_open 做的就是這件事） */
-    rade_tx_v2_init(&tx->rade->tx_v2, (tx->rade->flags & RADE_NO_TX_BPF) ? 0 : 1);
+    /* rade_c 對外沒有「重來」的函式：把發射那一半重新初始化（rade_open 做的就是這件事；裡面不配置記憶體） */
+    if (is_v2(tx->rade)) {
+        rade_tx_v2_init(&tx->rade->tx_v2, (tx->rade->flags & RADE_NO_TX_BPF) ? 0 : 1);
+    } else {
+        rade_tx_init(&tx->rade->tx, NULL, tx->rade->bottleneck, tx->rade->auxdata, 0);
+    }
     lpcnet_encoder_init(tx->encoder);
     tx->frames = 0;
 }
@@ -130,20 +146,22 @@ struct nbtv_rade_rx {
     int warm;       /* 暖機已經收了幾幀；滿 WARMUP_FRAMES 之後才合成 */
     float warmup[WARMUP_FRAMES * NB_FEATURES];
     float *features;
+    float *end_data; /* 「結束」的標記帶的資料：V1 的接收端一定會寫（這裡不用它的內容），V2 沒有 */
     RADE_COMP *signal;
 };
 
-nbtv_rade_rx *nbtv_rade_rx_open(void) {
+nbtv_rade_rx *nbtv_rade_rx_open(int version) {
     nbtv_rade_rx *rx = (nbtv_rade_rx *)calloc(1, sizeof *rx);
     if (rx == NULL) return NULL;
-    rx->rade = open_context();
+    rx->rade = open_context(version);
     if (rx->rade != NULL) {
         rx->max_need = rade_nin_max(rx->rade);
         rx->max_frames = rade_n_features_in_out(rx->rade) / FEATURE_SIZE;
         rx->features = (float *)calloc((size_t)rade_n_features_in_out(rx->rade), sizeof(float));
+        rx->end_data = (float *)calloc((size_t)rade_n_eoo_bits(rx->rade) + 1, sizeof(float));
         rx->signal = (RADE_COMP *)calloc((size_t)rx->max_need, sizeof(RADE_COMP));
     }
-    if (rx->rade == NULL || rx->features == NULL || rx->signal == NULL || rx->max_frames <= 0) {
+    if (rx->rade == NULL || rx->features == NULL || rx->end_data == NULL || rx->signal == NULL || rx->max_frames <= 0) {
         nbtv_rade_rx_close(rx);
         return NULL;
     }
@@ -155,14 +173,20 @@ void nbtv_rade_rx_close(nbtv_rade_rx *rx) {
     if (rx == NULL) return;
     if (rx->rade != NULL) rade_close(rx->rade);
     free(rx->features);
+    free(rx->end_data);
     free(rx->signal);
     free(rx);
 }
 
 void nbtv_rade_rx_reset(nbtv_rade_rx *rx) {
     if (rx == NULL) return;
-    rade_rx_v2_init(&rx->rade->rx_v2, 1);
-    rx->rade->rx_v2.verbose = 0;
+    if (is_v2(rx->rade)) {
+        rade_rx_v2_init(&rx->rade->rx_v2, 1);
+        rx->rade->rx_v2.verbose = 0;
+    } else {
+        rade_rx_init(&rx->rade->rx, NULL, rx->rade->bottleneck, rx->rade->auxdata, 1);
+        rx->rade->rx.verbose = 0;
+    }
     fargan_init(&rx->synth);
     rx->warm = 0;
 }
@@ -180,7 +204,7 @@ int nbtv_rade_rx_push(nbtv_rade_rx *rx, const float *iq, float *speech, int *end
         rx->signal[i].imag = iq[2 * i + 1];
     }
     int has_end = 0;
-    const int values = rade_rx(rx->rade, rx->features, &has_end, NULL, rx->signal);
+    const int values = rade_rx(rx->rade, rx->features, &has_end, rx->end_data, rx->signal);
     if (ended != NULL && has_end) *ended = 1;
     int written = 0;
     for (int frame = 0; frame < values / FEATURE_SIZE; frame++) {

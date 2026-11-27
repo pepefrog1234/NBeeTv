@@ -1,7 +1,7 @@
-# 即時語音的編解碼器（include/nbtv/voice.h）：給「語音與畫面共用 FM 語音通道」用。
+# 即時語音的編解碼器（include/nbtv/voice.h）：給「同時送語音」用（FM 語音通道分頻的版面用 RADE V2，短波「疊加」的版面用 RADE V1）。
 # 預設只有空殼：nbtv_voice_available() 回傳 0，不需要任何外部的東西，外殼照樣可以連結它。
 #
-# -DNBTV_VOICE=ON 才把 FreeDV 的 RADE V2 編進來。設定（configure）時要另外取得三份檔案，版本都固定，並核對 SHA-256
+# -DNBTV_VOICE=ON 才把 FreeDV 的 RADE 編進來（rade_c 裡 V1 與 V2 兩版都有，一起編）。設定（configure）時要另外取得三份檔案，版本都固定，並核對 SHA-256
 # （哪一個版本、從哪裡抓寫在 cmake/sources.cmake）：
 #   rade_c          RADE 的 C 實作，權重編在程式裡（BSD 兩條款）
 #   Opus            語音的特徵（LPCNet）與合成（FARGAN）在它裡面（BSD 三條款）

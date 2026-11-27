@@ -1948,7 +1948,7 @@ bool Receiver::mend_frame(const Acquisition& next) {
         const SymbolGrid& from = r < cut_from ? a : b;
         for (int c = 0; c < kCarriers; ++c) grid.at(r, c) = from.at(r, c);
     }
-    const ChannelEstimate est = chanest_.estimate(mode, grid, cut_from, cut_to);
+    const ChannelEstimate est = chanest_.estimate(mode, grid, cut_from, cut_to, tuning_.quiet_carriers);
     const double coherence = std::abs(joined) / std::max(count, 1);
     const PilotSpread pilots = pilot_spread(grid, mode.payload_symbols);
     const bool clear = coherence > kFollowThreshold && pilots.top_share < kPilotTopShare;
@@ -2037,7 +2037,7 @@ void Receiver::process_frame() {
         }
     }
 
-    const ChannelEstimate est = chanest_.estimate(mode, grid);
+    const ChannelEstimate est = chanest_.estimate(mode, grid, -1, -1, tuning_.quiet_carriers);
     snr_db_ = est.snr_db;
     snr_valid_ = true;
     // 整幀的導頻在不在。前導符號偶爾會被雜訊（或別的訊號）騙過，這時解出來的只是雜訊，不能當成一幀送出去。

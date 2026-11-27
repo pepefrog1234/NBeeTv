@@ -1,5 +1,5 @@
-// nbtv-voice：即時語音的編解碼器（FreeDV 的 RADE V2）的檔案版：語音的 WAV ↔ 語音的訊號（8 kHz 的複數）。
-// 和 nbtv-duplex、nbtv-tx、nbtv-rx 接起來，就能只用檔案把「語音與畫面共用 FM 語音通道」整條路走一遍。
+// nbtv-voice：即時語音的編解碼器（FreeDV 的 RADE，V1 與 V2）的檔案版：語音的 WAV ↔ 語音的訊號（8 kHz 的複數）。
+// 和 nbtv-duplex、nbtv-tx、nbtv-rx 接起來，就能只用檔案把「語音與畫面一起送」整條路走一遍。
 // 只處理檔案，不碰音訊裝置。
 #include <algorithm>
 #include <cmath>
@@ -20,12 +20,25 @@ namespace {
 void usage() {
     std::printf(
         "用法：\n"
-        "  nbtv-voice encode 語音.wav 訊號.iq   語音 → 語音的訊號。WAV 要是 48 kHz 或 16 kHz（16 位元 PCM 或 32 位元浮點，\n"
-        "                                       多聲道取第一個聲道）\n"
-        "  nbtv-voice decode 訊號.iq 語音.wav   語音的訊號 → 語音（48 kHz 的 WAV）\n"
+        "  nbtv-voice encode [--codec v1|v2] 語音.wav 訊號.iq   語音 → 語音的訊號。WAV 要是 48 kHz 或 16 kHz\n"
+        "                                       （16 位元 PCM 或 32 位元浮點，多聲道取第一個聲道）\n"
+        "  nbtv-voice decode [--codec v1|v2] 訊號.iq 語音.wav   語音的訊號 → 語音（48 kHz 的 WAV）\n"
         "  nbtv-voice info                      印出編解碼器的名稱\n"
+        "--codec：v2（預設）是 RADE V2，給 nbtv-duplex 的 standard、narrow 兩種版面；v1 是 RADE V1（FreeDV 正式發布的\n"
+        "那一版，和 FreeDV 互通），給 overlay。\n"
         "訊號是 8 kHz 的複數（32 位元浮點，I、Q 交錯，沒有檔頭）、中心 1500 Hz：nbtv-duplex mux 的 --voice 要的、\n"
         "demux 的 --voice 給的就是這種檔案。\n");
+}
+
+bool parse_codec(const Args& args, int& codec) {
+    const std::string name = args.str("codec", "v2");
+    if (name == "v2") codec = NBTV_VOICE_RADE_V2;
+    else if (name == "v1") codec = NBTV_VOICE_RADE_V1;
+    else {
+        std::fprintf(stderr, "--codec 只能是 v1 或 v2\n");
+        return false;
+    }
+    return true;
 }
 
 bool read_floats(const std::string& path, std::vector<float>& out) {
@@ -44,7 +57,7 @@ bool write_floats(const std::string& path, const std::vector<float>& data) {
     return std::fclose(f) == 0 && ok;
 }
 
-int encode(const std::string& in, const std::string& out) {
+int encode(int codec, const std::string& in, const std::string& out) {
     std::vector<float> speech;
     int rate = 0;
     if (!read_wav(in, speech, rate)) {
@@ -59,7 +72,7 @@ int encode(const std::string& in, const std::string& out) {
         std::fprintf(stderr, "取樣率 %d 不支援，請先轉成 48000 或 16000\n", rate);
         return 1;
     }
-    nbtv_voice_tx* tx = nbtv_voice_tx_create();
+    nbtv_voice_tx* tx = nbtv_voice_tx_create(codec);
     if (tx == nullptr) {
         std::fprintf(stderr, "語音的編解碼器開不起來\n");
         return 1;
@@ -82,20 +95,20 @@ int encode(const std::string& in, const std::string& out) {
     }
     double energy = 0.0;
     for (float v : iq) energy += static_cast<double>(v) * v;
-    std::printf("%s：語音 %.2f 秒 → 訊號 %.2f 秒（含結尾的「結束」標記），均方根 %.3f\n", out.c_str(),
-                static_cast<double>(speech.size()) / NBTV_VOICE_SPEECH_RATE, static_cast<double>(iq.size() / 2) / NBTV_VOICE_SIGNAL_RATE,
-                iq.empty() ? 0.0 : std::sqrt(energy / static_cast<double>(iq.size() / 2)));
+    std::printf("%s：語音 %.2f 秒 → %s 的訊號 %.2f 秒（含結尾的「結束」標記），均方根 %.3f\n", out.c_str(),
+                static_cast<double>(speech.size()) / NBTV_VOICE_SPEECH_RATE, nbtv_voice_codec_name(codec),
+                static_cast<double>(iq.size() / 2) / NBTV_VOICE_SIGNAL_RATE, iq.empty() ? 0.0 : std::sqrt(energy / static_cast<double>(iq.size() / 2)));
     return 0;
 }
 
-int decode(const std::string& in, const std::string& out) {
+int decode(int codec, const std::string& in, const std::string& out) {
     std::vector<float> iq;
     if (!read_floats(in, iq)) {
         std::fprintf(stderr, "讀不了 %s\n", in.c_str());
         return 1;
     }
     iq.resize(iq.size() / 2 * 2);
-    nbtv_voice_rx* rx = nbtv_voice_rx_create();
+    nbtv_voice_rx* rx = nbtv_voice_rx_create(codec);
     if (rx == nullptr) {
         std::fprintf(stderr, "語音的編解碼器開不起來\n");
         return 1;
@@ -123,7 +136,10 @@ int decode(const std::string& in, const std::string& out) {
     }
     std::printf("%s：訊號 %.2f 秒 → 語音 %.2f 秒；同步的時間 %.0f%%", out.c_str(), static_cast<double>(iq.size() / 2) / NBTV_VOICE_SIGNAL_RATE - 1.0,
                 static_cast<double>(speech.size()) / NBTV_VOICE_SPEECH_RATE, blocks > 0 ? 100.0 * static_cast<double>(synced_blocks) / static_cast<double>(blocks) : 0.0);
-    if (synced_blocks > 0) std::printf("、訊雜比平均 %.1f dB、時脈差 %+.0f ppm", snr / static_cast<double>(synced_blocks), static_cast<double>(status.clock_ppm));
+    if (synced_blocks > 0) {
+        std::printf("、訊雜比平均 %.1f dB", snr / static_cast<double>(synced_blocks));
+        if (codec == NBTV_VOICE_RADE_V2) std::printf("、時脈差 %+.0f ppm", static_cast<double>(status.clock_ppm));  // V1 不估時脈差
+    }
     std::printf("、收到「結束」的標記 %d 次\n", status.overs_ended);
     return 0;
 }
@@ -151,5 +167,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "這份程式沒有把語音的編解碼器編進來（建置時要加 -DNBTV_VOICE=ON）\n");
         return 1;
     }
-    return command == "encode" ? encode(args.positional[1], args.positional[2]) : decode(args.positional[1], args.positional[2]);
+    int codec = NBTV_VOICE_RADE_V2;
+    if (!parse_codec(args, codec)) return 2;
+    return command == "encode" ? encode(codec, args.positional[1], args.positional[2]) : decode(codec, args.positional[1], args.positional[2]);
 }

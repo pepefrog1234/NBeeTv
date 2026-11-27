@@ -44,9 +44,9 @@ double picture_stop(DuplexLayout layout) {
     return (kPictureHalfBand + gap * duplex_slow_factor(layout)) / kDuplexPictureRate;
 }
 
-// 放慢之後的取樣率，和它與 48 kHz 之間的比例（48000 = 取樣率 × up / down）
+// 放慢之後的取樣率，和它與 48 kHz 之間的比例（48000 = 取樣率 × up / down）。疊加的版面不放慢：12 kHz 直接變 4 倍。
 double picture_air_rate(DuplexLayout layout) { return kDuplexPictureRate / duplex_slow_factor(layout); }
-int picture_up(DuplexLayout layout) { return layout == DuplexLayout::Narrow ? 36 : 6; }
+int picture_up(DuplexLayout layout) { return layout == DuplexLayout::Overlay ? 4 : layout == DuplexLayout::Narrow ? 36 : 6; }
 int picture_down(DuplexLayout layout) { return layout == DuplexLayout::Narrow ? 5 : 1; }
 
 // 重取樣要留住的範圍（Hz）到畫面的上緣；阻帶從會疊回這個範圍的地方開始
@@ -55,8 +55,17 @@ double picture_resample_stop(DuplexLayout layout) { return picture_air_rate(layo
 
 // ── 語音 ──
 constexpr double kVoiceResamplePass = kVoiceCentre + kVoiceStopBand;
-constexpr double kVoiceResampleStop = kDuplexVoiceRate - kVoiceResamplePass;
 constexpr int kVoiceRatio = kDuplexRate / kDuplexVoiceRate;
+// 疊加的版面：語音不移頻，8 kHz 與 48 kHz 之間留到 3 kHz（RADE V1 削波之後帶外還有一點裙邊，SSB 的濾波器之內的都留著）
+constexpr double kOverlayResamplePass = 3000.0;
+double voice_resample_pass(DuplexLayout layout) { return duplex_overlay(layout) ? kOverlayResamplePass : kVoiceResamplePass; }
+double voice_resample_stop(DuplexLayout layout) { return kDuplexVoiceRate - voice_resample_pass(layout); }
+// 搬頻的濾波器：分頻的版面把語音在 1500 Hz 與 790 Hz 之間搬來搬去；疊加的版面不搬（from 與 to 相同），
+// 只在接收端用它把實數的音訊變成解析訊號。
+double voice_air_centre(DuplexLayout layout) { return (duplex_overlay(layout) ? kOverlayVoiceCentre : kVoiceCentre) / kDuplexVoiceRate; }
+double voice_codec_centre(DuplexLayout layout) { return (duplex_overlay(layout) ? kOverlayVoiceCentre : kVoiceInputCentre) / kDuplexVoiceRate; }
+double voice_pass(DuplexLayout layout) { return (duplex_overlay(layout) ? kOverlayVoiceHalfBand : kVoiceHalfBand) / kDuplexVoiceRate; }
+double voice_stop(DuplexLayout layout) { return (duplex_overlay(layout) ? kOverlayVoiceStopBand : kVoiceStopBand) / kDuplexVoiceRate; }
 
 // ── 兩路相加的比例 ──
 // 畫面交進來時的均方根：數據機把包絡的平均功率定成 1、削波門檻對應到 1/kTxHeadroom，實數訊號的功率是包絡的一半。
@@ -64,6 +73,10 @@ double picture_nominal_rms() { return 1.0 / (std::pow(10.0, kDefaultPaprDb / 20.
 // 兩路各自過了這裡的濾波器之後最大的峰值（交進來的刻度；實測的最大值再留一點）。相加之後最壞就是兩個峰值碰在一起。
 constexpr double kPicturePeak = 1.0;
 constexpr double kVoicePeak = 1.1;
+// 疊加的版面：RADE V1 的訊號在 8 kHz 的取樣點上大小不超過 1，變成 48 kHz 之後取樣點之間會高一點
+// （50 秒的語音實測最大 1.27，萬分之一的取樣超過 1.15）
+constexpr double kOverlayVoicePeak = 1.3;
+double voice_peak(DuplexLayout layout) { return duplex_overlay(layout) ? kOverlayVoicePeak : kVoicePeak; }
 constexpr float kVoiceGainMinDb = -20.0f, kVoiceGainMaxDb = 12.0f;
 
 // 等著被取走的取樣：前面已經取走的夠多了就丟掉，免得愈積愈長
@@ -174,9 +187,8 @@ DuplexTx::DuplexTx(DuplexLayout layout)
     : layout_(layout),
       picture_mover_(kPictureCentre, picture_air_centre(layout), picture_pass(), picture_stop(layout), kMoverAttenuationDb),
       picture_up_(picture_up(layout), picture_down(layout), picture_air_rate(layout), picture_resample_pass(layout), picture_resample_stop(layout)),
-      voice_mover_(kVoiceInputCentre / kDuplexVoiceRate, kVoiceCentre / kDuplexVoiceRate, kVoiceHalfBand / kDuplexVoiceRate,
-                   kVoiceStopBand / kDuplexVoiceRate, kMoverAttenuationDb),
-      voice_up_(kVoiceRatio, 1, kDuplexVoiceRate, kVoiceResamplePass, kVoiceResampleStop) {
+      voice_mover_(voice_codec_centre(layout), voice_air_centre(layout), voice_pass(layout), voice_stop(layout), kMoverAttenuationDb),
+      voice_up_(kVoiceRatio, 1, kDuplexVoiceRate, voice_resample_pass(layout), voice_resample_stop(layout)) {
     set_voice_gain_db(0.0f);
 }
 
@@ -184,9 +196,9 @@ void DuplexTx::set_voice_gain_db(float db) {
     // 兩路的功率比照設定的來，整體的大小由「兩個峰值碰在一起也不超過滿刻度」決定。
     const double ratio = std::pow(10.0, std::clamp(std::isfinite(db) ? db : 0.0f, kVoiceGainMinDb, kVoiceGainMaxDb) / 20.0);
     const double picture_rms = picture_nominal_rms();
-    const double voice_rms = kVoiceNominalRms / std::sqrt(2.0);  // 送出去的是實部
+    const double voice_rms = duplex_voice_nominal_rms(layout_) / std::sqrt(2.0);  // 送出去的是實部
     const double voice_per_picture = ratio * picture_rms / voice_rms;
-    const double picture_gain = 1.0 / (kPicturePeak + kVoicePeak * voice_per_picture);
+    const double picture_gain = 1.0 / (kPicturePeak + voice_peak(layout_) * voice_per_picture);
     picture_gain_ = static_cast<float>(picture_gain);
     voice_gain_ = static_cast<float>(picture_gain * voice_per_picture);
 }
@@ -203,6 +215,11 @@ void DuplexTx::reset() {
 
 void DuplexTx::push_picture(std::span<const float> samples) {
     drop_consumed(picture_, picture_read_);
+    if (duplex_overlay(layout_)) {
+        // 疊加：畫面原樣，只換成 48 kHz
+        picture_up_.process(samples, picture_);
+        return;
+    }
     scratch_.clear();
     picture_mover_.process(samples, scratch_);
     real_.resize(scratch_.size());
@@ -212,13 +229,20 @@ void DuplexTx::push_picture(std::span<const float> samples) {
 }
 
 void DuplexTx::flush_picture() {
-    // 搬頻的濾波器延遲最長（一百多個取樣），重取樣的只有十個左右：多給一點
-    const std::vector<float> quiet(static_cast<std::size_t>(picture_mover_.delay_samples()) + 32, 0.0f);
+    // 搬頻的濾波器延遲最長（一百多個取樣），重取樣的只有十個左右：多給一點（疊加的版面沒有搬頻那一段）
+    const std::vector<float> quiet(static_cast<std::size_t>(duplex_overlay(layout_) ? 0 : picture_mover_.delay_samples()) + 32, 0.0f);
     push_picture(quiet);
 }
 
 void DuplexTx::push_voice(std::span<const cf> samples) {
     drop_consumed(voice_, voice_read_);
+    if (duplex_overlay(layout_)) {
+        // 疊加：語音的訊號原樣（不濾、不移），取實部換成 48 kHz
+        real_.resize(samples.size());
+        for (std::size_t i = 0; i < samples.size(); ++i) real_[i] = samples[i].real();
+        voice_up_.process(real_, voice_);
+        return;
+    }
     scratch_.clear();
     voice_mover_.process(samples, scratch_);
     real_.resize(scratch_.size());
@@ -238,9 +262,8 @@ DuplexRx::DuplexRx(DuplexLayout layout)
     : layout_(layout),
       picture_down_(picture_down(layout), picture_up(layout), kDuplexRate, picture_resample_pass(layout), picture_resample_stop(layout)),
       picture_mover_(picture_air_centre(layout), kPictureCentre, picture_pass(), picture_stop(layout), kMoverAttenuationDb),
-      voice_down_(1, kVoiceRatio, kDuplexRate, kVoiceResamplePass, kVoiceResampleStop),
-      voice_mover_(kVoiceCentre / kDuplexVoiceRate, kVoiceInputCentre / kDuplexVoiceRate, kVoiceHalfBand / kDuplexVoiceRate,
-                   kVoiceStopBand / kDuplexVoiceRate, kMoverAttenuationDb) {}
+      voice_down_(1, kVoiceRatio, kDuplexRate, voice_resample_pass(layout), voice_resample_stop(layout)),
+      voice_mover_(voice_air_centre(layout), voice_codec_centre(layout), voice_pass(layout), voice_stop(layout), kMoverAttenuationDb) {}
 
 void DuplexRx::reset() {
     picture_down_.reset();
@@ -256,7 +279,10 @@ void DuplexRx::push(std::span<const float> samples) {
     drop_consumed(picture_, picture_read_);
     drop_consumed(voice_, voice_read_);
     clean_samples(samples, clean_);
-    if (want_picture_) {
+    if (want_picture_ && duplex_overlay(layout_)) {
+        // 疊加：畫面沒有放慢、沒有搬過，只換回 12 kHz（語音還疊在上面，接收機把它當成雜訊）
+        picture_down_.process(clean_, picture_);
+    } else if (want_picture_) {
         // 畫面：換成放慢之後的取樣率（那些取樣就是數據機的取樣），搬回數據機原來的位置
         real_.clear();
         picture_down_.process(clean_, real_);
@@ -265,7 +291,7 @@ void DuplexRx::push(std::span<const float> samples) {
         for (cf v : scratch_) picture_.push_back(2.0f * v.real());
     }
     if (want_voice_) {
-        // 語音：換成 8 kHz，搬回中心 1500 Hz
+        // 語音：換成 8 kHz，搬回中心 1500 Hz（疊加的版面不搬，這一步只是把實數的音訊變成解析訊號）
         real_.clear();
         voice_down_.process(clean_, real_);
         scratch_.clear();

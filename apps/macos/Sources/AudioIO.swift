@@ -329,8 +329,9 @@ final class AudioOutput {
     private var voiceFlowing = false
     private var voiceWaited = 0   // 同上，語音的佇列
     /// 語音的佇列中途空掉（電腦一時忙不過來，語音還沒編出來）之後，要等到停的長度是這麼多個取樣的整數倍才接回去；
-    /// 0 是墊夠了就接。設成語音訊號一個符號的長度（Voice.symbolSamples）：這樣對方的接收端不必重新同步，
-    /// 不然每停一次對方約半秒聽不到，剛好停在結尾前的話連「結束」的標記也收不到。要在 start 之前設定。
+    /// 0 是墊夠了就接。設成語音的編解碼器要的那個單位（VoiceLayout.gapSamples：RADE V2 是一個符號，V1 是一個數據幀）：
+    /// 這樣對方的接收端不必重新同步，不然每停一次對方約半秒（V1 約兩秒）聽不到，剛好停在結尾前的話連「結束」的標記也收不到。
+    /// 要在 start 之前設定。
     var voiceGapStep = 0
     private var voiceBegun = false   // 這一次（start 之後）語音開始送過了
     private var voiceGap = 0         // 語音停下來到現在幾個取樣了

@@ -995,7 +995,7 @@ void test_bad_samples(int rate) {
 // 接收機直接收合成的訊號。語音用一個單音代替（核心不含語音的編解碼器）。
 void test_duplex(int mode_id, const char* weights, double min_psnr) {
     // 不對的參數、空指標
-    CHECK(nbtv_duplex_tx_create(2) == nullptr);
+    CHECK(nbtv_duplex_tx_create(3) == nullptr);
     CHECK(nbtv_duplex_rx_create(NBTV_DUPLEX_OFF) == nullptr);
     CHECK_NEAR(nbtv_duplex_slow_factor(7), 0.0, 0.0);
     CHECK_NEAR(nbtv_duplex_slow_factor(NBTV_DUPLEX_STANDARD), 1.5, 1e-12);
@@ -1190,6 +1190,171 @@ void test_duplex(int mode_id, const char* weights, double min_psnr) {
     nbtv_model_destroy(model);
 }
 
+// 語音疊在畫面上（NBTV_DUPLEX_OVERLAY），即時用的那一種接法：發射機給的是畫面那一半（沒有放慢、沒有搬，只是照比例調小），
+// 語音那一半另外做、播放時相加；平常的接收機直接收。語音用一個幾乎等幅的替身（RADE V1 的訊號就是幾乎等幅的）。
+void test_overlay(int mode_id, const char* weights, double min_psnr) {
+    const int layout = NBTV_DUPLEX_OVERLAY;
+    CHECK_EQ(nbtv_duplex_voice_codec(layout), 1);
+    CHECK_EQ(nbtv_duplex_voice_codec(NBTV_DUPLEX_STANDARD), 2);
+    CHECK_EQ(nbtv_duplex_voice_codec(NBTV_DUPLEX_NARROW), 2);
+    CHECK_EQ(nbtv_duplex_voice_codec(NBTV_DUPLEX_OFF), 0);
+    CHECK_EQ(nbtv_duplex_voice_codec(3), 0);
+    CHECK_NEAR(nbtv_duplex_slow_factor(layout), 1.0, 0.0);
+    CHECK_NEAR(nbtv_duplex_picture_low_hz(layout), 352.0, 1e-9);
+    CHECK_NEAR(nbtv_duplex_picture_high_hz(layout), 2648.0, 1e-9);
+    CHECK_NEAR(nbtv_duplex_picture_low_hz(NBTV_DUPLEX_STANDARD), 1335.0, 1e-9);
+    CHECK_NEAR(nbtv_duplex_voice_low_hz(layout), 727.5, 1e-9);
+    CHECK_NEAR(nbtv_duplex_voice_high_hz(layout), 2227.5, 1e-9);
+    CHECK_NEAR(nbtv_duplex_band_shift_hz(layout), 0.0, 0.0);
+    {
+        nbtv_tx* slow = nbtv_tx_create(12000);
+        nbtv_rx* slow_rx = nbtv_rx_create(12000);
+        CHECK_EQ(nbtv_tx_set_duplex(slow, layout, 0.0f), -1);  // 發射要 48 kHz 的：語音那一半是 48 kHz 的
+        CHECK_EQ(nbtv_rx_set_duplex(slow_rx, layout), 0);      // 接收等於關掉（畫面沒有動過），不限取樣率
+        nbtv_tx_destroy(slow);
+        nbtv_rx_destroy(slow_rx);
+    }
+
+    nbtv_mode_info mode{};
+    CHECK_EQ(nbtv_mode_by_id(mode_id, &mode), 0);
+    const std::vector<std::uint8_t> rgb = test_images::load("coffee", mode.image_width, mode.image_height);
+    nbtv_model* model = load_model(weights);
+    if (model == nullptr) return;
+    const int rate = NBTV_DUPLEX_RATE;
+
+    // 三幀：一次照平常送，一次打開疊加。每幀的取樣數一樣（沒有放慢），只是小了一點
+    auto transmit = [&](bool overlay, float voice_gain_db, int* tail_samples) {
+        nbtv_tx* tx = nbtv_tx_create(rate);
+        nbtv_tx_set_mode(tx, mode_id);
+        nbtv_tx_set_callsign(tx, "N0CALL");
+        nbtv_tx_set_model(tx, model);
+        const int plain_samples = nbtv_tx_frame_samples(tx);
+        if (overlay) CHECK_EQ(nbtv_tx_set_duplex(tx, layout, voice_gain_db), 0);
+        const int capacity = nbtv_tx_frame_samples(tx);
+        CHECK(capacity >= plain_samples && capacity <= plain_samples + 16);
+        std::vector<float> air(static_cast<std::size_t>(rate / 4), 0.0f), frame(static_cast<std::size_t>(capacity));
+        for (int i = 0; i < 4; ++i) {
+            const int n = nbtv_tx_encode_image(tx, rgb.data(), frame.data(), capacity, nullptr, nullptr);
+            CHECK_EQ(n, plain_samples);
+            if (i == 3) {  // 第四幀編了又取消
+                CHECK_EQ(nbtv_tx_discard_last(tx), 0);
+                break;
+            }
+            air.insert(air.end(), frame.begin(), frame.begin() + n);
+        }
+        std::vector<float> tail(static_cast<std::size_t>(nbtv_tx_tail_samples(tx)));
+        const int tail_n = nbtv_tx_finish(tx, tail.data(), static_cast<int>(tail.size()));
+        CHECK(tail_n > 0 && tail_n <= static_cast<int>(tail.size()));
+        if (tail_samples != nullptr) *tail_samples = tail_n;
+        air.insert(air.end(), tail.begin(), tail.begin() + tail_n);
+        air.resize(static_cast<std::size_t>(rate / 4) + 3 * static_cast<std::size_t>(plain_samples) + static_cast<std::size_t>(rate / 2), 0.0f);
+        nbtv_tx_destroy(tx);
+        return air;
+    };
+    auto power = [&](const std::vector<float>& x) {
+        double sum = 0.0;
+        const std::size_t from = static_cast<std::size_t>(rate / 2), to = x.size() - static_cast<std::size_t>(rate);
+        for (std::size_t i = from; i < to; ++i) sum += static_cast<double>(x[i]) * x[i];
+        return sum / static_cast<double>(to - from);
+    };
+    int tail_n = 0;
+    const std::vector<float> plain_air = transmit(false, 0.0f, nullptr);
+    std::vector<float> air = transmit(true, 0.0f, &tail_n);
+    const double picture_share_db = 10.0 * std::log10(power(air) / power(plain_air));
+    CHECK(picture_share_db < -2.0 && picture_share_db > -6.0);  // 留給語音的份：峰值兩個相加也不超過滿刻度
+    // 語音調小，畫面就大一點
+    CHECK(power(transmit(true, -12.0f, nullptr)) > 1.3 * power(air));
+
+    // 語音那一半：只推語音的另一個物件。替身是中心 1477.5 Hz 上的一個單音，大小是 RADE V1 平常的大小
+    nbtv_duplex_tx* voice = nbtv_duplex_tx_create(layout);
+    CHECK(voice != nullptr);
+    const double tone_hz = 1477.5, tone_size = 0.911;
+    const std::size_t voice_count = air.size() / 6;
+    std::vector<float> iq(2 * voice_count);
+    for (std::size_t n = 0; n < voice_count; ++n) {
+        iq[2 * n] = static_cast<float>(tone_size * std::cos(2.0 * kPi * tone_hz * static_cast<double>(n) / NBTV_DUPLEX_VOICE_RATE));
+        iq[2 * n + 1] = static_cast<float>(tone_size * std::sin(2.0 * kPi * tone_hz * static_cast<double>(n) / NBTV_DUPLEX_VOICE_RATE));
+    }
+    nbtv_duplex_tx_push_voice(voice, iq.data(), static_cast<int>(voice_count));
+    CHECK_EQ(nbtv_duplex_tx_pending_picture(voice), 0);
+    CHECK(std::abs(nbtv_duplex_tx_pending_voice(voice) - static_cast<int>(air.size())) <= 6);
+    std::vector<float> voice_air(air.size());
+    nbtv_duplex_tx_read(voice, voice_air.data(), static_cast<int>(voice_air.size()));
+    nbtv_duplex_tx_destroy(voice);
+    // 兩邊功率相同（預設）
+    CHECK_NEAR(10.0 * std::log10(power(voice_air) / power(air)), 0.0, 0.5);
+    const std::vector<float> picture_half = air;
+    float peak = 0.0f;
+    for (std::size_t i = 0; i < air.size(); ++i) {
+        air[i] += voice_air[i];
+        peak = std::max(peak, std::fabs(air[i]));
+    }
+    CHECK(peak < 1.0f && peak > 0.4f);
+
+    // 接收：平常的接收機就收得到；「打開疊加」的接收機和它完全一樣（給這個版面等於關掉）
+    auto receive = [&](const std::vector<float>& audio, bool set_overlay) {
+        nbtv_rx* rx = nbtv_rx_create(rate);
+        nbtv_rx_set_model(rx, model);
+        if (set_overlay) CHECK_EQ(nbtv_rx_set_duplex(rx, layout), 0);
+        std::vector<nbtv_rx_frame> frames;
+        for (std::size_t pos = 0; pos < audio.size(); pos += 960) {
+            nbtv_rx_push(rx, audio.data() + pos, static_cast<int>(std::min<std::size_t>(960, audio.size() - pos)));
+            nbtv_rx_frame f;
+            while (nbtv_rx_poll_frame(rx, &f)) frames.push_back(f);
+        }
+        nbtv_rx_destroy(rx);
+        return frames;
+    };
+    // 只有畫面那一半：和平常送的一樣好
+    const std::vector<nbtv_rx_frame> alone = receive(picture_half, false);
+    CHECK_EQ(static_cast<int>(alone.size()), 3);
+    double psnr = 0.0;
+    for (std::size_t i = 0; i < alone.size(); ++i) {
+        const nbtv_rx_frame& f = alone[i];
+        CHECK(f.decoded == 1 && f.header_ok == 1 && f.mode_id == mode_id && f.sequence == static_cast<int>(i));
+        CHECK(std::strcmp(f.callsign, "N0CALL") == 0);
+        psnr += test_images::psnr(std::vector<std::uint8_t>(f.rgb, f.rgb + rgb.size()), rgb) / static_cast<double>(alone.size());
+    }
+    CHECK(psnr > min_psnr);
+    // 加上語音的替身（一個和畫面一樣強的單音，壓在頻帶正中間）：三幀都還在
+    const std::vector<nbtv_rx_frame> plain_frames = receive(air, false), overlay_frames = receive(air, true);
+    CHECK_EQ(static_cast<int>(plain_frames.size()), 3);
+    CHECK_EQ(plain_frames.size(), overlay_frames.size());
+    int pictures = 0;
+    for (std::size_t i = 0; i < std::min(plain_frames.size(), overlay_frames.size()); ++i) {
+        pictures += plain_frames[i].decoded;
+        CHECK_EQ(plain_frames[i].decoded, overlay_frames[i].decoded);
+        CHECK(std::memcmp(plain_frames[i].rgb, overlay_frames[i].rgb, rgb.size()) == 0);
+    }
+    CHECK_EQ(pictures, 3);
+
+    // 語音那一路：整段音訊的解析訊號，單音原樣回來（大小和它在空中的份量相當），畫面也還在裡面
+    nbtv_duplex_rx* split = nbtv_duplex_rx_create(layout);
+    nbtv_duplex_rx_enable(split, 0, 1);
+    nbtv_duplex_rx_push(split, air.data(), static_cast<int>(air.size()));
+    CHECK_EQ(nbtv_duplex_rx_available_picture(split), 0);
+    const int got_voice = nbtv_duplex_rx_available_voice(split);
+    CHECK(std::abs(got_voice - static_cast<int>(air.size() / 6)) <= 2);
+    std::vector<float> back(2 * static_cast<std::size_t>(got_voice));
+    CHECK_EQ(nbtv_duplex_rx_read_voice(split, back.data(), got_voice), got_voice);
+    nbtv_duplex_rx_destroy(split);
+    double tone_re = 0.0, tone_im = 0.0;
+    const std::size_t from = static_cast<std::size_t>(got_voice) / 4, to = 3 * static_cast<std::size_t>(got_voice) / 4;
+    for (std::size_t n = from; n < to; ++n) {
+        const double angle = -2.0 * kPi * tone_hz * static_cast<double>(n) / NBTV_DUPLEX_VOICE_RATE;
+        const double re = back[2 * n], im = back[2 * n + 1];
+        tone_re += re * std::cos(angle) - im * std::sin(angle);
+        tone_im += re * std::sin(angle) + im * std::cos(angle);
+    }
+    const double span = static_cast<double>(to - from);
+    const double tone = (tone_re * tone_re + tone_im * tone_im) / (span * span);
+    CHECK_NEAR(10.0 * std::log10(tone / (2.0 * power(voice_air))), 0.0, 0.3);  // 解析訊號的功率是實數訊號的兩倍
+    std::printf("  C API 疊加（模式 %d）：畫面那一半 %zu 幀、PSNR %.1f dB，比平常送小 %.1f dB、尾巴 %d 個取樣；加上一樣強的語音替身：%d 張畫面、"
+                "合成後峰值 %.2f\n",
+                mode_id, alone.size(), psnr, -picture_share_db, tail_n, pictures, static_cast<double>(peak));
+    nbtv_model_destroy(model);
+}
+
 int main() {
     test_helpers();
     test_inference_settings();
@@ -1217,6 +1382,7 @@ int main() {
     test_two_models();
     test_two_widths();
     test_duplex(3, "261126-4", 24.2);  // 語音與畫面共用 FM 語音通道（下限：那張圖直接收是 24.7 dB）
+    test_overlay(13, "261122-4", 29.2);  // 語音疊在畫面上（短波的模式；下限同上面 loopback 的）
     test_spectrum();
     test_bad_samples(12000);
     test_bad_samples(48000);

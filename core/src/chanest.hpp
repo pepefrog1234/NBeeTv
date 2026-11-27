@@ -30,7 +30,7 @@ struct ChannelEstimate {
     // 雜訊不一定是平的：靜電突波只打到幾個符號，窄頻干擾只落在幾個載波。
     // 所以另外估出每一列（符號）的雜訊變異數，以及每個載波相對於一般載波的倍數；某個格點的雜訊是兩者的乘積。
     std::vector<float> row_noise;      // 每一列的雜訊變異數
-    std::vector<float> carrier_noise;  // 每個載波的倍數，一般是 1
+    std::vector<float> carrier_noise;  // 每個載波的倍數，一般是 1；有干擾的大於 1，頻帶兩端明顯比較乾淨的小於 1
     float noise_at(int row, int carrier) const {
         return row_noise[static_cast<std::size_t>(row)] * carrier_noise[static_cast<std::size_t>(carrier)];
     }
@@ -49,6 +49,9 @@ struct ChannelEstimate {
 inline constexpr double kChanestDopplerHz = 1.5;   // 時間內插假設的最大都卜勒（含殘餘頻偏）
 inline constexpr int kChanestDelayBefore = 16;     // 延遲視窗：第一條路徑之前（取樣數）
 inline constexpr int kChanestDelayAfter = 48;      // 第一條路徑之後，4 ms
+inline constexpr int kQuietEdgeCarriers = 3;       // 判斷頻帶的一端是不是比較乾淨時，把最外面幾個有導頻的載波合起來看
+// 合起來的殘差的中位數低於「一般的 ÷ (1 + 這個數 ÷ √樣本數)」才算乾淨（ChannelEstimator::estimate 的 1b）
+inline constexpr double kQuietEdgeMargin = 7.0;
 
 class ChannelEstimator {
 public:
@@ -66,7 +69,8 @@ public:
     // 或少了一段，之後的符號整批晚到或早到，接收端把前後兩段各自對時之後接成一個陣列（Receiver::mend_frame）。
     // 兩段的時間基準差了幾個取樣就是整個頻帶上不同的相位斜率，所以第 cut_from 列之前與第 cut_to 列起各自估、互不參考；
     // 中間的列（沒有可用的訊號）借後面那一段的估計，呼叫端不該用它們的格點。cut_from < 0 表示沒有斷開。
-    ChannelEstimate estimate(const Mode& mode, const SymbolGrid& grid, int cut_from = -1, int cut_to = -1) const;
+    // quiet_carriers：頻帶兩端明顯比一般的載波乾淨的載波，也照量到的給（見 RxTuning::quiet_carriers）；關掉時只標出比較吵的。
+    ChannelEstimate estimate(const Mode& mode, const SymbolGrid& grid, int cut_from = -1, int cut_to = -1, bool quiet_carriers = true) const;
 
 private:
     struct TimeWeights;
