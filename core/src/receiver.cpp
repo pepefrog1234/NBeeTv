@@ -313,6 +313,7 @@ constexpr double kDriftRange = 14.0;  // 頭尾兩個參考符號之間的時間
 constexpr double kFreeReliable = 0.5;       // 參考符號和預測的對得上（正規化相關值）才採用；結尾的對不上就是這一幀沒有送完
 constexpr double kFreeFreshStart = 0.8;     // 頭尾兩個參考符號彼此對得這麼好、卻和預測的對不上：留著的通道不對了，重新開始
 constexpr int kFreeAverageFrames = 8;       // 通道最多平均這麼多幀
+constexpr double kFreeUneven = 8.0;         // 同一幀的兩個參考符號，雜訊差到這麼多倍以上才各算各的份量（見 process_frame_free「這一幀的通道」）
 constexpr double kFreeMaxCellSnrDb = 35.0;  // 交給解碼器的雜訊不低於這個訊雜比對應的值：削波、量化這些量不到的失真大約在這裡
 constexpr double kFreeNullFloor = 1e-7;     // 頻帶外的能量至少是頻帶內的這個比例才拿來用（檔案對檔案、沒有雜訊時那裡是空的）
 // 被雜訊的突波打壞的符號（見 process_frame_free）：頻帶上方的雜訊是平常的這麼多倍以上、估出來的雜訊至少是訊號的這個比例，
@@ -1411,38 +1412,94 @@ void Receiver::process_frame_free() {
     double gain = 1.0;
     if (tracked && (head_ok || tail_ok)) gain = ((head_ok ? head.gain : 0.0) + (tail_ok ? end_shift.gain : 0.0)) / ((head_ok ? 1 : 0) + (tail_ok ? 1 : 0));
 
-    // 這一幀的通道（對齊到預測的開頭）：前幾幀的平均，加上這一幀可用的參考符號（各自轉回開頭的時間）
-    const int earlier = tracked ? 2 * free_.frames : 0;  // 前幾幀的平均相當於幾個參考符號
+    // 這一幀的通道（對齊到預測的開頭）：前幾幀的平均，加上這一幀可用的參考符號（各自轉回開頭的時間）。
+    // 各份照它有多準來加權（份量是誤差變異數的倒數），不是每個參考符號都算一份：
+    //   * 這一幀的參考符號有多吵：兩個都可用時看它們彼此差多少（這不靠前幾幀的平均）；只有一個可用時看它和前幾幀的平均差多少。
+    //   * 前幾幀的平均有多準是一路記下來的（FreeTrack::ref_var）。它的份量另有上限：不超過它實際累積的參考符號數，
+    //     也不超過 2 × kFreeAverageFrames 個「和這一幀一樣吵的參考符號」。所以雜訊不太變的時候，和「每個參考符號算一份、
+    //     最多平均 8 幀」沒有差別；差別在前幾幀比現在吵得多的時候：每個都算一份的話，那些很吵的參考符號要十幾幀才淡出，
+    //     雜訊變小之後的頭幾幀明明訊號很好，畫面卻差一兩 dB。照有多準來加權，新的參考符號馬上說了算。
+    //   * 同一幀的兩個參考符號平常一樣重。其中一個明顯吵得多（kFreeUneven 倍以上：它落在訊號弱的那一刻）才各算各的；
+    //     每一幀都各算各的話，訊號很弱時量到的雜訊本身不準，反而少收。
+    const int earlier = tracked ? 2 * free_.frames : 0;  // 前幾幀的平均累積了幾個參考符號
     const int fresh = (head_ok ? 1 : 0) + (tail_ok ? 1 : 0);
-    const int references = std::max(earlier + fresh, 1);
-    std::array<cf, kCarriers> base, back1{}, back2{};
-    double power = 0.0;  // 一個符號所有載波的訊號功率
+    std::array<cf, kCarriers> base, old{}, back1{}, back2{};  // old：前幾幀的平均，換成這一幀的音量
+    double level = 0.0;
     for (int c = 0; c < kCarriers; ++c) {
         const std::size_t i = static_cast<std::size_t>(c);
-        cd sum = tracked ? cd(predicted[i]) * (gain * earlier) : cd(0, 0);
-        if (head_ok) {
-            back1[i] = h1[i] * turn(c, -tau0, -phi0);
-            sum += cd(back1[i]);
-        }
-        if (tail_ok) {
-            back2[i] = h2[i] * turn(c, -tau1, -phi1);
-            sum += cd(back2[i]);
-        }
-        base[i] = earlier + fresh > 0 ? cf(sum / static_cast<double>(references)) : predicted[i];
-        power += std::norm(base[i]);
+        if (tracked) old[i] = predicted[i] * static_cast<float>(gain);
+        if (head_ok) back1[i] = h1[i] * turn(c, -tau0, -phi0);
+        if (tail_ok) back2[i] = h2[i] * turn(c, -tau1, -phi1);
+        level += std::norm(head_ok ? back1[i] : tail_ok ? back2[i] : predicted[i]);
     }
-    const double mean_power = power / kCarriers;
-    // 雜訊：這一幀的參考符號和平均出來的通道差多少。n 個裡的一個和平均值的差，變異數是雜訊的 (1 − 1/n) 倍。
-    double pair_var = free_.noise_var > 0.0f ? static_cast<double>(free_.noise_var) : 0.01 * mean_power;  // 每個格點的複數雜訊變異數（FFT 輸出的刻度）
-    const bool measured = fresh > 0 && references > 1;
-    if (measured) {
-        double residual = 0.0;
+    level /= kCarriers;
+    const double tiny = std::max(1e-10 * level, 1e-30);  // 變異數的下限（沒有雜訊的檔案量到的是 0）
+    auto apart = [](const std::array<cf, kCarriers>& x, const std::array<cf, kCarriers>& y) {  // 兩份通道估計平均每個載波差多少
+        double sum = 0.0;
+        for (int c = 0; c < kCarriers; ++c) sum += std::norm(x[static_cast<std::size_t>(c)] - y[static_cast<std::size_t>(c)]);
+        return sum / kCarriers;
+    };
+    // 量不到雜訊時用的值：最近一次量到的，再沒有就當成訊號的 1%
+    const double fallback = std::max(free_.noise_var > 0.0f ? static_cast<double>(free_.noise_var) : 0.01 * level, tiny);
+    const double old_var = tracked ? std::max(free_.ref_var * gain * gain, tiny) : 0.0;
+    double var1 = fallback, var2 = fallback;  // 頭尾兩個參考符號的雜訊（每個格點的複數雜訊變異數，FFT 輸出的刻度）
+    if (head_ok && tail_ok) {
+        var1 = var2 = std::max(0.5 * apart(back1, back2), tiny);
+    } else if (fresh == 1 && tracked) {
+        // 只有一個：它和前幾幀的平均差的，全算它的（其實有一部分是平均自己的誤差；寧可少信它一點）
+        (head_ok ? var1 : var2) = std::max(apart(head_ok ? back1 : back2, old), tiny);
+    }
+    double w_old = 0.0, w1 = 0.0, w2 = 0.0, total = 0.0;  // 各份的份量與合計
+    auto combine = [&] {
+        w1 = head_ok ? 1.0 / var1 : 0.0;
+        w2 = tail_ok ? 1.0 / var2 : 0.0;
+        const double limit = std::min(2 * kFreeAverageFrames, earlier) * (w1 + w2) / fresh;
+        w_old = tracked ? std::min(1.0 / old_var, limit) : 0.0;
+        total = w_old + w1 + w2;
         for (int c = 0; c < kCarriers; ++c) {
             const std::size_t i = static_cast<std::size_t>(c);
-            if (head_ok) residual += std::norm(back1[i] - base[i]);
-            if (tail_ok) residual += std::norm(back2[i] - base[i]);
+            base[i] = cf((cd(old[i]) * w_old + cd(back1[i]) * w1 + cd(back2[i]) * w2) / total);
         }
-        pair_var = residual / (kCarriers * fresh * (1.0 - 1.0 / references));
+    };
+    // 一個參考符號和合出來的通道差多少。它自己也在裡面，所以除以 (1 − 它的份量)；份量佔到九成以上就量不準，沿用原來的值。
+    auto against_base = [&](const std::array<cf, kCarriers>& back, double weight, double current) {
+        const double share = 1.0 - weight / total;
+        return share > 0.1 ? std::max(apart(back, base) / share, tiny) : current;
+    };
+    const bool measured = fresh > 0 && (tracked || fresh == 2);
+    double head_var = 0.0, tail_var = 0.0;  // 頭尾兩個參考符號各自量到的雜訊（給「每個符號的雜訊」用）
+    double base_var = -1.0;                 // 合出來的通道每個載波的誤差變異數；< 0 表示不知道
+    int references = std::max(earlier, 1);  // 合出來的通道相當於幾個「這一幀的參考符號」的平均
+    if (fresh > 0) {
+        combine();
+        head_var = head_ok ? against_base(back1, w1, var1) : 0.0;
+        tail_var = tail_ok ? against_base(back2, w2, var2) : 0.0;
+        if (tracked && fresh == 2 && std::max(head_var, tail_var) > kFreeUneven * std::min(head_var, tail_var)) {
+            var1 = head_var;
+            var2 = tail_var;
+            combine();
+            var1 = head_var = against_base(back1, w1, var1);
+            var2 = tail_var = against_base(back2, w2, var2);
+            combine();
+        }
+        references = std::max(1, static_cast<int>(std::lround(total * fresh / (w1 + w2))));
+        if (measured) {
+            // 合出來的通道誤差多大：各份照實際用的份量算（前幾幀的平均被上限壓低份量時，它本身並沒有變差）
+            base_var = (w_old * w_old * old_var + w1 + w2) / (total * total);
+            free_.ref_var = base_var;
+        } else {
+            free_.ref_var = fallback;  // 這次發射的第一幀只有開頭的參考符號可用：它有多吵還不知道
+        }
+    } else {
+        base = predicted;
+        if (tracked) base_var = free_.ref_var;
+    }
+    double power = 0.0;  // 一個符號所有載波的訊號功率
+    for (int c = 0; c < kCarriers; ++c) power += std::norm(base[static_cast<std::size_t>(c)]);
+    const double mean_power = power / kCarriers;
+    double pair_var = fallback;  // 這一幀的參考符號平均有多吵
+    if (measured) {
+        pair_var = ((head_ok ? head_var : 0.0) + (tail_ok ? tail_var : 0.0)) / fresh;
         free_.noise_var = static_cast<float>(pair_var);
     }
     // 留給下一幀的：對齊到這一幀實際的開頭
@@ -1462,6 +1519,10 @@ void Receiver::process_frame_free() {
     // 弱的那幾個符號會被當成和其他的一樣可信。頻帶上方沒用到的頻率只有雜訊，而且和頻帶內的雜訊同進退：
     // 每一格先除以它自己平常的大小（電台的音訊濾波器在那裡壓得多深都無所謂），平均起來就是「這個符號比平常吵幾倍」，
     // 再用參考符號量到的雜訊定出絕對的大小。
+    // 「平常的大小」和「定出絕對大小的係數」都只看最近幾幀（FreeTrack::kNoiseFrames）。兩邊的雜訊不是永遠同一個比例：
+    // FM 的訊號在門檻以下時，喀喀聲偏低頻，頻帶上方聽到的比頻帶內少十倍上下；訊號強時兩邊差不多。
+    // 整次發射一路累計的話，開頭訊號弱的那幾幀（雜訊大，份量也就大）會把係數定住，之後訊號轉強，
+    // 每個符號的雜訊還是照那個係數算，高估十倍上下，回報的訊雜比跟著偏低（2026-11-28 的實機錄音：報 23 dB，實際 31 dB）。
     std::vector<double> row_var(static_cast<std::size_t>(rows), pair_var);
     // 每個酬載符號收到的總能量是預期的幾倍（預期的是「通道 × 資料格的平均功率 1」）
     std::vector<double> energy_ratio(static_cast<std::size_t>(rows), 1.0);
@@ -1475,34 +1536,63 @@ void Receiver::process_frame_free() {
         constexpr int kBins = FreeTrack::kNullBins;
         std::vector<float> nulls;
         null_powers(t0_, rows, nulls);
-        if (fresh > 0) {  // 這裡確實有這一幀：算進「各格平常有多吵」
+        if (fresh > 0) {  // 這裡確實有這一幀：記下來，擠掉最舊的那一幀
+            FreeTrack::NoiseFrame& f = free_.noise_frames[static_cast<std::size_t>(free_.noise_next)];
+            f = FreeTrack::NoiseFrame{};
             for (int r = 0; r < rows; ++r) {
-                for (int i = 0; i < kBins; ++i) free_.null_sum[static_cast<std::size_t>(i)] += nulls[static_cast<std::size_t>(r * kBins + i)];
+                for (int i = 0; i < kBins; ++i) f.null_sum[static_cast<std::size_t>(i)] += nulls[static_cast<std::size_t>(r * kBins + i)];
             }
-            free_.null_rows += rows;
+            f.rows = rows;
+            auto keep_reference = [&](int row, double var) {  // 這個參考符號在頻帶內量到的雜訊，和它在頻帶上方各格的能量
+                const std::size_t j = static_cast<std::size_t>(f.references++);
+                f.noise[j] = var;
+                for (int i = 0; i < kBins; ++i) f.nulls[j][static_cast<std::size_t>(i)] = nulls[static_cast<std::size_t>(row * kBins + i)];
+            };
+            if (measured && head_ok) keep_reference(1, head_var);
+            if (measured && tail_ok) keep_reference(tail, tail_var);
+            free_.noise_next = (free_.noise_next + 1) % FreeTrack::kNoiseFrames;
+            free_.noise_count = std::min(free_.noise_count + 1, FreeTrack::kNoiseFrames);
         }
+        // 各格平常有多吵：留著的那幾幀所有符號的平均
         std::array<double, kBins> level{};
         double level_total = 0.0;
-        bool usable = free_.null_rows > 0;
+        long level_rows = 0;
+        for (int k = 0; k < free_.noise_count; ++k) {
+            const FreeTrack::NoiseFrame& f = free_.noise_frames[static_cast<std::size_t>(k)];
+            for (int i = 0; i < kBins; ++i) level[static_cast<std::size_t>(i)] += f.null_sum[static_cast<std::size_t>(i)];
+            level_rows += f.rows;
+        }
+        bool usable = level_rows > 0;
         for (int i = 0; usable && i < kBins; ++i) {
-            level[static_cast<std::size_t>(i)] = free_.null_sum[static_cast<std::size_t>(i)] / static_cast<double>(free_.null_rows);
+            level[static_cast<std::size_t>(i)] /= static_cast<double>(level_rows);
             level_total += level[static_cast<std::size_t>(i)];
             if (!(level[static_cast<std::size_t>(i)] > 0.0)) usable = false;
         }
         // 解析訊號的功率是原來取樣的 4 倍（只留正頻率、振幅乘 2），比的時候換成同一個刻度
         if (usable && level_total >= kFreeNullFloor * power / 4.0) {
-            std::vector<double> relative(static_cast<std::size_t>(rows), 1.0);  // 每個符號比平常吵幾倍
-            for (int r = 0; r < rows; ++r) {
+            auto times_usual = [&](const float* bins) {  // 這幾格合起來比平常吵幾倍
                 double sum = 0.0;
-                for (int i = 0; i < kBins; ++i) sum += nulls[static_cast<std::size_t>(r * kBins + i)] / level[static_cast<std::size_t>(i)];
-                relative[static_cast<std::size_t>(r)] = sum / kBins;
+                for (int i = 0; i < kBins; ++i) sum += bins[i] / level[static_cast<std::size_t>(i)];
+                return sum / kBins;
+            };
+            std::vector<double> relative(static_cast<std::size_t>(rows), 1.0);  // 每個符號比平常吵幾倍
+            for (int r = 0; r < rows; ++r) relative[static_cast<std::size_t>(r)] = times_usual(&nulls[static_cast<std::size_t>(r * kBins)]);
+            // 換算的係數：留著的每個參考符號各有一個「頻帶內量到的雜訊 ÷ 它比平常吵幾倍」，取幾何平均。
+            // 每個參考符號的份量一樣；把兩邊各自加起來再相除的話，最吵的那一個說了算。
+            double log_sum = 0.0;
+            int counted = 0;
+            for (int k = 0; k < free_.noise_count; ++k) {
+                const FreeTrack::NoiseFrame& f = free_.noise_frames[static_cast<std::size_t>(k)];
+                for (int j = 0; j < f.references; ++j) {
+                    const double var = f.noise[static_cast<std::size_t>(j)];
+                    const double times = times_usual(f.nulls[static_cast<std::size_t>(j)].data());
+                    if (!(var > 0.0) || !(times > 0.0)) continue;
+                    log_sum += std::log(var / times);
+                    ++counted;
+                }
             }
-            if (measured) {
-                free_.scale_num += pair_var * fresh;
-                free_.scale_den += (head_ok ? relative[1] : 0.0) + (tail_ok ? relative[static_cast<std::size_t>(tail)] : 0.0);
-            }
-            if (free_.scale_den > 0.0) {
-                const double scale = free_.scale_num / free_.scale_den;
+            if (counted > 0) {
+                const double scale = std::exp(log_sum / counted);
                 for (int r = 0; r < rows; ++r) row_var[static_cast<std::size_t>(r)] = scale * relative[static_cast<std::size_t>(r)];
                 profiled = true;
                 // 被雜訊的突波打壞的符號。FM 的訊號掉到門檻以下時出現的喀喀聲能量集中在低頻，頻帶上方聽到的比頻帶內少，
@@ -1632,14 +1722,16 @@ void Receiver::process_frame_free() {
     // 等化。第 row 列離開頭的參考符號 row − 1 個符號，時間差與相位照比例內插。
     std::vector<cf> cells(static_cast<std::size_t>(mode.data_cells()));
     std::vector<float> noise(cells.size());
-    const double estimate_gain = 1.0 / references;  // 通道估計的誤差：等化之後多出這麼多倍的雜訊
+    // 通道估計自己的誤差也會進到等化出來的值裡：知道它多大就直接加上去；不知道（這次發射的第一幀只有一個參考符號）
+    // 就當成和那個符號的雜訊一樣大。
     std::size_t n = 0;
     for (int row = payload_first; row < payload_last; ++row) {
         const double alpha = static_cast<double>(row - 1) / span;
         const double step = -kTwoPi * (tau0 + (tau1 - tau0) * alpha) / kFftSize;
         cd rot = std::polar(1.0, step * kFirstBin + phi0 + dphi * alpha);
         const cd inc = std::polar(1.0, step);
-        const float var = static_cast<float>(std::max(row_var[static_cast<std::size_t>(row)], floor_var) * (1.0 + estimate_gain));
+        const double row_noise = std::max(row_var[static_cast<std::size_t>(row)], floor_var);
+        const float var = static_cast<float>(base_var >= 0.0 ? row_noise + base_var : 2.0 * row_noise);
         const int k = row_class[static_cast<std::size_t>(row)];
         const float* across = k >= 0 && shaped[static_cast<std::size_t>(k)] ? shape[static_cast<std::size_t>(k)].data() : nullptr;
         for (int c = 0; c < kCarriers; ++c) {

@@ -1018,6 +1018,92 @@ void test_free_noise_bursts() {
     std::printf("  模式 5、一陣一陣偏低頻的強雜訊：%d/%d、%.2f dB（不量各載波的雜訊：%d/%d、%.2f dB）\n", on.decoded, frames, on.psnr, off.decoded, frames, off.psnr);
 }
 
+// 雜訊的樣子中途變了（2026-11-28 出門實測遇到的：訊號先弱後強）。同一次發射的頭幾幀雜訊偏低頻（FM 的訊號在門檻附近的樣子），
+// 之後變成小而平的白雜訊。偏低頻的雜訊在頻帶上方聽到的比頻帶內少得多；「頻帶上方聽到的」換算成頻帶內雜訊的係數
+// 如果整次發射一路累計，就被頭幾幀定住，後面的幀回報的訊雜比低七八 dB，而且要過幾十幀才慢慢回來。
+// 只看最近幾幀的話，過了那幾幀回報的就要是對的；畫面也都要收到。
+// （頭幾幀的雜訊只比訊號小 10 dB，不放更大：參考符號太吵的話，跨幀平均的通道要十幾幀才乾淨，那是另一件事。）
+void test_free_snr_follows() {
+    const Mode& m = *find_mode(5);
+    const int early_frames = 6, late_frames = 14, frames = early_frames + late_frames, settle = 8;
+    const std::vector<float> signal = burst(m, frames, "N0CALL");
+    const double power = mean_power(signal);
+    const std::size_t lead = 6000;
+    const double late_db = 20.0;  // 後面那一段的訊雜比（3 kHz 的雜訊頻寬；白雜訊在 12 kHz 取樣下有一半落在 3 kHz 裡）
+    std::vector<float> audio = white_noise(signal.size() + lead + 12000, 2.0 * power * std::pow(10.0, -late_db / 10.0), 41);
+    const std::vector<float> low = low_heavy_noise(audio.size(), power * std::pow(10.0, -1.0), 42);
+    const std::size_t change = lead + static_cast<std::size_t>(early_frames) * static_cast<std::size_t>(m.frame_samples());
+    for (std::size_t i = 0; i < change; ++i) audio[i] += low[i];
+    for (std::size_t i = 0; i < signal.size(); ++i) audio[lead + i] += signal[i];
+    Receiver rx;
+    attach_models(rx);
+    int early = 0, late = 0, settled = 0;
+    double early_db = 0.0, settled_db = 0.0, worst = 0.0;
+    for (const RxFrame& f : run_receiver(rx, audio)) {
+        if (!(f.decoded && f.header_ok && f.callsign == "N0CALL" && f.mode_id == m.id) || f.sequence < 0) continue;
+        if (f.sequence < early_frames) {
+            ++early;
+            early_db += f.snr_db;
+            continue;
+        }
+        ++late;
+        if (f.sequence < early_frames + settle) continue;
+        ++settled;
+        settled_db += f.snr_db;
+        worst = std::max(worst, std::fabs(static_cast<double>(f.snr_db) - late_db));
+    }
+    CHECK_EQ(early, early_frames);  // 頭幾幀都要收到：它們量到的東西才會留在接收機裡
+    CHECK_EQ(late, late_frames);
+    CHECK_EQ(settled, late_frames - settle);
+    if (early > 0) early_db /= early;
+    if (settled > 0) settled_db /= settled;
+    CHECK_NEAR(settled_db, late_db, 1.5);
+    CHECK(worst < 2.5);
+    std::printf("  模式 5、頭 %d 幀偏低頻的雜訊（回報 %.1f dB）、之後白雜訊 %.0f dB：過了 %d 幀之後回報 %.1f dB（最多差 %.1f dB）\n",
+                early_frames, early_db, late_db, settle, settled_db, worst);
+}
+
+// 開頭很吵、之後變乾淨（同一次出門實測找到的第二件事）。頭幾幀訊號和偏低頻的雜訊一樣大，參考符號很吵；
+// 跨幀平均的通道如果每個參考符號的份量都一樣，要十幾幀才乾淨，雜訊變小之後的頭幾幀明明訊號很好，畫面卻差一兩 dB。
+// 照每個參考符號當時有多吵來加權的話，雜訊一變小，新的參考符號就說了算。
+// 比的對象是同一段訊號從頭到尾都只有那個小的白雜訊時，同樣那幾幀的畫面。
+void test_free_clean_after_noisy_start() {
+    const Mode& m = *find_mode(5);
+    const int noisy_frames = 6, frames = 12, compared = 4;  // 比的是雜訊變小之後的頭 4 幀
+    const std::vector<float> signal = burst(m, frames, "N0CALL");
+    const double power = mean_power(signal);
+    const std::size_t lead = 6000;
+    const std::vector<float> quiet = white_noise(signal.size() + lead + 12000, 2.0 * power * std::pow(10.0, -2.6), 51);  // 26 dB
+    const std::vector<float> loud = low_heavy_noise(quiet.size(), power, 52);
+    const std::size_t change = lead + static_cast<std::size_t>(noisy_frames) * static_cast<std::size_t>(m.frame_samples());
+    auto after_change = [&](bool noisy_start) {  // 雜訊變小之後那幾幀：收到幾張、平均 PSNR
+        std::vector<float> audio = quiet;
+        if (noisy_start) {
+            for (std::size_t i = 0; i < change; ++i) audio[i] += loud[i];
+        }
+        for (std::size_t i = 0; i < signal.size(); ++i) audio[lead + i] += signal[i];
+        Receiver rx;
+        attach_models(rx);
+        NoiseRun out;
+        for (const RxFrame& f : run_receiver(rx, audio)) {
+            if (!(f.decoded && f.header_ok && f.callsign == "N0CALL" && f.mode_id == m.id)) continue;
+            if (f.sequence < noisy_frames || f.sequence >= noisy_frames + compared) continue;
+            const auto rgb = test_images::load(test_images::kNames[f.sequence % 3], m.image_width, m.image_height);
+            if (f.rgb.size() != rgb.size()) continue;
+            ++out.decoded;
+            out.psnr += test_images::psnr(f.rgb, rgb);
+        }
+        if (out.decoded > 0) out.psnr /= out.decoded;
+        return out;
+    };
+    const NoiseRun steady = after_change(false), recovered = after_change(true);
+    CHECK_EQ(steady.decoded, compared);
+    CHECK_EQ(recovered.decoded, compared);
+    CHECK(recovered.psnr > steady.psnr - 0.15);
+    std::printf("  模式 5、頭 %d 幀訊號和偏低頻的雜訊一樣大、之後 26 dB：接下來的 %d 幀 %.2f dB（從頭到尾都是 26 dB 的話 %.2f dB）\n",
+                noisy_frames, compared, recovered.psnr, steady.psnr);
+}
+
 // 連續兩幀的前導符號都被雜訊打壞，而且其中第一幀的尾端附近還有幾個很像 S0 的符號（別人按了一下發射，或雜訊剛好像）。
 // 第一幀照節拍收下來之後，它結尾的參考符號對得上，就是完整送到最後的一幀：下一幀也要照節拍接著收，
 // 不能因為幀尾那幾個符號還來不及判定就停下來。六幀都要收到。
@@ -1293,6 +1379,8 @@ int main() {
     test_free_truncated_picture();
     test_free_low_heavy_noise();
     test_free_noise_bursts();
+    test_free_snr_follows();
+    test_free_clean_after_noisy_start();
     test_free_follow_through_damage();
     test_audio_break();
     test_late_next_frame();

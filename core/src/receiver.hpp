@@ -334,15 +334,27 @@ private:
         static constexpr int kNullBins = 28;        // 頻帶上方沒用到的頻率：第 58–85 格（2719–3984 Hz）
         int frames = 0;                             // ref 是幾幀平均出來的；0 表示還沒有（這次發射的第一幀）
         std::array<cf, kCarriers> ref{};            // 平均的通道（含參考符號的振幅），對齊到最近一幀開頭的參考符號
+        double ref_var = 0.0;                       // ref 每個載波的誤差變異數（估出來的；平均時照它決定前幾幀佔多少份量）
         // 從最近一幀開頭的參考符號到下一幀開頭的，訊號預計再晚幾個取樣（已經扣掉視窗跟著移動的整數部分）、相位再轉多少
         double pending_shift = 0.0;
         double pending_phase = 0.0;
         double drift = 0.0;                         // 時脈漂移：每過一個符號，訊號比照著幀長算的位置晚到幾個取樣（最近幾幀的平均）
         int drift_count = 0;                        // drift 是幾幀平均出來的
         double fraction = 0.0;                      // 幀起點還沒算進去的小數部分（取樣數）
-        std::array<double, kNullBins> null_sum{};   // 頻帶外各格的能量總和與列數：各格平常有多吵
-        long null_rows = 0;
-        double scale_num = 0.0, scale_den = 0.0;    // 頻帶外的相對大小換算成頻帶內雜訊變異數的係數（分子、分母）
+        // 每個符號的雜訊要用的（見 process_frame_free「每個符號的雜訊」）：最近幾幀在頻帶上方各格聽到的能量，
+        // 以及那幾幀的參考符號——頻帶內量到的雜訊，和同一個符號在頻帶上方的能量。只留最近幾幀
+        // （和通道平均的幀數一樣多）：訊號由弱轉強或由強轉弱之後，「平常有多吵」和兩邊怎麼換算都要跟著變。
+        static constexpr int kNoiseFrames = 8;
+        struct NoiseFrame {
+            std::array<double, kNullBins> null_sum{};             // 這一幀所有符號在頻帶上方各格的能量合計
+            int rows = 0;                                         // 合計了幾個符號
+            int references = 0;                                   // 量到雜訊的參考符號有幾個（0–2）
+            std::array<double, 2> noise{};                        // 它們各自在頻帶內量到的雜訊變異數
+            std::array<std::array<float, kNullBins>, 2> nulls{};  // 它們各自在頻帶上方各格的能量
+        };
+        std::array<NoiseFrame, kNoiseFrames> noise_frames{};
+        int noise_count = 0;  // 留著幾幀
+        int noise_next = 0;   // 下一幀寫在哪一個位置
         float noise_var = 0.0f;                     // 最近一次量到的雜訊變異數（這一幀沒有參考符號可以量時沿用）
         // 各載波的雜訊形狀：符號照吵雜的程度分成幾級，各級分開累計（見 process_frame_free「各載波的雜訊」）。
         // 每過一幀，之前累計的份量會打折，所以是最近幾幀的加權和。
